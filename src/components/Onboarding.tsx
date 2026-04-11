@@ -1,0 +1,295 @@
+import React, { useState, useEffect } from 'react';
+import { Box, Text, useInput, useStdout } from 'ink';
+import TextInput from 'ink-text-input';
+import { fetchAvailableModels, detectLocalBackend, type DetectedModel, type LocalBackend } from '../api.js';
+import type { SquirlConfig } from '../config.js';
+
+type Step = 'welcome' | 'provider' | 'anthropic-key' | 'openai-key' | 'local-url' | 'local-detect' | 'local-pick' | 'local-model' | 'done';
+type Provider = 'anthropic' | 'openai' | 'local';
+
+const PROVIDERS: { id: Provider; label: string; description: string }[] = [
+  { id: 'anthropic', label: 'Anthropic (Claude)', description: 'Claude Sonnet, Opus, Haiku' },
+  { id: 'openai', label: 'OpenAI', description: 'GPT-4o, o3-mini' },
+  { id: 'local', label: 'Local', description: 'Ollama, vLLM, etc.' },
+];
+
+interface OnboardingProps {
+  onComplete: (config: SquirlConfig) => void;
+}
+
+export const Onboarding: React.FC<OnboardingProps> = ({ onComplete }) => {
+  const { stdout } = useStdout();
+  const width = Math.min(stdout.columns ?? 80, 64);
+
+  const [step, setStep] = useState<Step>('welcome');
+  const [providerIdx, setProviderIdx] = useState(0);
+  const [selectedProvider, setSelectedProvider] = useState<Provider>('anthropic');
+  const [anthropicKey, setAnthropicKey] = useState('');
+  const [openaiKey, setOpenaiKey] = useState('');
+  const [localModelName, setLocalModelName] = useState('');
+  const [localUrl, setLocalUrl] = useState('http://localhost:8000/v1');
+  const [detectedModels, setDetectedModels] = useState<DetectedModel[]>([]);
+  const [modelPickIdx, setModelPickIdx] = useState(0);
+  const [alsoConfigureOpenai, setAlsoConfigureOpenai] = useState(false);
+  const [alsoConfigureAnthropic, setAlsoConfigureAnthropic] = useState(false);
+  const [detectedBackend, setDetectedBackend] = useState<LocalBackend>('unknown');
+
+  // Auto-detect backend and models when entering the detect step
+  useEffect(() => {
+    if (step !== 'local-detect') return;
+    let cancelled = false;
+    (async () => {
+      const backend = await detectLocalBackend(localUrl);
+      if (cancelled) return;
+      setDetectedBackend(backend);
+      const models = await fetchAvailableModels(localUrl, backend);
+      if (cancelled) return;
+      if (models.length > 0) {
+        setDetectedModels(models);
+        setModelPickIdx(0);
+        setStep('local-pick');
+      } else {
+        setStep('local-model');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [step, localUrl]);
+
+  useInput((input, key) => {
+    if (step === 'welcome') {
+      if (key.return) setStep('provider');
+      return;
+    }
+
+    if (step === 'provider') {
+      if (key.upArrow) setProviderIdx((i) => Math.max(0, i - 1));
+      if (key.downArrow) setProviderIdx((i) => Math.min(PROVIDERS.length - 1, i + 1));
+      if (key.return) {
+        const provider = PROVIDERS[providerIdx]!.id;
+        setSelectedProvider(provider);
+        if (provider === 'anthropic') setStep('anthropic-key');
+        else if (provider === 'openai') setStep('openai-key');
+        else setStep('local-url');
+      }
+      return;
+    }
+
+    if (step === 'local-pick') {
+      if (key.upArrow) setModelPickIdx((i) => Math.max(0, i - 1));
+      if (key.downArrow) setModelPickIdx((i) => Math.min(detectedModels.length - 1, i + 1));
+      if (key.return) {
+        setLocalModelName(detectedModels[modelPickIdx]!.id);
+        setAlsoConfigureAnthropic(true);
+        setStep('anthropic-key');
+      }
+      return;
+    }
+
+    if (step === 'done') {
+      if (key.return) finalize();
+    }
+  });
+
+  const handleAnthropicKeySubmit = (val: string) => {
+    setAnthropicKey(val);
+    if (selectedProvider === 'anthropic') {
+      setAlsoConfigureOpenai(true);
+      setStep('openai-key');
+    } else {
+      setStep('done');
+    }
+  };
+
+  const handleOpenaiKeySubmit = (val: string) => {
+    setOpenaiKey(val);
+    if (selectedProvider === 'openai') {
+      setAlsoConfigureAnthropic(true);
+      setStep('anthropic-key');
+    } else {
+      setStep('done');
+    }
+  };
+
+  const handleLocalUrlSubmit = (val: string) => {
+    setLocalUrl(val || localUrl);
+    setStep('local-detect');
+  };
+
+  const handleLocalModelSubmit = (val: string) => {
+    setLocalModelName(val || localModelName);
+    setAlsoConfigureAnthropic(true);
+    setStep('anthropic-key');
+  };
+
+  const finalize = () => {
+    const config: SquirlConfig = { defaultProvider: selectedProvider };
+
+    if (anthropicKey) config.anthropicApiKey = anthropicKey;
+    if (openaiKey) config.openaiApiKey = openaiKey;
+    if (selectedProvider === 'local') {
+      config.localBaseUrl = localUrl;
+      config.localBackend = detectedBackend;
+    }
+
+    if (selectedProvider === 'anthropic') config.defaultModel = 'claude-sonnet-4-6';
+    else if (selectedProvider === 'openai') config.defaultModel = 'gpt-4o';
+    else if (selectedProvider === 'local' && localModelName) config.defaultModel = localModelName;
+
+    onComplete(config);
+  };
+
+  return (
+    <Box flexDirection="column" alignItems="center" justifyContent="center" height="100%" paddingTop={2}>
+      <Box
+        flexDirection="column"
+        width={width}
+        borderStyle="round"
+        borderColor="cyan"
+        paddingX={2}
+        paddingY={1}
+        gap={1}
+      >
+        {step === 'welcome' && (
+          <>
+            <Text bold color="cyan">Welcome to squirl</Text>
+            <Text>Let's get you set up. This will create a config file at</Text>
+            <Text dimColor>~/.squirl/config.json</Text>
+            <Text> </Text>
+            <Text dimColor>Press enter to continue</Text>
+          </>
+        )}
+
+        {step === 'provider' && (
+          <>
+            <Text bold>Choose your default provider</Text>
+            <Text> </Text>
+            {PROVIDERS.map((p, i) => (
+              <Box key={p.id} paddingLeft={1}>
+                <Text color={i === providerIdx ? 'cyan' : undefined}>
+                  {i === providerIdx ? '❯ ' : '  '}
+                  <Text bold>{p.label}</Text>
+                  <Text dimColor>{'  '}{p.description}</Text>
+                </Text>
+              </Box>
+            ))}
+            <Text> </Text>
+            <Text dimColor>↑↓ navigate  enter select</Text>
+          </>
+        )}
+
+        {step === 'anthropic-key' && (
+          <>
+            <Text bold>
+              {alsoConfigureAnthropic || selectedProvider === 'local'
+                ? 'Anthropic API key (optional, press enter to skip)'
+                : 'Enter your Anthropic API key'}
+            </Text>
+            <Text dimColor>Get one at console.anthropic.com</Text>
+            <Box paddingTop={1}>
+              <Text color="green">Key: </Text>
+              <TextInput
+                value={anthropicKey}
+                onChange={setAnthropicKey}
+                onSubmit={handleAnthropicKeySubmit}
+                mask="*"
+                focus={true}
+              />
+            </Box>
+          </>
+        )}
+
+        {step === 'openai-key' && (
+          <>
+            <Text bold>
+              {alsoConfigureOpenai
+                ? 'OpenAI API key (optional, press enter to skip)'
+                : 'Enter your OpenAI API key'}
+            </Text>
+            <Text dimColor>Get one at platform.openai.com</Text>
+            <Box paddingTop={1}>
+              <Text color="green">Key: </Text>
+              <TextInput
+                value={openaiKey}
+                onChange={setOpenaiKey}
+                onSubmit={handleOpenaiKeySubmit}
+                mask="*"
+                focus={true}
+              />
+            </Box>
+          </>
+        )}
+
+        {step === 'local-url' && (
+          <>
+            <Text bold>Local model base URL</Text>
+            <Text dimColor>e.g. Ollama: localhost:11434/v1, vLLM: localhost:8000/v1</Text>
+            <Box paddingTop={1}>
+              <Text color="green">URL: </Text>
+              <TextInput
+                value={localUrl}
+                onChange={setLocalUrl}
+                onSubmit={handleLocalUrlSubmit}
+                focus={true}
+              />
+            </Box>
+          </>
+        )}
+
+        {step === 'local-detect' && (
+          <>
+            <Text bold>Detecting available models...</Text>
+            <Text dimColor>Querying {localUrl}/models</Text>
+          </>
+        )}
+
+        {step === 'local-pick' && (
+          <>
+            <Text bold>Select a model</Text>
+            <Text dimColor>Found {detectedModels.length} model(s) on the server</Text>
+            <Text> </Text>
+            {detectedModels.map((m, i) => (
+              <Box key={m.id} paddingLeft={1}>
+                <Text color={i === modelPickIdx ? 'cyan' : undefined}>
+                  {i === modelPickIdx ? '❯ ' : '  '}{m.id}
+                </Text>
+              </Box>
+            ))}
+            <Text> </Text>
+            <Text dimColor>↑↓ navigate  enter select</Text>
+          </>
+        )}
+
+        {step === 'local-model' && (
+          <>
+            <Text bold>Enter model name</Text>
+            <Text dimColor>Could not auto-detect models. Enter the name manually (e.g. llama3, mistral)</Text>
+            <Box paddingTop={1}>
+              <Text color="green">Model: </Text>
+              <TextInput
+                value={localModelName}
+                onChange={setLocalModelName}
+                onSubmit={handleLocalModelSubmit}
+                focus={true}
+              />
+            </Box>
+          </>
+        )}
+
+        {step === 'done' && (
+          <>
+            <Text bold color="green">Setup complete!</Text>
+            <Text> </Text>
+            <Text>Provider: <Text bold>{selectedProvider}</Text></Text>
+            {anthropicKey && <Text>Anthropic key: <Text dimColor>configured</Text></Text>}
+            {openaiKey && <Text>OpenAI key: <Text dimColor>configured</Text></Text>}
+            {selectedProvider === 'local' && <Text>Local model: <Text dimColor>{localModelName || '(not set)'}</Text></Text>}
+            {selectedProvider === 'local' && <Text>Local URL: <Text dimColor>{localUrl}</Text></Text>}
+            <Text> </Text>
+            <Text dimColor>Config will be saved to ~/.squirl/config.json</Text>
+            <Text dimColor>Press enter to start</Text>
+          </>
+        )}
+      </Box>
+    </Box>
+  );
+};
