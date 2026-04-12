@@ -1,6 +1,8 @@
 import React from 'react';
 import { Box, Text, useStdout } from 'ink';
 import { getCommands } from '../commands/registry.js';
+import { IndexStatus } from './IndexStatus.js';
+import type { StatusEmitter } from '../search/status.js';
 
 interface StatusBarProps {
   tokenCount?: number;
@@ -12,6 +14,7 @@ interface StatusBarProps {
   workingDir?: string;
   commandQuery?: string | null;
   commandIndex?: number;
+  statusEmitter?: StatusEmitter | null;
 }
 
 function formatTokens(n: number): string {
@@ -19,7 +22,7 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-export const StatusBar: React.FC<StatusBarProps> = React.memo(({ tokenCount = 0, contextWindow = 0, isStreaming = false, toolStatus = '', tokensPerSecond = 0, modelName = '', workingDir = '', commandQuery = null, commandIndex = 0 }) => {
+export const StatusBar: React.FC<StatusBarProps> = React.memo(({ tokenCount = 0, contextWindow = 0, isStreaming = false, toolStatus = '', tokensPerSecond = 0, modelName = '', workingDir = '', commandQuery = null, commandIndex = 0, statusEmitter = null }) => {
   const { stdout } = useStdout();
   const width = stdout.columns ?? 80;
 
@@ -51,7 +54,10 @@ export const StatusBar: React.FC<StatusBarProps> = React.memo(({ tokenCount = 0,
         context: {formatTokens(tokenCount)}/{formatTokens(contextWindow)}
         {'  '}{tokensPerSecond} t/s
       </Text>
-      <Text dimColor>{modelName}{'  '}{workingDir}</Text>
+      <Box>
+        {statusEmitter && <IndexStatus statusEmitter={statusEmitter} />}
+        <Text dimColor>{'  '}{modelName}{'  '}{workingDir}</Text>
+      </Box>
     </Box>
   );
 });
