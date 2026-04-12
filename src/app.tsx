@@ -8,7 +8,7 @@ import { ModelPicker } from './components/ModelPicker.js';
 import { ContextPicker } from './components/ContextPicker.js';
 import { Orchestrator } from './orchestrator.js';
 import { getModelConfig } from './model-config.js';
-import { loadHistory, appendMessage, updateLastMessage } from './history.js';
+import { loadHistory, appendMessage, updateLastMessage, readEntries, getAllHistoryFiles } from './history.js';
 import { matchCommand, filterCommands } from './commands/registry.js';
 import { estimateTokens } from './context/token-estimator.js';
 import { buildSystemPrompt } from './context/system-prompt.js';
@@ -17,6 +17,13 @@ import { platform } from 'node:os';
 import { fetchAvailableModels, detectLocalBackend, BACKEND_DISPLAY_NAMES } from './api.js';
 import type { SelectedModel } from './components/ModelPicker.js';
 import type { SquirlConfig } from './config.js';
+import { createEmbedder } from './search/embedders/index.js';
+import { createVectorStore } from './search/stores/index.js';
+import { IngestQueue } from './search/ingest-queue.js';
+import { StatusEmitter } from './search/status.js';
+import { messagesToTurnPairs } from './search/turn-pair.js';
+import { backfillFromHistory } from './search/backfill.js';
+import type { VectorStore } from './search/types.js';
 import type { Message, AssistantMessage } from './types.js';
 
 function defaultModelFromConfig(config?: SquirlConfig): SelectedModel {
@@ -57,6 +64,10 @@ export const App: React.FC<AppProps> = ({
   const streamBufferRef = useRef('');
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const orchestratorRef = useRef(new Orchestrator(workingDir));
+  const statusEmitterRef = useRef(new StatusEmitter());
+  const ingestQueueRef = useRef<IngestQueue | null>(null);
+  const embedderRef = useRef<ReturnType<typeof createEmbedder> | null>(null);
+  const vectorStoreRef = useRef<VectorStore | null>(null);
   const [selectedModel, setSelectedModel] = useState<SelectedModel>(() => defaultModelFromConfig(config));
   const historyIndexRef = useRef(-1);
   const savedInputRef = useRef('');
@@ -116,6 +127,40 @@ export const App: React.FC<AppProps> = ({
     }
     setTokenCount(total);
   }, [messages, selectedModel.id, workingDir, isStreaming]);
+
+  useEffect(() => {
+    if (!config?.index?.enabled) return;
+    let cancelled = false;
+
+    (async () => {
+      const embedder = createEmbedder({
+        type: config.index!.embedder,
+        apiKey: config.openaiApiKey,
+        model: config.index!.embedderModel,
+        baseUrl: config.index!.ollamaUrl,
+      });
+      const store = await createVectorStore({
+        type: config.index!.store,
+        chromaUrl: config.index!.chromaUrl,
+        chromaAuthToken: config.index!.chromaAuthToken,
+        collection: config.index!.collection,
+      });
+
+      if (cancelled) { await store.close(); return; }
+
+      embedderRef.current = embedder;
+      vectorStoreRef.current = store;
+
+      const queue = new IngestQueue(embedder, store, statusEmitterRef.current);
+      ingestQueueRef.current = queue;
+
+      const files = getAllHistoryFiles();
+      const allEntries = files.flatMap((f) => readEntries(f));
+      await backfillFromHistory(queue, store, allEntries);
+    })();
+
+    return () => { cancelled = true; };
+  }, [config?.index?.enabled]);
 
   const handleInputChange = useCallback((v: string) => {
     setInputValue(v);
@@ -216,6 +261,10 @@ export const App: React.FC<AppProps> = ({
         modelId: selectedModel.id,
         setMessages,
         openContextPicker: () => setIsContextMenuOpen(true),
+        embedder: embedderRef.current ?? undefined,
+        vectorStore: vectorStoreRef.current ?? undefined,
+        indexEnabled: config?.index?.enabled ?? false,
+        recallQuery: value.trim().startsWith('/recall ') ? value.trim().slice(8).trim() : '',
       });
       return;
     }
@@ -308,6 +357,10 @@ export const App: React.FC<AppProps> = ({
         if (msg.role === 'assistant' && msg.isStreaming) continue;
         appendMessage(msg);
       }
+      if (ingestQueueRef.current && config?.index?.enabled) {
+        const pairs = messagesToTurnPairs(newMessages, 'current', 'squirl');
+        for (const pair of pairs) ingestQueueRef.current.enqueue(pair);
+      }
     }).finally(() => {
       setIsStreaming(false);
       setToolStatus('');
@@ -351,7 +404,7 @@ export const App: React.FC<AppProps> = ({
         onSubmit={handleSubmit}
         focus={!isModelMenuOpen && !isContextMenuOpen}
       />
-      <StatusBar tokenCount={tokenCount} contextWindow={contextWindow} isStreaming={isStreaming} toolStatus={toolStatus} tokensPerSecond={tokensPerSecond} modelName={modelDisplay} workingDir={workingDir} commandQuery={commandQuery} commandIndex={commandIndex} />
+      <StatusBar tokenCount={tokenCount} contextWindow={contextWindow} isStreaming={isStreaming} toolStatus={toolStatus} tokensPerSecond={tokensPerSecond} modelName={modelDisplay} workingDir={workingDir} commandQuery={commandQuery} commandIndex={commandIndex} statusEmitter={statusEmitterRef.current} />
     </Box>
   );
 };

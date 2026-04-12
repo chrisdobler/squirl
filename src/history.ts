@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, appendFileSync, existsSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import type { Message } from './types.js';
@@ -16,7 +16,7 @@ function ensureDir(): void {
   mkdirSync(HISTORY_DIR, { recursive: true });
 }
 
-function readEntries(filePath: string): LogEntry[] {
+export function readEntries(filePath: string): LogEntry[] {
   if (!existsSync(filePath)) return [];
   const content = readFileSync(filePath, 'utf-8').trim();
   if (!content) return [];
@@ -24,6 +24,13 @@ function readEntries(filePath: string): LogEntry[] {
     try { return [JSON.parse(line) as LogEntry]; }
     catch { return []; }
   });
+}
+
+export function getAllHistoryFiles(): string[] {
+  ensureDir();
+  return readdirSync(HISTORY_DIR)
+    .filter((f) => f.endsWith('.jsonl'))
+    .map((f) => join(HISTORY_DIR, f));
 }
 
 function dateKey(timestamp: string): string {
