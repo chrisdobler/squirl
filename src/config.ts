@@ -11,6 +11,16 @@ export interface SquirlConfig {
   defaultModel?: string;
   localBaseUrl?: string;
   localBackend?: LocalBackend;
+  index?: {
+    enabled: boolean;
+    store: 'local-chroma' | 'remote-chroma' | 'null';
+    chromaUrl?: string;
+    chromaAuthToken?: string;
+    collection?: string;
+    embedder: 'openai' | 'ollama';
+    embedderModel?: string;
+    ollamaUrl?: string;
+  };
 }
 
 const CONFIG_DIR = join(homedir(), '.squirl');
