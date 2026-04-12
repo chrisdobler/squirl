@@ -1,6 +1,8 @@
 import { buildSystemPrompt } from '../context/system-prompt.js';
 import { getModelConfig } from '../model-config.js';
 import { platform } from 'node:os';
+import { recall } from '../search/recall.js';
+import type { Embedder, VectorStore } from '../search/types.js';
 import type { Orchestrator } from '../orchestrator.js';
 import type { Message } from '../types.js';
 
@@ -11,6 +13,10 @@ export interface CommandContext {
   modelId: string;
   setMessages: (fn: (prev: Message[]) => Message[]) => void;
   openContextPicker: () => void;
+  embedder?: Embedder;
+  vectorStore?: VectorStore;
+  indexEnabled?: boolean;
+  recallQuery?: string;
 }
 
 export interface SlashCommand {
@@ -47,6 +53,39 @@ const commands: SlashCommand[] = [
         toolCallId: 'system-prompt',
         toolName: '/system',
         content,
+      }]);
+    },
+  },
+  {
+    name: 'recall',
+    description: 'Search past conversations semantically',
+    execute: async (ctx) => {
+      if (!ctx.indexEnabled || !ctx.embedder || !ctx.vectorStore) {
+        ctx.setMessages((prev) => [...prev, {
+          id: crypto.randomUUID(), role: 'tool' as const,
+          toolCallId: 'recall', toolName: '/recall',
+          content: 'Index not enabled. Add index config to ~/.squirl/config.json and run docker compose up -d',
+        }]);
+        return;
+      }
+      if (!ctx.recallQuery) {
+        ctx.setMessages((prev) => [...prev, {
+          id: crypto.randomUUID(), role: 'tool' as const,
+          toolCallId: 'recall', toolName: '/recall',
+          content: 'Usage: /recall <query>',
+        }]);
+        return;
+      }
+      const results = await recall(ctx.recallQuery, ctx.embedder, ctx.vectorStore, 5);
+      const formatted = results.length === 0
+        ? 'No results found.'
+        : results.map((r, i) =>
+          `${i + 1}. [${r.turnPair.source}] ${r.turnPair.timestamp.slice(0, 10)} (score: ${r.score.toFixed(3)})\n   Q: ${r.turnPair.userText.slice(0, 100)}\n   A: ${r.turnPair.assistantText.slice(0, 200)}`
+        ).join('\n\n');
+      ctx.setMessages((prev) => [...prev, {
+        id: crypto.randomUUID(), role: 'tool' as const,
+        toolCallId: 'recall', toolName: '/recall',
+        content: formatted,
       }]);
     },
   },
