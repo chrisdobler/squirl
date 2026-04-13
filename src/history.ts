@@ -11,6 +11,7 @@ interface LogEntry {
 const HISTORY_DIR = join(homedir(), '.squirl', 'history');
 const CURRENT_LOG = join(HISTORY_DIR, 'current.jsonl');
 const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+const MAX_HISTORY = 50;
 
 function ensureDir(): void {
   mkdirSync(HISTORY_DIR, { recursive: true });
@@ -31,6 +32,14 @@ export function getAllHistoryFiles(): string[] {
   return readdirSync(HISTORY_DIR)
     .filter((f) => f.endsWith('.jsonl'))
     .map((f) => join(HISTORY_DIR, f));
+}
+
+function getDailyFiles(): string[] {
+  ensureDir();
+  return readdirSync(HISTORY_DIR)
+    .filter((f) => f.endsWith('.jsonl') && f !== 'current.jsonl')
+    .sort()
+    .reverse();
 }
 
 function dateKey(timestamp: string): string {
@@ -74,13 +83,28 @@ function rollover(entries: LogEntry[]): LogEntry[] {
 }
 
 /**
- * Load chat history: roll over old entries, return recent messages.
+ * Load chat history: roll over old entries, backfill from archives if needed.
+ * Always returns up to MAX_HISTORY most recent messages.
  */
 export function loadHistory(): Message[] {
   ensureDir();
   const entries = readEntries(CURRENT_LOG);
   const recent = rollover(entries);
-  return recent.map((e) => e.message);
+
+  if (recent.length >= MAX_HISTORY) {
+    return recent.slice(-MAX_HISTORY).map((e) => e.message);
+  }
+
+  const needed = MAX_HISTORY - recent.length;
+  const backfilled: LogEntry[] = [];
+  for (const file of getDailyFiles()) {
+    const daily = readEntries(join(HISTORY_DIR, file));
+    backfilled.unshift(...daily);
+    if (backfilled.length >= needed) break;
+  }
+
+  const combined = [...backfilled.slice(-needed), ...recent];
+  return combined.map((e) => e.message);
 }
 
 /**
