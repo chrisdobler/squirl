@@ -105,6 +105,44 @@ describe('loadHistory', () => {
     expect(contents.indexOf('archive')).toBeLessThan(contents.indexOf('recent'));
   });
 
+  it('returns everything when total history is less than MAX_HISTORY', async () => {
+    const now = new Date().toISOString();
+    writeJsonl(join(historyDir, 'current.jsonl'), [
+      entry('u1', 'user', 'recent', now),
+    ]);
+
+    writeJsonl(join(historyDir, '2026-04-09.jsonl'), [
+      entry('u2', 'user', 'old', '2026-04-09T12:00:00Z'),
+    ]);
+
+    const { loadHistory } = await import('./history.js');
+    const messages = loadHistory();
+    // Both messages returned even though total < 50
+    expect(messages).toHaveLength(2);
+  });
+
+  it('caps at MAX_HISTORY (50) when archives have more', async () => {
+    writeFileSync(join(historyDir, 'current.jsonl'), '', 'utf-8');
+
+    // Write 30 entries to each of two daily files = 60 total
+    const day1Entries = Array.from({ length: 30 }, (_, i) =>
+      entry(`d1-${i}`, 'user', `day1-${i}`, '2026-04-08T12:00:00Z'),
+    );
+    const day2Entries = Array.from({ length: 30 }, (_, i) =>
+      entry(`d2-${i}`, 'user', `day2-${i}`, '2026-04-09T12:00:00Z'),
+    );
+
+    writeJsonl(join(historyDir, '2026-04-08.jsonl'), day1Entries);
+    writeJsonl(join(historyDir, '2026-04-09.jsonl'), day2Entries);
+
+    const { loadHistory } = await import('./history.js');
+    const messages = loadHistory();
+    expect(messages).toHaveLength(50);
+    // Should have the most recent 50: all 30 from day2 + last 20 from day1
+    expect(messages[0]!.content).toBe('day1-10');
+    expect(messages[49]!.content).toBe('day2-29');
+  });
+
   it('returns empty when no history exists at all', async () => {
     const { loadHistory } = await import('./history.js');
     const messages = loadHistory();
