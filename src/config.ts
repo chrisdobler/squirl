@@ -20,6 +20,9 @@ export interface SquirlConfig {
     embedder: 'openai' | 'ollama';
     embedderModel?: string;
     ollamaUrl?: string;
+    metaModel?: string;
+    metaProvider?: 'openai' | 'anthropic' | 'local';
+    recallK?: number;
   };
 }
 
