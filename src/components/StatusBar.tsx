@@ -50,7 +50,7 @@ export const StatusBar: React.FC<StatusBarProps> = React.memo(({ tokenCount = 0,
       <Text dimColor>
         {toolStatus ? <Text color="yellow">{toolStatus}{'  '}</Text> : null}
         {isStreaming ? 'esc cancel  ' : ''}
-        ctrl+c exit{'  '}ctrl+p model{'  '}ctrl+v thinking{'  '}
+        ctrl+c exit{'  '}ctrl+p menu{'  '}ctrl+v thinking{'  '}
         context: {formatTokens(tokenCount)}/{formatTokens(contextWindow)}
         {'  '}{tokensPerSecond} t/s
       </Text>

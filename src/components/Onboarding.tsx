@@ -4,7 +4,7 @@ import TextInput from 'ink-text-input';
 import { fetchAvailableModels, detectLocalBackend, type DetectedModel, type LocalBackend } from '../api.js';
 import type { SquirlConfig } from '../config.js';
 
-type Step = 'welcome' | 'provider' | 'anthropic-key' | 'openai-key' | 'local-url' | 'local-detect' | 'local-pick' | 'local-model' | 'done';
+type Step = 'welcome' | 'provider' | 'anthropic-key' | 'openai-key' | 'local-url' | 'local-detect' | 'local-pick' | 'local-model' | 'import-chatgpt' | 'done';
 type Provider = 'anthropic' | 'openai' | 'local';
 
 const PROVIDERS: { id: Provider; label: string; description: string }[] = [
@@ -33,6 +33,9 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete }) => {
   const [alsoConfigureOpenai, setAlsoConfigureOpenai] = useState(false);
   const [alsoConfigureAnthropic, setAlsoConfigureAnthropic] = useState(false);
   const [detectedBackend, setDetectedBackend] = useState<LocalBackend>('unknown');
+  const [importPath, setImportPath] = useState('');
+  const [importCount, setImportCount] = useState<number | null>(null);
+  const [importError, setImportError] = useState('');
 
   // Auto-detect backend and models when entering the detect step
   useEffect(() => {
@@ -96,7 +99,7 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete }) => {
       setAlsoConfigureOpenai(true);
       setStep('openai-key');
     } else {
-      setStep('done');
+      setStep('import-chatgpt');
     }
   };
 
@@ -106,7 +109,7 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete }) => {
       setAlsoConfigureAnthropic(true);
       setStep('anthropic-key');
     } else {
-      setStep('done');
+      setStep('import-chatgpt');
     }
   };
 
@@ -119,6 +122,29 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete }) => {
     setLocalModelName(val || localModelName);
     setAlsoConfigureAnthropic(true);
     setStep('anthropic-key');
+  };
+
+  const handleImportSubmit = async (val: string) => {
+    if (!val.trim()) {
+      setStep('done');
+      return;
+    }
+    const resolved = val.trim().replace(/\\ /g, ' ').replace(/^~/, process.env.HOME ?? '');
+    try {
+      const { ChatGPTImporter } = await import('../search/importers/chatgpt.js');
+      const { appendImportMessage } = await import('../history.js');
+      const importer = new ChatGPTImporter();
+      let count = 0;
+      for await (const pair of importer.parse(resolved)) {
+        if (pair.userText) appendImportMessage({ id: crypto.randomUUID(), role: 'user', content: pair.userText }, 'chatgpt', pair.timestamp);
+        if (pair.assistantText) appendImportMessage({ id: crypto.randomUUID(), role: 'assistant', content: pair.assistantText }, 'chatgpt', pair.timestamp);
+        count++;
+      }
+      setImportCount(count);
+      setStep('done');
+    } catch (err: unknown) {
+      setImportError(err instanceof Error ? err.message : String(err));
+    }
   };
 
   const finalize = () => {
@@ -275,6 +301,26 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete }) => {
           </>
         )}
 
+        {step === 'import-chatgpt' && (
+          <>
+            <Text bold>Import ChatGPT conversations?</Text>
+            <Text>If you have a ChatGPT export, paste the path to the extracted folder (or a single file)</Text>
+            <Text dimColor>Export from chatgpt.com → Settings → Data controls → Export data</Text>
+            <Text dimColor>Press enter to skip</Text>
+            {importError && <Text color="red">{importError}</Text>}
+            <Box paddingTop={1}>
+              <Text color="green">Path: </Text>
+              <TextInput
+                value={importPath}
+                onChange={setImportPath}
+                onSubmit={handleImportSubmit}
+                placeholder="~/Downloads/chatgpt-export"
+                focus={true}
+              />
+            </Box>
+          </>
+        )}
+
         {step === 'done' && (
           <>
             <Text bold color="green">Setup complete!</Text>
@@ -284,6 +330,7 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete }) => {
             {openaiKey && <Text>OpenAI key: <Text dimColor>configured</Text></Text>}
             {selectedProvider === 'local' && <Text>Local model: <Text dimColor>{localModelName || '(not set)'}</Text></Text>}
             {selectedProvider === 'local' && <Text>Local URL: <Text dimColor>{localUrl}</Text></Text>}
+            {importCount !== null && <Text>ChatGPT import: <Text dimColor>{importCount} conversations</Text></Text>}
             <Text> </Text>
             <Text dimColor>Config will be saved to ~/.squirl/config.json</Text>
             <Text dimColor>Press enter to start</Text>

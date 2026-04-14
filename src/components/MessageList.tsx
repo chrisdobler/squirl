@@ -151,7 +151,34 @@ function renderMarkdown(content: string): React.ReactNode {
 
 // --- Message Rows ---
 
-function MessageRow({ msg, showThinking }: { msg: Message; showThinking: boolean }): React.ReactElement {
+function MessageRow({ msg, showThinking, dimmed }: { msg: Message; showThinking: boolean; dimmed: boolean }): React.ReactElement {
+  if (dimmed) {
+    switch (msg.role) {
+      case 'user':
+        return (
+          <Box marginBottom={1} paddingX={2}>
+            <Text dimColor>{'❯ '}{msg.content}</Text>
+          </Box>
+        );
+      case 'assistant': {
+        const { visibleContent } = parseThinkBlocks(msg.content);
+        return (
+          <Box flexDirection="column" marginBottom={1} paddingX={2}>
+            <Text dimColor>assistant</Text>
+            <Box paddingLeft={2}><Text dimColor>{visibleContent}</Text></Box>
+          </Box>
+        );
+      }
+      case 'tool':
+        return (
+          <Box flexDirection="column" paddingX={1} marginBottom={1} marginX={2}>
+            <Text dimColor>tool: {msg.toolName}</Text>
+            <Text dimColor>{msg.content}</Text>
+          </Box>
+        );
+    }
+  }
+
   switch (msg.role) {
     case 'user':
       return (
@@ -210,7 +237,7 @@ function MessageRow({ msg, showThinking }: { msg: Message; showThinking: boolean
   }
 }
 
-export const MessageList: React.FC<MessageListProps> = ({ messages, showThinking = false, scrollOffset = 0, onMaxScroll }) => {
+export const MessageList: React.FC<MessageListProps & { dimmed?: boolean }> = ({ messages, showThinking = false, scrollOffset = 0, onMaxScroll, dimmed = false }) => {
   const { stdout } = useStdout();
   const boxHeight = (stdout.rows ?? 24) - 7;   // header(3) + input(3) + status(1)
   const availableRows = boxHeight - 2;           // paddingY(1) top + bottom
@@ -232,7 +259,7 @@ export const MessageList: React.FC<MessageListProps> = ({ messages, showThinking
     <Box flexDirection="column" height={boxHeight} overflow="hidden" paddingY={1} justifyContent="flex-end">
       <Box ref={contentRef} flexDirection="column" flexShrink={0} marginBottom={-clampedScroll}>
         {messages.map((msg) => (
-          <MessageRow key={msg.id} msg={msg} showThinking={showThinking} />
+          <MessageRow key={msg.id} msg={msg} showThinking={showThinking} dimmed={dimmed} />
         ))}
       </Box>
     </Box>

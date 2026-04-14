@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { messagesToTurnPairs } from '../turn-pair.js';
 import type { TurnPair, Importer } from '../types.js';
 import type { Message } from '../../types.js';
@@ -46,13 +47,41 @@ export class ChatGPTImporter implements Importer {
   async *parseConversations(conversations: ChatGPTConversation[]): AsyncIterable<TurnPair> {
     for (const conv of conversations) {
       const messages = linearize(conv.mapping);
-      yield* messagesToTurnPairs(messages, `chatgpt:${conv.id}`, 'chatgpt');
+      const timestamp = new Date(conv.create_time * 1000).toISOString();
+      const pairs = messagesToTurnPairs(messages, `chatgpt:${conv.id}`, 'chatgpt');
+      for (const pair of pairs) {
+        yield { ...pair, timestamp };
+      }
     }
   }
 
+  private findConversationFiles(dir: string): string[] {
+    const files: string[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        files.push(...this.findConversationFiles(join(dir, entry.name)));
+      } else if (entry.name.endsWith('.json') && /conversations/i.test(entry.name)) {
+        files.push(join(dir, entry.name));
+      }
+    }
+    return files.sort();
+  }
+
   async *parse(path: string): AsyncIterable<TurnPair> {
-    const raw = readFileSync(path, 'utf-8');
-    const conversations = JSON.parse(raw) as ChatGPTConversation[];
-    yield* this.parseConversations(conversations);
+    const resolved = path.replace(/\\ /g, ' ');
+    const stat = statSync(resolved);
+    if (stat.isDirectory()) {
+      const files = this.findConversationFiles(resolved);
+      if (files.length === 0) throw new Error(`No conversation files found in ${resolved}`);
+      for (const file of files) {
+        const raw = readFileSync(file, 'utf-8');
+        const conversations = JSON.parse(raw) as ChatGPTConversation[];
+        yield* this.parseConversations(conversations);
+      }
+    } else {
+      const raw = readFileSync(resolved, 'utf-8');
+      const conversations = JSON.parse(raw) as ChatGPTConversation[];
+      yield* this.parseConversations(conversations);
+    }
   }
 }

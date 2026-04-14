@@ -1,11 +1,13 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
+import TextInput from 'ink-text-input';
 import { Header } from './components/Header.js';
 import { MessageList } from './components/MessageList.js';
 import { InputArea } from './components/InputArea.js';
 import { StatusBar } from './components/StatusBar.js';
 import { ModelPicker } from './components/ModelPicker.js';
 import { ContextPicker } from './components/ContextPicker.js';
+import { CommandPalette, type PaletteAction } from './components/CommandPalette.js';
 import { Orchestrator } from './orchestrator.js';
 import { getModelConfig } from './model-config.js';
 import { loadHistory, appendMessage, readEntries, getAllHistoryFiles } from './history.js';
@@ -41,6 +43,19 @@ function defaultModelFromConfig(config?: SquirlConfig): SelectedModel {
   return { id: config?.defaultModel ?? 'claude-sonnet-4-6', label: config?.defaultModel ?? 'Claude Sonnet 4.6', provider: 'anthropic' };
 }
 
+const ImportPrompt: React.FC<{ onSubmit: (path: string) => void; onClose: () => void }> = ({ onSubmit, onClose }) => {
+  const [value, setValue] = useState('');
+  useInput((_input, key) => {
+    if (key.escape) onClose();
+  });
+  return (
+    <Box borderStyle="single" borderTop={true} borderBottom={true} borderLeft={false} borderRight={false} paddingX={1}>
+      <Text color="yellow" bold>{'import ❯ '}</Text>
+      <TextInput value={value} onChange={setValue} onSubmit={onSubmit} placeholder="~/Downloads/chatgpt-export" focus={true} />
+    </Box>
+  );
+};
+
 interface AppProps {
   workingDir?: string;
   config?: SquirlConfig;
@@ -57,6 +72,8 @@ export const App: React.FC<AppProps> = ({
   const [inputValue, setInputValue] = useState('');
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const [isContextMenuOpen, setIsContextMenuOpen] = useState(false);
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const [isImportPromptOpen, setIsImportPromptOpen] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [toolStatus, setToolStatus] = useState('');
   const [showThinking, setShowThinking] = useState(false);
@@ -90,7 +107,7 @@ export const App: React.FC<AppProps> = ({
 
   useMouseWheel({
     onScroll: (delta) => setScrollOffset((prev) => Math.max(0, Math.min(maxScrollRef.current, prev + delta))),
-    isActive: !isModelMenuOpen && !isContextMenuOpen,
+    isActive: !isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen,
   });
 
   // Detect backend and fetch context window from local provider when not already known
@@ -192,9 +209,9 @@ export const App: React.FC<AppProps> = ({
   }, []);
 
   useInput((input, key) => {
-    if (isModelMenuOpen || isContextMenuOpen) return;
+    if (isModelMenuOpen || isContextMenuOpen || isCommandPaletteOpen || isImportPromptOpen) return;
     if (key.ctrl && input === 'c') { exit(); return; }
-    if (key.ctrl && input === 'p') { if (!isStreaming) setIsModelMenuOpen(true); return; }
+    if (key.ctrl && input === 'p') { if (!isStreaming) setIsCommandPaletteOpen(true); return; }
     if (key.ctrl && input === 'v') { setShowThinking((v) => !v); return; }
     // Shift+Up/Down to scroll message history
     if (key.shift && key.upArrow) { setScrollOffset((prev) => Math.min(maxScrollRef.current, prev + 3)); return; }
@@ -262,6 +279,47 @@ export const App: React.FC<AppProps> = ({
   const handleModelSelect = (model: SelectedModel) => {
     setSelectedModel(model);
     setIsModelMenuOpen(false);
+  };
+
+  const handlePaletteSelect = (action: PaletteAction) => {
+    setIsCommandPaletteOpen(false);
+    if (action === 'model') {
+      setIsModelMenuOpen(true);
+    } else if (action === 'import-chatgpt') {
+      setIsImportPromptOpen(true);
+    }
+  };
+
+  const handleImportSubmit = async (path: string) => {
+    setIsImportPromptOpen(false);
+    if (!path.trim()) return;
+    const resolved = path.trim().replace(/\\ /g, ' ').replace(/^~/, process.env.HOME ?? '');
+    try {
+      const { ChatGPTImporter } = await import('./search/importers/chatgpt.js');
+      const { appendImportMessage } = await import('./history.js');
+      const importer = new ChatGPTImporter();
+      let count = 0;
+      for await (const pair of importer.parse(resolved)) {
+        if (pair.userText) appendImportMessage({ id: crypto.randomUUID(), role: 'user', content: pair.userText }, 'chatgpt', pair.timestamp);
+        if (pair.assistantText) appendImportMessage({ id: crypto.randomUUID(), role: 'assistant', content: pair.assistantText }, 'chatgpt', pair.timestamp);
+        count++;
+      }
+      setMessages(prev => [...prev, {
+        id: crypto.randomUUID(),
+        role: 'tool' as const,
+        toolCallId: 'import',
+        toolName: '/import',
+        content: `Imported ${count} conversation turns from ChatGPT.`,
+      }]);
+    } catch (err: unknown) {
+      setMessages(prev => [...prev, {
+        id: crypto.randomUUID(),
+        role: 'tool' as const,
+        toolCallId: 'import',
+        toolName: '/import',
+        content: `Import failed: ${err instanceof Error ? err.message : String(err)}`,
+      }]);
+    }
   };
 
   const handleSubmit = (value: string) => {
@@ -436,14 +494,26 @@ export const App: React.FC<AppProps> = ({
           defaultLocalUrl={config?.localBaseUrl}
         />
       ) : (
-        <MessageList messages={messages} showThinking={showThinking} scrollOffset={scrollOffset} onMaxScroll={handleMaxScroll} />
+        <>
+          <MessageList messages={messages} showThinking={showThinking} scrollOffset={scrollOffset} onMaxScroll={handleMaxScroll} dimmed={isCommandPaletteOpen} />
+          {isCommandPaletteOpen && (
+            <CommandPalette
+              onSelect={handlePaletteSelect}
+              onClose={() => setIsCommandPaletteOpen(false)}
+            />
+          )}
+        </>
       )}
-      <InputArea
-        value={inputValue}
-        onChange={handleInputChange}
-        onSubmit={handleSubmit}
-        focus={!isModelMenuOpen && !isContextMenuOpen}
-      />
+      {isImportPromptOpen ? (
+        <ImportPrompt onSubmit={handleImportSubmit} onClose={() => setIsImportPromptOpen(false)} />
+      ) : (
+        <InputArea
+          value={inputValue}
+          onChange={handleInputChange}
+          onSubmit={handleSubmit}
+          focus={!isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen}
+        />
+      )}
       <StatusBar tokenCount={tokenCount} contextWindow={contextWindow} isStreaming={isStreaming} toolStatus={toolStatus} tokensPerSecond={tokensPerSecond} modelName={modelDisplay} workingDir={workingDir} commandQuery={commandQuery} commandIndex={commandIndex} statusEmitter={statusEmitterRef.current} />
     </Box>
   );

@@ -9,6 +9,7 @@ interface LogEntry {
 }
 
 const HISTORY_DIR = join(homedir(), '.squirl', 'history');
+const IMPORTS_DIR = join(HISTORY_DIR, 'imports');
 const CURRENT_LOG = join(HISTORY_DIR, 'current.jsonl');
 const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
 const MAX_HISTORY = 50;
@@ -40,6 +41,13 @@ function getDailyFiles(): string[] {
     .filter((f) => f.endsWith('.jsonl') && f !== 'current.jsonl')
     .sort()
     .reverse();
+}
+
+function getImportFiles(): string[] {
+  mkdirSync(IMPORTS_DIR, { recursive: true });
+  return readdirSync(IMPORTS_DIR)
+    .filter((f) => f.endsWith('.jsonl'))
+    .sort();
 }
 
 function dateKey(timestamp: string): string {
@@ -91,20 +99,20 @@ export function loadHistory(): Message[] {
   const entries = readEntries(CURRENT_LOG);
   const recent = rollover(entries);
 
-  if (recent.length >= MAX_HISTORY) {
-    return recent.slice(-MAX_HISTORY).map((e) => e.message);
-  }
+  const all: LogEntry[] = [...recent];
 
-  const needed = MAX_HISTORY - recent.length;
-  const backfilled: LogEntry[] = [];
   for (const file of getDailyFiles()) {
     const daily = readEntries(join(HISTORY_DIR, file));
-    backfilled.unshift(...daily);
-    if (backfilled.length >= needed) break;
+    all.push(...daily);
   }
 
-  const combined = [...backfilled.slice(-needed), ...recent];
-  return combined.map((e) => e.message);
+  for (const file of getImportFiles()) {
+    const imported = readEntries(join(IMPORTS_DIR, file));
+    all.push(...imported);
+  }
+
+  all.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  return all.slice(-MAX_HISTORY).map((e) => e.message);
 }
 
 /**
@@ -117,6 +125,18 @@ export function appendMessage(message: Message): void {
     message,
   };
   appendFileSync(CURRENT_LOG, JSON.stringify(entry) + '\n', 'utf-8');
+}
+
+/**
+ * Append a message to an import-specific log file.
+ */
+export function appendImportMessage(message: Message, source: string, timestamp?: string): void {
+  mkdirSync(IMPORTS_DIR, { recursive: true });
+  const entry: LogEntry = {
+    timestamp: timestamp ?? new Date().toISOString(),
+    message,
+  };
+  appendFileSync(join(IMPORTS_DIR, `${source}.jsonl`), JSON.stringify(entry) + '\n', 'utf-8');
 }
 
 /**
