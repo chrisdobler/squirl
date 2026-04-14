@@ -10,6 +10,7 @@ import { truncateToFit } from './context/truncation.js';
 import { getToolDefinitions, executeTool } from './tools/registry.js';
 import { streamChatCompletion } from './api.js';
 import { platform } from 'os';
+import type { MemoryPipeline } from './search/memory-pipeline.js';
 
 export interface ChatCallbacks {
   onToken: (token: string) => void;
@@ -18,6 +19,8 @@ export interface ChatCallbacks {
   onNewMessage?: (message: Message) => void;
   onToolStart?: (toolName: string, args: Record<string, unknown>) => void;
   onToolEnd?: (toolName: string, result: string) => void;
+  onMemoryStart?: () => void;
+  onMemoryEnd?: (inlineDisplay: string) => void;
 }
 
 const MAX_TOOL_ITERATIONS = 10;
@@ -27,9 +30,14 @@ export class Orchestrator {
   private contextFiles = new Map<string, string>();
   private cachedDirContext: DirectoryContext | null = null;
   private workingDir: string;
+  private memoryPipeline: MemoryPipeline | null = null;
 
   constructor(workingDir: string) {
     this.workingDir = workingDir;
+  }
+
+  setMemoryPipeline(pipeline: MemoryPipeline | null): void {
+    this.memoryPipeline = pipeline;
   }
 
   async chat(
@@ -91,14 +99,33 @@ export class Orchestrator {
       ? { role: 'system', content: `Files in context:\n${fileText}` }
       : null;
 
+    // 6b. Memory retrieval
+    let memoryMessage: ChatCompletionMessageParam | null = null;
+    if (this.memoryPipeline) {
+      callbacks.onMemoryStart?.();
+      try {
+        const memResult = await this.memoryPipeline.retrieve(conversationHistory, cleanedInput);
+        if (memResult.systemMessage) {
+          memoryMessage = { role: 'system', content: memResult.systemMessage };
+        }
+        callbacks.onMemoryEnd?.(memResult.inlineDisplay);
+      } catch {
+        callbacks.onMemoryEnd?.('');
+      }
+    }
+
     // 7. Convert conversation history to API format
     const allMessages = [...conversationHistory, userMsg];
     const conversationApiMessages = this.toApiMessages(allMessages);
 
     // 8. Truncate to fit
+    const allSystemMessages = [...systemMessages];
+    if (fileContextMessage) allSystemMessages.push(fileContextMessage);
+    if (memoryMessage) allSystemMessages.push(memoryMessage);
+
     const { messages: truncatedMessages } = truncateToFit(
-      systemMessages,
-      fileContextMessage,
+      allSystemMessages,
+      null,
       conversationApiMessages,
       config.contextWindow,
     );
