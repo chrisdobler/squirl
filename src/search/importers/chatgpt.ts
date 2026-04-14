@@ -25,7 +25,7 @@ function linearize(mapping: ChatGPTMapping): Message[] {
   if (!nodeId) return messages;
 
   while (nodeId) {
-    const node = mapping[nodeId]!;
+    const node: ChatGPTMapping[string] = mapping[nodeId]!;
     if (node.message && node.message.author.role !== 'system') {
       const role = node.message.author.role as 'user' | 'assistant';
       const content = node.message.content.parts.join('\n');
