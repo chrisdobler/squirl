@@ -136,7 +136,10 @@ async function streamOpenAI(options: StreamOptions): Promise<void> {
       onDone({ promptTokens: estimatedPrompt, completionTokens: estimatedCompletion, totalTokens: estimatedPrompt + estimatedCompletion });
     }
   } catch (err: unknown) {
-    if (err instanceof Error && err.name === 'AbortError') return;
+    if (err instanceof Error && err.name === 'AbortError') {
+      onError(err);
+      return;
+    }
     onError(err instanceof Error ? err : new Error(String(err)));
   }
 }
@@ -310,7 +313,10 @@ async function streamAnthropic(options: StreamOptions): Promise<void> {
       totalTokens: inputTokens + outputTokens,
     });
   } catch (err: unknown) {
-    if (err instanceof Error && err.name === 'AbortError') return;
+    if (err instanceof Error && err.name === 'AbortError') {
+      onError(err);
+      return;
+    }
     onError(err instanceof Error ? err : new Error(String(err)));
   }
 }

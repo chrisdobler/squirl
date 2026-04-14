@@ -8,7 +8,7 @@ import { ModelPicker } from './components/ModelPicker.js';
 import { ContextPicker } from './components/ContextPicker.js';
 import { Orchestrator } from './orchestrator.js';
 import { getModelConfig } from './model-config.js';
-import { loadHistory, appendMessage, updateLastMessage, readEntries, getAllHistoryFiles } from './history.js';
+import { loadHistory, appendMessage, readEntries, getAllHistoryFiles } from './history.js';
 import { matchCommand, filterCommands } from './commands/registry.js';
 import { estimateTokens } from './context/token-estimator.js';
 import { buildSystemPrompt } from './context/system-prompt.js';
@@ -248,7 +248,7 @@ export const App: React.FC<AppProps> = ({
           if (last && last.role === 'assistant') {
             const final_ = { ...last, isStreaming: false, content: last.content + ' [cancelled]' } as AssistantMessage;
             updated[updated.length - 1] = final_;
-            updateLastMessage(final_);
+            appendMessage(final_);
           }
           return updated;
         });
@@ -313,6 +313,9 @@ export const App: React.FC<AppProps> = ({
       {
         onNewMessage: (msg) => {
           setMessages(prev => [...prev, msg]);
+          if (msg.role !== 'assistant') {
+            appendMessage(msg);
+          }
         },
         onToken: (token) => {
           streamTokensRef.current++;
@@ -352,7 +355,9 @@ export const App: React.FC<AppProps> = ({
             const updated = [...prev];
             const last = updated[updated.length - 1];
             if (last && last.role === 'assistant' && last.isStreaming) {
-              updated[updated.length - 1] = { ...last, content: last.content + remaining, isStreaming: false } as AssistantMessage;
+              const finalized = { ...last, content: last.content + remaining, isStreaming: false } as AssistantMessage;
+              updated[updated.length - 1] = finalized;
+              appendMessage(finalized);
             }
             return updated;
           });
@@ -391,11 +396,6 @@ export const App: React.FC<AppProps> = ({
       },
       abortController.signal,
     ).then((newMessages) => {
-      // Persist all completed messages to history
-      for (const msg of newMessages) {
-        if (msg.role === 'assistant' && msg.isStreaming) continue;
-        appendMessage(msg);
-      }
       if (ingestQueueRef.current && config?.index?.enabled) {
         const pairs = messagesToTurnPairs(newMessages, 'current', 'squirl');
         for (const pair of pairs) ingestQueueRef.current.enqueue(pair);

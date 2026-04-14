@@ -189,7 +189,7 @@ export class Orchestrator {
       }
       const assistantApiMsg: ChatCompletionMessageParam = {
         role: 'assistant',
-        content: accumulatedContent || null,
+        content: accumulatedContent || '',
         tool_calls: toolCalls.map((tc: ToolCall) => ({
           id: tc.id,
           type: 'function' as const,
@@ -237,7 +237,7 @@ export class Orchestrator {
           if (m.toolCalls && m.toolCalls.length > 0) {
             return {
               role: 'assistant',
-              content: m.content || null,
+              content: m.content || '',
               tool_calls: m.toolCalls.map((tc) => ({
                 id: tc.id,
                 type: 'function' as const,
@@ -245,7 +245,7 @@ export class Orchestrator {
               })),
             };
           }
-          return { role: 'assistant', content: m.content || null };
+          return { role: 'assistant', content: m.content || '' };
         }
         case 'tool':
           return { role: 'tool' as const, tool_call_id: m.toolCallId, content: m.content };
