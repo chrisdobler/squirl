@@ -24,6 +24,9 @@ import { StatusEmitter } from './search/status.js';
 import { messagesToTurnPairs } from './search/turn-pair.js';
 import { backfillFromHistory } from './search/backfill.js';
 import type { VectorStore } from './search/types.js';
+import { MemoryPipeline } from './search/memory-pipeline.js';
+import { OpenAIMetaLLM, AnthropicMetaLLM } from './search/meta-llm.js';
+import type { MetaLLM } from './search/meta-extract.js';
 import type { Message, AssistantMessage } from './types.js';
 
 function defaultModelFromConfig(config?: SquirlConfig): SelectedModel {
@@ -154,12 +157,33 @@ export const App: React.FC<AppProps> = ({
       const queue = new IngestQueue(embedder, store, statusEmitterRef.current);
       ingestQueueRef.current = queue;
 
+      // Memory retrieval pipeline
+      const metaProvider = config.index!.metaProvider ?? config.defaultProvider ?? 'openai';
+      const metaModel = config.index!.metaModel ?? 'gpt-4o-mini';
+      let metaLLM: MetaLLM;
+      if (metaProvider === 'anthropic') {
+        metaLLM = new AnthropicMetaLLM({ model: metaModel });
+      } else {
+        metaLLM = new OpenAIMetaLLM({
+          model: metaModel,
+          ...(metaProvider === 'local' ? { baseUrl: config.localBaseUrl } : {}),
+        });
+      }
+
+      const memoryPipeline = new MemoryPipeline(metaLLM, embedder, store, {
+        recallK: config.index!.recallK ?? 10,
+      });
+      orchestratorRef.current.setMemoryPipeline(memoryPipeline);
+
       const files = getAllHistoryFiles();
       const allEntries = files.flatMap((f) => readEntries(f));
       await backfillFromHistory(queue, store, allEntries);
     })();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      orchestratorRef.current.setMemoryPipeline(null);
+    };
   }, [config?.index?.enabled]);
 
   const handleInputChange = useCallback((v: string) => {
@@ -348,6 +372,21 @@ export const App: React.FC<AppProps> = ({
         },
         onToolEnd: () => {
           setToolStatus('');
+        },
+        onMemoryStart: () => {
+          setToolStatus('Recalling...');
+        },
+        onMemoryEnd: (inlineDisplay) => {
+          setToolStatus('');
+          if (inlineDisplay) {
+            setMessages(prev => [...prev, {
+              id: crypto.randomUUID(),
+              role: 'tool' as const,
+              toolCallId: 'memory',
+              toolName: '/memory',
+              content: inlineDisplay,
+            }]);
+          }
         },
       },
       abortController.signal,
