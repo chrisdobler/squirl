@@ -37,11 +37,12 @@ interface ModelPickerProps {
   currentModelId: string;
   onSelect: (model: SelectedModel) => void;
   onClose: () => void;
+  defaultLocalUrl?: string;
 }
 
 type LocalStep = 'url' | 'detecting' | 'pick' | 'manual';
 
-export const ModelPicker: React.FC<ModelPickerProps> = ({ currentModelId, onSelect, onClose }) => {
+export const ModelPicker: React.FC<ModelPickerProps> = ({ currentModelId, onSelect, onClose, defaultLocalUrl }) => {
   const { stdout } = useStdout();
   const width = Math.min(stdout.columns ?? 80, 58);
 
@@ -50,7 +51,7 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({ currentModelId, onSele
     return idx >= 0 ? idx : 0;
   });
   const [localModelName, setLocalModelName] = useState('');
-  const [localUrl, setLocalUrl] = useState('http://localhost:8000/v1');
+  const [localUrl, setLocalUrl] = useState(defaultLocalUrl ?? 'http://localhost:8000/v1');
   const [enteringLocal, setEnteringLocal] = useState(false);
   const [localStep, setLocalStep] = useState<LocalStep>('url');
   const [detectedModels, setDetectedModels] = useState<DetectedModel[]>([]);

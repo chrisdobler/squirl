@@ -433,6 +433,7 @@ export const App: React.FC<AppProps> = ({
           currentModelId={selectedModel.id}
           onSelect={handleModelSelect}
           onClose={() => setIsModelMenuOpen(false)}
+          defaultLocalUrl={config?.localBaseUrl}
         />
       ) : (
         <MessageList messages={messages} showThinking={showThinking} scrollOffset={scrollOffset} onMaxScroll={handleMaxScroll} />
