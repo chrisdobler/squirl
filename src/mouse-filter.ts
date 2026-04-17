@@ -3,10 +3,21 @@ import { EventEmitter } from 'node:events';
 
 const MOUSE_SEQ_RE = /\x1b\[<\s*(\d+)\s*;\s*(\d+)\s*;\s*(\d+)\s*([Mm])/g;
 
-// Matches a trailing partial mouse escape sequence that may continue in the next chunk
+// Matches a trailing partial escape sequence that may continue in the next chunk
 const PARTIAL_SEQ_RE = /\x1b(\[(<(\s*\d+\s*;?){0,2}\s*\d*\s*)?)?$/;
 
 export const mouseEvents = new EventEmitter();
+
+const ENABLE_MOUSE = '\x1b[?1000h\x1b[?1006h';
+const DISABLE_MOUSE = '\x1b[?1000l\x1b[?1006l';
+
+export function enableMouseTracking(): void {
+  process.stdout.write(ENABLE_MOUSE);
+}
+
+export function disableMouseTracking(): void {
+  process.stdout.write(DISABLE_MOUSE);
+}
 
 let pendingBuffer = '';
 
@@ -34,7 +45,7 @@ export const mouseFilter = new Transform({
       }
     }
 
-    // Strip complete sequences
+    // Strip complete mouse sequences
     const cleaned = str.replace(MOUSE_SEQ_RE, '');
 
     // Check for a trailing partial escape sequence that may span chunks

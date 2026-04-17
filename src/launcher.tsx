@@ -35,9 +35,9 @@ const Root: React.FC = () => {
 };
 
 export async function launchApp(): Promise<void> {
-  // Enter alternate screen buffer for full-screen TUI
-  process.stdout.write('\x1b[?1049h');
-  process.stdout.write('\x1b[H');
+  // Clear screen for full-screen TUI (no alternate screen — Warp strips
+  // modifier keys like Option+Backspace in alternate screen mode)
+  process.stdout.write('\x1b[2J\x1b[H');
 
   // Enable SGR mouse tracking and pipe stdin through the mouse filter
   process.stdout.write(ENABLE_MOUSE);
@@ -49,16 +49,12 @@ export async function launchApp(): Promise<void> {
 
   const cleanup = () => {
     unmount();
-    // Disable mouse tracking + leave alternate screen buffer
     process.stdout.write(DISABLE_MOUSE);
-    process.stdout.write('\x1b[?1049l');
     process.exit(0);
   };
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
 
   await waitUntilExit();
-  // Disable mouse tracking + leave alt buffer on normal exit
   process.stdout.write(DISABLE_MOUSE);
-  process.stdout.write('\x1b[?1049l');
 }
