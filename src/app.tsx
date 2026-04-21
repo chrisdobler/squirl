@@ -95,15 +95,19 @@ export const App: React.FC<AppProps> = ({
   const [tokenCount, setTokenCount] = useState(0);
   const [scrollOffset, setScrollOffset] = useState(0);
   const maxScrollRef = useRef(0);
-
-  // Reset scroll to bottom when new messages arrive or during streaming
-  useEffect(() => {
-    if (isStreaming) setScrollOffset(0);
-  }, [messages.length, isStreaming]);
+  const prevMaxScrollRef = useRef(0);
 
   const handleMaxScroll = useCallback((max: number) => {
+    const prev = prevMaxScrollRef.current;
+    prevMaxScrollRef.current = max;
     maxScrollRef.current = max;
-  }, []);
+
+    // During streaming, freeze the viewport by increasing scrollOffset
+    // as content grows — the view stays in place while tokens append below
+    if (isStreaming && max > prev) {
+      setScrollOffset(offset => Math.min(max, offset + (max - prev)));
+    }
+  }, [isStreaming]);
 
   useMouseWheel({
     onScroll: (delta) => setScrollOffset((prev) => Math.max(0, Math.min(maxScrollRef.current, prev + delta))),
@@ -356,6 +360,7 @@ export const App: React.FC<AppProps> = ({
     setInputValue('');
     historyIndexRef.current = -1;
     savedInputRef.current = '';
+    setScrollOffset(0);
     setIsStreaming(true);
     setTokensPerSecond(0);
     streamStartRef.current = Date.now();

@@ -10,7 +10,7 @@ export const Header: React.FC = () => {
       flexDirection="column"
       width={width}
     >
-      <Box paddingX={1} paddingTop={1}>
+      <Box paddingX={1} paddingTop={2}>
         <Text bold color="white">squirl</Text>
       </Box>
       <Box
