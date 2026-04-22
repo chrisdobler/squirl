@@ -17,9 +17,9 @@ export interface SquirlConfig {
     chromaUrl?: string;
     chromaAuthToken?: string;
     collection?: string;
-    embedder: 'openai' | 'ollama';
+    embedder: 'openai' | 'local';
     embedderModel?: string;
-    ollamaUrl?: string;
+    embedderUrl?: string;
     metaModel?: string;
     metaProvider?: 'openai' | 'anthropic' | 'local';
     recallK?: number;

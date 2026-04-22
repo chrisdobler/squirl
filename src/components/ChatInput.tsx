@@ -37,7 +37,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     }
 
     // Let app-level ctrl shortcuts pass through without inserting characters
-    if (key.ctrl && (input === 'c' || input === 'v' || input === 'p')) {
+    if (key.ctrl && (input === 'c' || input === 'v' || input === 'p' || input === 's')) {
       return;
     }
 

@@ -4,7 +4,7 @@ import TextInput from 'ink-text-input';
 import { fetchAvailableModels, detectLocalBackend, type DetectedModel, type LocalBackend } from '../api.js';
 import type { SquirlConfig } from '../config.js';
 
-type Step = 'welcome' | 'provider' | 'anthropic-key' | 'openai-key' | 'local-url' | 'local-detect' | 'local-pick' | 'local-model' | 'import-chatgpt' | 'index-setup' | 'index-store' | 'index-chroma-url' | 'index-embedder' | 'index-ollama-url' | 'done';
+type Step = 'welcome' | 'provider' | 'anthropic-key' | 'openai-key' | 'local-url' | 'local-detect' | 'local-pick' | 'local-model' | 'import-chatgpt' | 'index-setup' | 'index-store' | 'index-chroma-url' | 'index-embedder' | 'index-embedder-url' | 'index-embedder-detect' | 'index-embedder-pick' | 'done';
 type Provider = 'anthropic' | 'openai' | 'local';
 
 const PROVIDERS: { id: Provider; label: string; description: string }[] = [
@@ -40,12 +40,16 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, initialConfi
   const [importError, setImportError] = useState('');
   const [indexSetupIdx, setIndexSetupIdx] = useState(initialConfig?.index?.enabled ? 0 : 1);
   const [indexStoreIdx, setIndexStoreIdx] = useState(initialConfig?.index?.store === 'remote-chroma' ? 1 : 0);
-  const [indexEmbedderIdx, setIndexEmbedderIdx] = useState(initialConfig?.index?.embedder === 'ollama' ? 1 : 0);
+  const [indexEmbedderIdx, setIndexEmbedderIdx] = useState(initialConfig?.index?.embedder && initialConfig.index.embedder !== 'openai' ? 1 : 0);
   const [indexEnabled, setIndexEnabled] = useState(initialConfig?.index?.enabled ?? false);
   const [indexStore, setIndexStore] = useState<'local-chroma' | 'remote-chroma'>((initialConfig?.index?.store as 'local-chroma' | 'remote-chroma') ?? 'local-chroma');
   const [indexChromaUrl, setIndexChromaUrl] = useState(initialConfig?.index?.chromaUrl ?? 'http://localhost:8000');
-  const [indexEmbedder, setIndexEmbedder] = useState<'openai' | 'ollama'>(initialConfig?.index?.embedder ?? 'openai');
-  const [indexOllamaUrl, setIndexOllamaUrl] = useState(initialConfig?.index?.ollamaUrl ?? 'http://localhost:11434');
+  const [indexEmbedder, setIndexEmbedder] = useState<'openai' | 'local'>(initialConfig?.index?.embedder === 'openai' ? 'openai' : 'local');
+  const [indexEmbedderUrl, setIndexEmbedderUrl] = useState(initialConfig?.index?.embedderUrl ?? 'http://localhost:11434');
+  const [indexEmbedderModels, setIndexEmbedderModels] = useState<DetectedModel[]>([]);
+  const [indexEmbedderModelIdx, setIndexEmbedderModelIdx] = useState(0);
+  const [indexEmbedderModel, setIndexEmbedderModel] = useState(initialConfig?.index?.embedderModel ?? '');
+  const [indexEmbedderBackend, setIndexEmbedderBackend] = useState<LocalBackend>('unknown');
 
   // Auto-detect backend and models when entering the detect step
   useEffect(() => {
@@ -67,6 +71,29 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, initialConfi
     })();
     return () => { cancelled = true; };
   }, [step, localUrl]);
+
+  // Auto-detect embedder backend and models
+  useEffect(() => {
+    if (step !== 'index-embedder-detect') return;
+    let cancelled = false;
+    (async () => {
+      const url = indexEmbedderUrl.endsWith('/v1') ? indexEmbedderUrl : indexEmbedderUrl.replace(/\/+$/, '') + '/v1';
+      const backend = await detectLocalBackend(url);
+      if (cancelled) return;
+      setIndexEmbedderBackend(backend);
+      const models = await fetchAvailableModels(url, backend);
+      if (cancelled) return;
+      if (models.length > 0) {
+        setIndexEmbedderModels(models);
+        setIndexEmbedderModelIdx(0);
+        setStep('index-embedder-pick');
+      } else {
+        // No models found — use the URL as-is, model will be auto-detected at runtime
+        setStep('done');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [step, indexEmbedderUrl]);
 
   useInput((input, key) => {
     if (step === 'welcome') {
@@ -124,16 +151,26 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, initialConfi
     }
 
     if (step === 'index-embedder') {
-      const embedders = ['openai', 'ollama'] as const;
+      const embedders = ['openai', 'local'] as const;
       if (key.upArrow) setIndexEmbedderIdx((i) => Math.max(0, i - 1));
       if (key.downArrow) setIndexEmbedderIdx((i) => Math.min(embedders.length - 1, i + 1));
       if (key.return) {
         setIndexEmbedder(embedders[indexEmbedderIdx]!);
-        if (embedders[indexEmbedderIdx] === 'ollama') {
-          setStep('index-ollama-url');
+        if (embedders[indexEmbedderIdx] === 'local') {
+          setStep('index-embedder-url');
         } else {
           setStep('done');
         }
+      }
+      return;
+    }
+
+    if (step === 'index-embedder-pick') {
+      if (key.upArrow) setIndexEmbedderModelIdx((i) => Math.max(0, i - 1));
+      if (key.downArrow) setIndexEmbedderModelIdx((i) => Math.min(indexEmbedderModels.length - 1, i + 1));
+      if (key.return) {
+        setIndexEmbedderModel(indexEmbedderModels[indexEmbedderModelIdx]!.id);
+        setStep('done');
       }
       return;
     }
@@ -202,9 +239,9 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, initialConfi
     setStep('index-embedder');
   };
 
-  const handleOllamaUrlSubmit = (val: string) => {
-    setIndexOllamaUrl(val || indexOllamaUrl);
-    setStep('done');
+  const handleEmbedderUrlSubmit = (val: string) => {
+    setIndexEmbedderUrl(val || indexEmbedderUrl);
+    setStep('index-embedder-detect');
   };
 
   const finalize = () => {
@@ -227,7 +264,10 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, initialConfi
         store: indexStore,
         chromaUrl: indexChromaUrl,
         embedder: indexEmbedder,
-        ...(indexEmbedder === 'ollama' ? { ollamaUrl: indexOllamaUrl } : {}),
+        ...(indexEmbedder === 'local' ? {
+          embedderUrl: indexEmbedderUrl,
+          ...(indexEmbedderModel ? { embedderModel: indexEmbedderModel } : {}),
+        } : {}),
       };
     }
 
@@ -451,8 +491,8 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, initialConfi
             <Text bold>Choose embedding provider</Text>
             <Text> </Text>
             {[
-              { id: 'openai', label: 'OpenAI', desc: 'text-embedding-3-small (requires API key)' },
-              { id: 'ollama', label: 'Ollama', desc: 'Local embeddings via Ollama' },
+              { id: 'openai', label: 'OpenAI API', desc: 'text-embedding-3-small (requires API key)' },
+              { id: 'local', label: 'Local server', desc: 'vLLM, Ollama, llama.cpp, etc.' },
             ].map((e, i) => (
               <Box key={e.id} paddingLeft={1}>
                 <Text color={i === indexEmbedderIdx ? 'cyan' : undefined}>
@@ -467,19 +507,43 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, initialConfi
           </>
         )}
 
-        {step === 'index-ollama-url' && (
+        {step === 'index-embedder-url' && (
           <>
-            <Text bold>Ollama URL for embeddings</Text>
-            <Text dimColor>Press enter for default</Text>
+            <Text bold>Embedding server URL</Text>
+            <Text dimColor>The server should have an embedding model loaded</Text>
             <Box paddingTop={1}>
               <Text color="green">URL: </Text>
               <TextInput
-                value={indexOllamaUrl}
-                onChange={setIndexOllamaUrl}
-                onSubmit={handleOllamaUrlSubmit}
+                value={indexEmbedderUrl}
+                onChange={setIndexEmbedderUrl}
+                onSubmit={handleEmbedderUrlSubmit}
                 focus={true}
               />
             </Box>
+          </>
+        )}
+
+        {step === 'index-embedder-detect' && (
+          <>
+            <Text bold>Detecting embedding models...</Text>
+            <Text dimColor>Querying {indexEmbedderUrl}</Text>
+          </>
+        )}
+
+        {step === 'index-embedder-pick' && (
+          <>
+            <Text bold>Select an embedding model</Text>
+            <Text dimColor>Found {indexEmbedderModels.length} model(s) on the server</Text>
+            <Text> </Text>
+            {indexEmbedderModels.map((m, i) => (
+              <Box key={m.id} paddingLeft={1}>
+                <Text color={i === indexEmbedderModelIdx ? 'cyan' : undefined}>
+                  {i === indexEmbedderModelIdx ? '❯ ' : '  '}{m.id}
+                </Text>
+              </Box>
+            ))}
+            <Text> </Text>
+            <Text dimColor>↑↓ navigate  enter select</Text>
           </>
         )}
 
@@ -494,7 +558,7 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, initialConfi
             {selectedProvider === 'local' && <Text>Local URL: <Text dimColor>{localUrl}</Text></Text>}
             {importCount !== null && <Text>ChatGPT import: <Text dimColor>{importCount} conversations</Text></Text>}
             {indexEnabled && <Text>Vector store: <Text dimColor>{indexStore} ({indexChromaUrl})</Text></Text>}
-            {indexEnabled && <Text>Embedder: <Text dimColor>{indexEmbedder}{indexEmbedder === 'ollama' ? ` (${indexOllamaUrl})` : ''}</Text></Text>}
+            {indexEnabled && <Text>Embedder: <Text dimColor>{indexEmbedder === 'local' ? `${indexEmbedderModel || 'auto'} (${indexEmbedderUrl})` : 'OpenAI API'}</Text></Text>}
             <Text> </Text>
             <Text dimColor>Config will be saved to ~/.squirl/config.json</Text>
             <Text dimColor>Press enter to start</Text>

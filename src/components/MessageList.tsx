@@ -239,7 +239,7 @@ function MessageRow({ msg, showThinking, dimmed }: { msg: Message; showThinking:
 
 export const MessageList: React.FC<MessageListProps & { dimmed?: boolean }> = ({ messages, showThinking = false, scrollOffset = 0, onMaxScroll, dimmed = false }) => {
   const { stdout } = useStdout();
-  const boxHeight = (stdout.rows ?? 24) - 7;   // header(3) + input(3) + status(1)
+  const boxHeight = (stdout.rows ?? 24) - 9;   // header(4) + input(3) + status(2)
   const availableRows = boxHeight - 2;           // paddingY(1) top + bottom
   const contentRef = useRef<DOMElement>(null);
   const maxScrollRef = useRef(0);
@@ -254,13 +254,32 @@ export const MessageList: React.FC<MessageListProps & { dimmed?: boolean }> = ({
   });
 
   const clampedScroll = Math.min(scrollOffset, maxScrollRef.current);
+  const maxScroll = maxScrollRef.current;
+
+  // Scrollbar: compute thumb position and size
+  const trackHeight = availableRows;
+  const hasScrollbar = maxScroll > 0;
+  const thumbSize = hasScrollbar ? Math.max(1, Math.min(trackHeight, Math.round(trackHeight * (availableRows / (availableRows + maxScroll))))) : trackHeight;
+  // scrollOffset=0 is bottom, maxScroll is top — invert for scrollbar (top=0)
+  const scrollFraction = hasScrollbar ? 1 - (clampedScroll / maxScroll) : 1;
+  const thumbTop = Math.max(0, Math.min(trackHeight - thumbSize, Math.round(scrollFraction * (trackHeight - thumbSize))));
+
+  const scrollbar: string[] = [];
+  for (let i = 0; i < trackHeight; i++) {
+    scrollbar.push(i >= thumbTop && i < thumbTop + thumbSize ? '█' : '│');
+  }
 
   return (
-    <Box flexDirection="column" height={boxHeight} overflow="hidden" paddingY={1} justifyContent="flex-end">
-      <Box ref={contentRef} flexDirection="column" flexShrink={0} marginBottom={-clampedScroll}>
-        {messages.map((msg) => (
-          <MessageRow key={msg.id} msg={msg} showThinking={showThinking} dimmed={dimmed} />
-        ))}
+    <Box flexDirection="row" height={boxHeight}>
+      <Box flexDirection="column" flexGrow={1} overflow="hidden" paddingY={1}>
+        <Box ref={contentRef} flexDirection="column" flexShrink={0} marginTop={-(maxScroll - clampedScroll)}>
+          {messages.map((msg) => (
+            <MessageRow key={msg.id} msg={msg} showThinking={showThinking} dimmed={dimmed} />
+          ))}
+        </Box>
+      </Box>
+      <Box flexDirection="column" paddingY={1} width={1}>
+        <Text dimColor>{scrollbar.join('\n')}</Text>
       </Box>
     </Box>
   );

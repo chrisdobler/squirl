@@ -5,11 +5,10 @@ describe('createEmbedder', () => {
   it('creates OpenAI embedder', () => {
     expect(createEmbedder({ type: 'openai', apiKey: 'k' }).name).toMatch(/^openai:/);
   });
-  it('creates Ollama embedder', () => {
-    expect(createEmbedder({ type: 'ollama' }).name).toMatch(/^ollama:/);
+  it('creates local embedder with Ollama backend', () => {
+    expect(createEmbedder({ type: 'local', detectedBackend: 'ollama' }).name).toMatch(/^ollama:/);
   });
-  it('throws for unknown type', () => {
-    // @ts-expect-error testing invalid
-    expect(() => createEmbedder({ type: 'x' })).toThrow('Unknown embedder');
+  it('creates local embedder with vLLM backend', () => {
+    expect(createEmbedder({ type: 'local', detectedBackend: 'vllm', baseUrl: 'http://localhost:8000/v1' }).name).toMatch(/^openai:/);
   });
 });

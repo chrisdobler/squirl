@@ -15,6 +15,7 @@ import { matchCommand, filterCommands } from './commands/registry.js';
 import { estimateTokens } from './context/token-estimator.js';
 import { buildSystemPrompt } from './context/system-prompt.js';
 import { useMouseWheel } from './hooks/useMouseWheel.js';
+import { enableMouseTracking, disableMouseTracking } from './mouse-filter.js';
 import { platform } from 'node:os';
 import { fetchAvailableModels, detectLocalBackend, BACKEND_DISPLAY_NAMES } from './api.js';
 import type { SelectedModel } from './components/ModelPicker.js';
@@ -95,6 +96,8 @@ export const App: React.FC<AppProps> = ({
   const savedInputRef = useRef('');
   const [commandIndex, setCommandIndex] = useState(0);
   const [tokenCount, setTokenCount] = useState(0);
+  const [embedderDisplay, setEmbedderDisplay] = useState('');
+  const [mouseMode, setMouseMode] = useState(true);
   const [scrollOffset, setScrollOffset] = useState(0);
   const maxScrollRef = useRef(0);
   const prevMaxScrollRef = useRef(0);
@@ -111,9 +114,17 @@ export const App: React.FC<AppProps> = ({
     }
   }, [isStreaming]);
 
+  useEffect(() => {
+    if (mouseMode) {
+      enableMouseTracking();
+    } else {
+      disableMouseTracking();
+    }
+  }, [mouseMode]);
+
   useMouseWheel({
     onScroll: (delta) => setScrollOffset((prev) => Math.max(0, Math.min(maxScrollRef.current, prev + delta))),
-    isActive: !isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen,
+    isActive: mouseMode && !isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen,
   });
 
   // Detect backend and fetch context window from local provider when not already known
@@ -159,11 +170,32 @@ export const App: React.FC<AppProps> = ({
     let cancelled = false;
 
     (async () => {
+      const rawEmbedderUrl = config.index!.embedderUrl ?? (config.index as any).ollamaUrl;
+      const embedderUrl = rawEmbedderUrl?.endsWith('/v1') ? rawEmbedderUrl : rawEmbedderUrl ? rawEmbedderUrl.replace(/\/+$/, '') + '/v1' : undefined;
+      const embedderBackend = embedderUrl ? await detectLocalBackend(embedderUrl) : undefined;
+      if (cancelled) return;
+
+      // Auto-detect embedding model from the server
+      let embedderModel = config.index!.embedderModel;
+      if (!embedderModel && embedderUrl && embedderBackend) {
+        const models = await fetchAvailableModels(embedderUrl, embedderBackend);
+        if (cancelled) return;
+        if (models.length > 0) embedderModel = models[0]!.id;
+      }
+
+      const backendLabel = embedderBackend ? BACKEND_DISPLAY_NAMES[embedderBackend] || embedderBackend : '';
+      if (config.index!.embedder === 'local' && embedderModel) {
+        setEmbedderDisplay(`${embedderModel}${backendLabel ? ` (${backendLabel})` : ''}`);
+      } else if (config.index!.embedder === 'openai') {
+        setEmbedderDisplay(`openai / ${embedderModel ?? 'text-embedding-3-small'}`);
+      }
+
       const embedder = createEmbedder({
         type: config.index!.embedder,
         apiKey: config.openaiApiKey,
-        model: config.index!.embedderModel,
-        baseUrl: config.index!.ollamaUrl,
+        model: embedderModel,
+        baseUrl: embedderUrl,
+        detectedBackend: embedderBackend,
       });
       const store = await createVectorStore({
         type: config.index!.store,
@@ -219,6 +251,7 @@ export const App: React.FC<AppProps> = ({
     if (key.ctrl && input === 'c') { exit(); return; }
     if (key.ctrl && input === 'p') { if (!isStreaming) setIsCommandPaletteOpen(true); return; }
     if (key.ctrl && input === 'v') { setShowThinking((v) => !v); return; }
+    if (key.ctrl && input === 's') { setMouseMode((v) => !v); return; }
     // Shift+Up/Down to scroll message history
     if (key.shift && key.upArrow) { setScrollOffset((prev) => Math.min(maxScrollRef.current, prev + 3)); return; }
     if (key.shift && key.downArrow) { setScrollOffset((prev) => Math.max(0, prev - 3)); return; }
@@ -522,7 +555,7 @@ export const App: React.FC<AppProps> = ({
           focus={!isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen}
         />
       )}
-      <StatusBar tokenCount={tokenCount} contextWindow={contextWindow} isStreaming={isStreaming} toolStatus={toolStatus} tokensPerSecond={tokensPerSecond} modelName={modelDisplay} workingDir={workingDir} commandQuery={commandQuery} commandIndex={commandIndex} statusEmitter={statusEmitterRef.current} indexEnabled={config?.index?.enabled ?? false} storeName={config?.index?.store ? `${config.index.store}${config.index.chromaUrl ? ` (${config.index.chromaUrl.replace(/^https?:\/\//, '')})` : ''}` : ''} embedderName={config?.index?.embedder ? `${config.index.embedder}${config.index.embedderModel ? ` / ${config.index.embedderModel}` : ''}` : ''} />
+      <StatusBar tokenCount={tokenCount} contextWindow={contextWindow} isStreaming={isStreaming} toolStatus={toolStatus} tokensPerSecond={tokensPerSecond} modelName={modelDisplay} workingDir={workingDir} commandQuery={commandQuery} commandIndex={commandIndex} statusEmitter={statusEmitterRef.current} indexEnabled={config?.index?.enabled ?? false} storeName={config?.index?.store ? `${config.index.store}${config.index.chromaUrl ? ` (${config.index.chromaUrl.replace(/^https?:\/\//, '')})` : ''}` : ''} embedderName={embedderDisplay} mouseMode={mouseMode} />
     </Box>
   );
 };

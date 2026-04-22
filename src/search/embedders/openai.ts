@@ -7,6 +7,7 @@ interface Options {
   apiKey: string;
   model?: string;
   dimensions?: number;
+  baseUrl?: string;
   createFn?: CreateFn;
 }
 
@@ -23,7 +24,7 @@ export class OpenAIEmbedder implements Embedder {
     if (opts.createFn) {
       this.create = opts.createFn;
     } else {
-      const client = new OpenAI({ apiKey: opts.apiKey });
+      const client = new OpenAI({ apiKey: opts.apiKey, ...(opts.baseUrl ? { baseURL: opts.baseUrl } : {}) });
       this.create = (params) => client.embeddings.create(params);
     }
   }

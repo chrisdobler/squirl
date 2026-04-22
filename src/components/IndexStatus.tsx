@@ -30,7 +30,8 @@ export const IndexStatus: React.FC<IndexStatusProps> = React.memo(({ statusEmitt
   if (status.phase === 'idle') return null;
 
   if (status.phase === 'error') {
-    return <Text color="red">! index error</Text>;
+    const msg = (status as any).error ? `: ${(status as any).error}` : '';
+    return <Text color="red">! index error{msg}</Text>;
   }
 
   return (
