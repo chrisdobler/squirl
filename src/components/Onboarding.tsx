@@ -4,7 +4,7 @@ import TextInput from 'ink-text-input';
 import { fetchAvailableModels, detectLocalBackend, type DetectedModel, type LocalBackend } from '../api.js';
 import type { SquirlConfig } from '../config.js';
 
-type Step = 'welcome' | 'provider' | 'anthropic-key' | 'openai-key' | 'local-url' | 'local-detect' | 'local-pick' | 'local-model' | 'import-chatgpt' | 'done';
+type Step = 'welcome' | 'provider' | 'anthropic-key' | 'openai-key' | 'local-url' | 'local-detect' | 'local-pick' | 'local-model' | 'import-chatgpt' | 'index-setup' | 'index-store' | 'index-chroma-url' | 'index-embedder' | 'index-ollama-url' | 'done';
 type Provider = 'anthropic' | 'openai' | 'local';
 
 const PROVIDERS: { id: Provider; label: string; description: string }[] = [
@@ -15,19 +15,21 @@ const PROVIDERS: { id: Provider; label: string; description: string }[] = [
 
 interface OnboardingProps {
   onComplete: (config: SquirlConfig) => void;
+  initialConfig?: SquirlConfig;
 }
 
-export const Onboarding: React.FC<OnboardingProps> = ({ onComplete }) => {
+export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, initialConfig }) => {
   const { stdout } = useStdout();
   const width = Math.min(stdout.columns ?? 80, 64);
 
-  const [step, setStep] = useState<Step>('welcome');
-  const [providerIdx, setProviderIdx] = useState(0);
-  const [selectedProvider, setSelectedProvider] = useState<Provider>('anthropic');
-  const [anthropicKey, setAnthropicKey] = useState('');
-  const [openaiKey, setOpenaiKey] = useState('');
-  const [localModelName, setLocalModelName] = useState('');
-  const [localUrl, setLocalUrl] = useState('http://localhost:8000/v1');
+  const initProvider = (initialConfig?.defaultProvider ?? 'anthropic') as Provider;
+  const [step, setStep] = useState<Step>(initialConfig ? 'provider' : 'welcome');
+  const [providerIdx, setProviderIdx] = useState(Math.max(0, PROVIDERS.findIndex(p => p.id === initProvider)));
+  const [selectedProvider, setSelectedProvider] = useState<Provider>(initProvider);
+  const [anthropicKey, setAnthropicKey] = useState(initialConfig?.anthropicApiKey ?? '');
+  const [openaiKey, setOpenaiKey] = useState(initialConfig?.openaiApiKey ?? '');
+  const [localModelName, setLocalModelName] = useState(initialConfig?.defaultModel ?? '');
+  const [localUrl, setLocalUrl] = useState(initialConfig?.localBaseUrl ?? 'http://localhost:8000/v1');
   const [detectedModels, setDetectedModels] = useState<DetectedModel[]>([]);
   const [modelPickIdx, setModelPickIdx] = useState(0);
   const [alsoConfigureOpenai, setAlsoConfigureOpenai] = useState(false);
@@ -36,6 +38,14 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete }) => {
   const [importPath, setImportPath] = useState('');
   const [importCount, setImportCount] = useState<number | null>(null);
   const [importError, setImportError] = useState('');
+  const [indexSetupIdx, setIndexSetupIdx] = useState(initialConfig?.index?.enabled ? 0 : 1);
+  const [indexStoreIdx, setIndexStoreIdx] = useState(initialConfig?.index?.store === 'remote-chroma' ? 1 : 0);
+  const [indexEmbedderIdx, setIndexEmbedderIdx] = useState(initialConfig?.index?.embedder === 'ollama' ? 1 : 0);
+  const [indexEnabled, setIndexEnabled] = useState(initialConfig?.index?.enabled ?? false);
+  const [indexStore, setIndexStore] = useState<'local-chroma' | 'remote-chroma'>((initialConfig?.index?.store as 'local-chroma' | 'remote-chroma') ?? 'local-chroma');
+  const [indexChromaUrl, setIndexChromaUrl] = useState(initialConfig?.index?.chromaUrl ?? 'http://localhost:8000');
+  const [indexEmbedder, setIndexEmbedder] = useState<'openai' | 'ollama'>(initialConfig?.index?.embedder ?? 'openai');
+  const [indexOllamaUrl, setIndexOllamaUrl] = useState(initialConfig?.index?.ollamaUrl ?? 'http://localhost:11434');
 
   // Auto-detect backend and models when entering the detect step
   useEffect(() => {
@@ -88,6 +98,46 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete }) => {
       return;
     }
 
+    if (step === 'index-setup') {
+      if (key.upArrow) setIndexSetupIdx((i) => Math.max(0, i - 1));
+      if (key.downArrow) setIndexSetupIdx((i) => Math.min(1, i + 1));
+      if (key.return) {
+        if (indexSetupIdx === 0) {
+          setIndexEnabled(true);
+          setStep('index-store');
+        } else {
+          setStep('done');
+        }
+      }
+      return;
+    }
+
+    if (step === 'index-store') {
+      const stores = ['local-chroma', 'remote-chroma'] as const;
+      if (key.upArrow) setIndexStoreIdx((i) => Math.max(0, i - 1));
+      if (key.downArrow) setIndexStoreIdx((i) => Math.min(stores.length - 1, i + 1));
+      if (key.return) {
+        setIndexStore(stores[indexStoreIdx]!);
+        setStep('index-chroma-url');
+      }
+      return;
+    }
+
+    if (step === 'index-embedder') {
+      const embedders = ['openai', 'ollama'] as const;
+      if (key.upArrow) setIndexEmbedderIdx((i) => Math.max(0, i - 1));
+      if (key.downArrow) setIndexEmbedderIdx((i) => Math.min(embedders.length - 1, i + 1));
+      if (key.return) {
+        setIndexEmbedder(embedders[indexEmbedderIdx]!);
+        if (embedders[indexEmbedderIdx] === 'ollama') {
+          setStep('index-ollama-url');
+        } else {
+          setStep('done');
+        }
+      }
+      return;
+    }
+
     if (step === 'done') {
       if (key.return) finalize();
     }
@@ -126,7 +176,7 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete }) => {
 
   const handleImportSubmit = async (val: string) => {
     if (!val.trim()) {
-      setStep('done');
+      setStep('index-setup');
       return;
     }
     const resolved = val.trim().replace(/\\ /g, ' ').replace(/^~/, process.env.HOME ?? '');
@@ -141,10 +191,20 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete }) => {
         count++;
       }
       setImportCount(count);
-      setStep('done');
+      setStep('index-setup');
     } catch (err: unknown) {
       setImportError(err instanceof Error ? err.message : String(err));
     }
+  };
+
+  const handleChromaUrlSubmit = (val: string) => {
+    setIndexChromaUrl(val || indexChromaUrl);
+    setStep('index-embedder');
+  };
+
+  const handleOllamaUrlSubmit = (val: string) => {
+    setIndexOllamaUrl(val || indexOllamaUrl);
+    setStep('done');
   };
 
   const finalize = () => {
@@ -160,6 +220,16 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete }) => {
     if (selectedProvider === 'anthropic') config.defaultModel = 'claude-sonnet-4-6';
     else if (selectedProvider === 'openai') config.defaultModel = 'gpt-4o';
     else if (selectedProvider === 'local' && localModelName) config.defaultModel = localModelName;
+
+    if (indexEnabled) {
+      config.index = {
+        enabled: true,
+        store: indexStore,
+        chromaUrl: indexChromaUrl,
+        embedder: indexEmbedder,
+        ...(indexEmbedder === 'ollama' ? { ollamaUrl: indexOllamaUrl } : {}),
+      };
+    }
 
     onComplete(config);
   };
@@ -321,6 +391,98 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete }) => {
           </>
         )}
 
+        {step === 'index-setup' && (
+          <>
+            <Text bold>Set up semantic search?</Text>
+            <Text>This lets you search past conversations with <Text bold>/recall</Text></Text>
+            <Text dimColor>Requires a ChromaDB instance and an embedding provider</Text>
+            <Text> </Text>
+            {['Yes, set it up', 'No, skip for now'].map((label, i) => (
+              <Box key={label} paddingLeft={1}>
+                <Text color={i === indexSetupIdx ? 'cyan' : undefined}>
+                  {i === indexSetupIdx ? '❯ ' : '  '}{label}
+                </Text>
+              </Box>
+            ))}
+            <Text> </Text>
+            <Text dimColor>↑↓ navigate  enter select</Text>
+          </>
+        )}
+
+        {step === 'index-store' && (
+          <>
+            <Text bold>Choose vector store</Text>
+            <Text> </Text>
+            {[
+              { id: 'local-chroma', label: 'Local ChromaDB', desc: 'Docker container on localhost' },
+              { id: 'remote-chroma', label: 'Remote ChromaDB', desc: 'Hosted Chroma instance' },
+            ].map((s, i) => (
+              <Box key={s.id} paddingLeft={1}>
+                <Text color={i === indexStoreIdx ? 'cyan' : undefined}>
+                  {i === indexStoreIdx ? '❯ ' : '  '}
+                  <Text bold>{s.label}</Text>
+                  <Text dimColor>{'  '}{s.desc}</Text>
+                </Text>
+              </Box>
+            ))}
+            <Text> </Text>
+            <Text dimColor>↑↓ navigate  enter select</Text>
+          </>
+        )}
+
+        {step === 'index-chroma-url' && (
+          <>
+            <Text bold>ChromaDB URL</Text>
+            <Text dimColor>Press enter for default</Text>
+            <Box paddingTop={1}>
+              <Text color="green">URL: </Text>
+              <TextInput
+                value={indexChromaUrl}
+                onChange={setIndexChromaUrl}
+                onSubmit={handleChromaUrlSubmit}
+                focus={true}
+              />
+            </Box>
+          </>
+        )}
+
+        {step === 'index-embedder' && (
+          <>
+            <Text bold>Choose embedding provider</Text>
+            <Text> </Text>
+            {[
+              { id: 'openai', label: 'OpenAI', desc: 'text-embedding-3-small (requires API key)' },
+              { id: 'ollama', label: 'Ollama', desc: 'Local embeddings via Ollama' },
+            ].map((e, i) => (
+              <Box key={e.id} paddingLeft={1}>
+                <Text color={i === indexEmbedderIdx ? 'cyan' : undefined}>
+                  {i === indexEmbedderIdx ? '❯ ' : '  '}
+                  <Text bold>{e.label}</Text>
+                  <Text dimColor>{'  '}{e.desc}</Text>
+                </Text>
+              </Box>
+            ))}
+            <Text> </Text>
+            <Text dimColor>↑↓ navigate  enter select</Text>
+          </>
+        )}
+
+        {step === 'index-ollama-url' && (
+          <>
+            <Text bold>Ollama URL for embeddings</Text>
+            <Text dimColor>Press enter for default</Text>
+            <Box paddingTop={1}>
+              <Text color="green">URL: </Text>
+              <TextInput
+                value={indexOllamaUrl}
+                onChange={setIndexOllamaUrl}
+                onSubmit={handleOllamaUrlSubmit}
+                focus={true}
+              />
+            </Box>
+          </>
+        )}
+
         {step === 'done' && (
           <>
             <Text bold color="green">Setup complete!</Text>
@@ -331,6 +493,8 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete }) => {
             {selectedProvider === 'local' && <Text>Local model: <Text dimColor>{localModelName || '(not set)'}</Text></Text>}
             {selectedProvider === 'local' && <Text>Local URL: <Text dimColor>{localUrl}</Text></Text>}
             {importCount !== null && <Text>ChatGPT import: <Text dimColor>{importCount} conversations</Text></Text>}
+            {indexEnabled && <Text>Vector store: <Text dimColor>{indexStore} ({indexChromaUrl})</Text></Text>}
+            {indexEnabled && <Text>Embedder: <Text dimColor>{indexEmbedder}{indexEmbedder === 'ollama' ? ` (${indexOllamaUrl})` : ''}</Text></Text>}
             <Text> </Text>
             <Text dimColor>Config will be saved to ~/.squirl/config.json</Text>
             <Text dimColor>Press enter to start</Text>

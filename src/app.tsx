@@ -59,11 +59,13 @@ const ImportPrompt: React.FC<{ onSubmit: (path: string) => void; onClose: () => 
 interface AppProps {
   workingDir?: string;
   config?: SquirlConfig;
+  onSetup?: () => void;
 }
 
 export const App: React.FC<AppProps> = ({
   workingDir = process.cwd(),
   config,
+  onSetup,
 }) => {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -347,6 +349,7 @@ export const App: React.FC<AppProps> = ({
         modelId: selectedModel.id,
         setMessages,
         openContextPicker: () => setIsContextMenuOpen(true),
+        openSetup: onSetup,
         embedder: embedderRef.current ?? undefined,
         vectorStore: vectorStoreRef.current ?? undefined,
         indexEnabled: config?.index?.enabled ?? false,
@@ -519,7 +522,7 @@ export const App: React.FC<AppProps> = ({
           focus={!isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen}
         />
       )}
-      <StatusBar tokenCount={tokenCount} contextWindow={contextWindow} isStreaming={isStreaming} toolStatus={toolStatus} tokensPerSecond={tokensPerSecond} modelName={modelDisplay} workingDir={workingDir} commandQuery={commandQuery} commandIndex={commandIndex} statusEmitter={statusEmitterRef.current} />
+      <StatusBar tokenCount={tokenCount} contextWindow={contextWindow} isStreaming={isStreaming} toolStatus={toolStatus} tokensPerSecond={tokensPerSecond} modelName={modelDisplay} workingDir={workingDir} commandQuery={commandQuery} commandIndex={commandIndex} statusEmitter={statusEmitterRef.current} indexEnabled={config?.index?.enabled ?? false} storeName={config?.index?.store ? `${config.index.store}${config.index.chromaUrl ? ` (${config.index.chromaUrl.replace(/^https?:\/\//, '')})` : ''}` : ''} embedderName={config?.index?.embedder ? `${config.index.embedder}${config.index.embedderModel ? ` / ${config.index.embedderModel}` : ''}` : ''} />
     </Box>
   );
 };

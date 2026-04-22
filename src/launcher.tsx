@@ -18,20 +18,23 @@ const Root: React.FC = () => {
     }
     return null;
   });
+  const [showSetup, setShowSetup] = useState(false);
 
-  if (!config) {
+  if (!config || showSetup) {
     return (
       <Onboarding
+        initialConfig={config ?? undefined}
         onComplete={(cfg) => {
           saveConfig(cfg);
           applyConfigToEnv(cfg);
           setConfig(cfg);
+          setShowSetup(false);
         }}
       />
     );
   }
 
-  return <App config={config} />;
+  return <App config={config} onSetup={() => setShowSetup(true)} />;
 };
 
 export async function launchApp(): Promise<void> {

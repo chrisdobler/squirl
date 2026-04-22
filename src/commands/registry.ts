@@ -13,6 +13,7 @@ export interface CommandContext {
   modelId: string;
   setMessages: (fn: (prev: Message[]) => Message[]) => void;
   openContextPicker: () => void;
+  openSetup?: () => void;
   embedder?: Embedder;
   vectorStore?: VectorStore;
   indexEnabled?: boolean;
@@ -87,6 +88,13 @@ const commands: SlashCommand[] = [
         toolCallId: 'recall', toolName: '/recall',
         content: formatted,
       }]);
+    },
+  },
+  {
+    name: 'setup',
+    description: 'Re-run onboarding to change provider, keys, or index settings',
+    execute: (ctx) => {
+      if (ctx.openSetup) ctx.openSetup();
     },
   },
   {

@@ -15,6 +15,9 @@ interface StatusBarProps {
   commandQuery?: string | null;
   commandIndex?: number;
   statusEmitter?: StatusEmitter | null;
+  indexEnabled?: boolean;
+  storeName?: string;
+  embedderName?: string;
 }
 
 function formatTokens(n: number): string {
@@ -22,7 +25,7 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-export const StatusBar: React.FC<StatusBarProps> = React.memo(({ tokenCount = 0, contextWindow = 0, isStreaming = false, toolStatus = '', tokensPerSecond = 0, modelName = '', workingDir = '', commandQuery = null, commandIndex = 0, statusEmitter = null }) => {
+export const StatusBar: React.FC<StatusBarProps> = React.memo(({ tokenCount = 0, contextWindow = 0, isStreaming = false, toolStatus = '', tokensPerSecond = 0, modelName = '', workingDir = '', commandQuery = null, commandIndex = 0, statusEmitter = null, indexEnabled = false, storeName = '', embedderName = '' }) => {
   const { stdout } = useStdout();
   const width = stdout.columns ?? 80;
 
@@ -46,17 +49,26 @@ export const StatusBar: React.FC<StatusBarProps> = React.memo(({ tokenCount = 0,
   }
 
   return (
-    <Box paddingX={2} width={width} justifyContent="space-between">
-      <Text dimColor>
-        {toolStatus ? <Text color="yellow">{toolStatus}{'  '}</Text> : null}
-        {isStreaming ? 'esc cancel  ' : ''}
-        ctrl+c exit{'  '}ctrl+p menu{'  '}ctrl+v thinking{'  '}
-        context: {formatTokens(tokenCount)}/{formatTokens(contextWindow)}
-        {'  '}{tokensPerSecond} t/s
-      </Text>
-      <Box>
-        {statusEmitter && <IndexStatus statusEmitter={statusEmitter} />}
-        <Text dimColor>{'  '}{modelName}{'  '}{workingDir}</Text>
+    <Box flexDirection="column" paddingX={2} width={width}>
+      <Box justifyContent="space-between">
+        <Text dimColor>
+          {toolStatus ? <Text color="yellow">{toolStatus}{'  '}</Text> : null}
+          {isStreaming ? 'esc cancel  ' : ''}
+          ctrl+c exit{'  '}ctrl+p menu{'  '}ctrl+v thinking{'  '}
+          context: {formatTokens(tokenCount)}/{formatTokens(contextWindow)}
+          {'  '}{tokensPerSecond} t/s
+        </Text>
+        <Box>
+          {statusEmitter && <IndexStatus statusEmitter={statusEmitter} />}
+          <Text dimColor>{'  '}{modelName}{'  '}{workingDir}</Text>
+        </Box>
+      </Box>
+      <Box justifyContent="flex-end">
+        <Text dimColor>
+          {indexEnabled
+            ? `store: ${storeName}  embedder: ${embedderName}`
+            : 'index: not configured'}
+        </Text>
       </Box>
     </Box>
   );
