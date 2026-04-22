@@ -8,6 +8,7 @@ import { StatusBar } from './components/StatusBar.js';
 import { ModelPicker } from './components/ModelPicker.js';
 import { ContextPicker } from './components/ContextPicker.js';
 import { CommandPalette, type PaletteAction } from './components/CommandPalette.js';
+import { ToastContainer, type ToastMessage } from './components/Toast.js';
 import { Orchestrator } from './orchestrator.js';
 import { getModelConfig } from './model-config.js';
 import { loadHistory, appendMessage, readEntries, getAllHistoryFiles } from './history.js';
@@ -98,6 +99,13 @@ export const App: React.FC<AppProps> = ({
   const [tokenCount, setTokenCount] = useState(0);
   const [embedderDisplay, setEmbedderDisplay] = useState('');
   const [mouseMode, setMouseMode] = useState(true);
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const addToast = useCallback((text: string, type: 'error' | 'info' = 'error') => {
+    setToasts((prev) => [...prev, { id: crypto.randomUUID(), text, type }]);
+  }, []);
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
   const [scrollOffset, setScrollOffset] = useState(0);
   const maxScrollRef = useRef(0);
   const prevMaxScrollRef = useRef(0);
@@ -113,6 +121,24 @@ export const App: React.FC<AppProps> = ({
       setScrollOffset(offset => Math.min(max, offset + (max - prev)));
     }
   }, [isStreaming]);
+
+  // Surface index status as toasts
+  const lastIndexErrorRef = useRef('');
+  useEffect(() => {
+    const emitter = statusEmitterRef.current;
+    const listener = (s: { phase: string; error?: string; batchSize?: number; chars?: number; maxChars?: number }) => {
+      if (s.phase === 'error' && s.error && s.error !== lastIndexErrorRef.current) {
+        lastIndexErrorRef.current = s.error;
+        addToast(s.error);
+      }
+      if (s.phase === 'embedding' && s.batchSize && s.chars) {
+        addToast(`embedding ${s.batchSize} turn(s) — ${s.chars} chars (max ${s.maxChars ?? '?'})`, 'info');
+      }
+      if (s.phase === 'idle') lastIndexErrorRef.current = '';
+    };
+    emitter.on(listener as any);
+    return () => { emitter.off(listener as any); };
+  }, [addToast]);
 
   useEffect(() => {
     if (mouseMode) {
@@ -175,12 +201,17 @@ export const App: React.FC<AppProps> = ({
       const embedderBackend = embedderUrl ? await detectLocalBackend(embedderUrl) : undefined;
       if (cancelled) return;
 
-      // Auto-detect embedding model from the server
+      // Auto-detect embedding model and context window from the server
       let embedderModel = config.index!.embedderModel;
-      if (!embedderModel && embedderUrl && embedderBackend) {
+      let embedderMaxTokens = 512;
+      if (embedderUrl && embedderBackend) {
         const models = await fetchAvailableModels(embedderUrl, embedderBackend);
         if (cancelled) return;
-        if (models.length > 0) embedderModel = models[0]!.id;
+        if (models.length > 0) {
+          if (!embedderModel) embedderModel = models[0]!.id;
+          const match = models.find((m) => m.id === embedderModel);
+          if (match?.contextWindow) embedderMaxTokens = match.contextWindow;
+        }
       }
 
       const backendLabel = embedderBackend ? BACKEND_DISPLAY_NAMES[embedderBackend] || embedderBackend : '';
@@ -209,7 +240,7 @@ export const App: React.FC<AppProps> = ({
       embedderRef.current = embedder;
       vectorStoreRef.current = store;
 
-      const queue = new IngestQueue(embedder, store, statusEmitterRef.current);
+      const queue = new IngestQueue(embedder, store, statusEmitterRef.current, embedderMaxTokens);
       ingestQueueRef.current = queue;
 
       // Memory retrieval pipeline
@@ -517,6 +548,7 @@ export const App: React.FC<AppProps> = ({
 
   return (
     <Box flexDirection="column" height={terminalRows}>
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
       <Header />
       {isContextMenuOpen ? (
         <ContextPicker

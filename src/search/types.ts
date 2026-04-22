@@ -44,4 +44,7 @@ export interface IngestStatus {
   phase: IngestPhase;
   pending: number;
   error?: string;
+  batchSize?: number;
+  chars?: number;
+  maxChars?: number;
 }

@@ -1,5 +1,8 @@
 import type { Embedder } from '../types.js';
 import OpenAI from 'openai';
+import { appendFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 
 type CreateFn = (params: { model: string; input: string[] }) => Promise<{ data: { index: number; embedding: number[] }[] }>;
 
@@ -30,7 +33,25 @@ export class OpenAIEmbedder implements Embedder {
   }
 
   async embed(texts: string[]): Promise<number[][]> {
-    const res = await this.create({ model: this.model, input: texts });
-    return res.data.sort((a, b) => a.index - b.index).map((d) => d.embedding);
+    const params = { model: this.model, input: texts };
+    if (process.env.SQUIRL_DEBUG) {
+      const logPath = join(homedir(), '.squirl', 'embedder.log');
+      appendFileSync(logPath, `[${new Date().toISOString()}] REQUEST ${JSON.stringify(params, null, 2)}\n`);
+    }
+    try {
+      const res = await this.create(params);
+      if (process.env.SQUIRL_DEBUG) {
+        const logPath = join(homedir(), '.squirl', 'embedder.log');
+        const summary = res.data.map(d => ({ index: d.index, dims: d.embedding.length }));
+        appendFileSync(logPath, `[${new Date().toISOString()}] RESPONSE ${JSON.stringify(summary)}\n`);
+      }
+      return res.data.sort((a, b) => a.index - b.index).map((d) => d.embedding);
+    } catch (err) {
+      if (process.env.SQUIRL_DEBUG) {
+        const logPath = join(homedir(), '.squirl', 'embedder.log');
+        appendFileSync(logPath, `[${new Date().toISOString()}] ERROR ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+      throw err;
+    }
   }
 }
