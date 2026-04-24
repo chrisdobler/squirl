@@ -435,7 +435,7 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, initialConfi
           <>
             <Text bold>Set up semantic search?</Text>
             <Text>This lets you search past conversations with <Text bold>/recall</Text></Text>
-            <Text dimColor>Requires a ChromaDB instance and an embedding provider</Text>
+            <Text dimColor>Requires a ChromaDB v2 instance and an embedding provider</Text>
             <Text> </Text>
             {['Yes, set it up', 'No, skip for now'].map((label, i) => (
               <Box key={label} paddingLeft={1}>
@@ -454,8 +454,8 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, initialConfi
             <Text bold>Choose vector store</Text>
             <Text> </Text>
             {[
-              { id: 'local-chroma', label: 'Local ChromaDB', desc: 'Docker container on localhost' },
-              { id: 'remote-chroma', label: 'Remote ChromaDB', desc: 'Hosted Chroma instance' },
+              { id: 'local-chroma', label: 'Local ChromaDB', desc: 'Docker container on localhost (v2 API)' },
+              { id: 'remote-chroma', label: 'Remote ChromaDB', desc: 'Hosted Chroma instance (v2 API)' },
             ].map((s, i) => (
               <Box key={s.id} paddingLeft={1}>
                 <Text color={i === indexStoreIdx ? 'cyan' : undefined}>

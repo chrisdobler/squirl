@@ -1,4 +1,5 @@
 import type { VectorStore, EmbeddedChunk, SearchResult, TurnPair } from '../types.js';
+import { searchLog } from '../debug.js';
 
 interface ChromaCollection {
   upsert(p: { ids: string[]; embeddings: number[][]; documents: string[]; metadatas: Record<string, string>[] }): Promise<void>;
@@ -11,28 +12,35 @@ export class ChromaStore implements VectorStore {
 
   async upsert(chunks: EmbeddedChunk[]): Promise<void> {
     if (chunks.length === 0) return;
+    searchLog('CHROMA UPSERT', { count: chunks.length, ids: chunks.map(c => c.turnPair.id) });
     await this.collection.upsert({
       ids: chunks.map((c) => c.turnPair.id),
       embeddings: chunks.map((c) => c.embedding),
       documents: chunks.map((c) => c.text),
       metadatas: chunks.map((c) => ({ turnPair: JSON.stringify(c.turnPair) })),
     });
+    searchLog('CHROMA UPSERT OK');
   }
 
   async query(embedding: number[], k: number): Promise<SearchResult[]> {
+    searchLog('CHROMA QUERY', { dims: embedding.length, k });
     const res = await this.collection.query({ queryEmbeddings: [embedding], nResults: k });
     const ids = res.ids[0] ?? [];
     const distances = res.distances[0] ?? [];
     const metadatas = res.metadatas[0] ?? [];
-    return ids.map((id, i) => ({
+    const results = ids.map((id, i) => ({
       id, score: distances[i] ?? 1,
       turnPair: JSON.parse((metadatas[i] as Record<string, string>)?.turnPair ?? '{}') as TurnPair,
     }));
+    searchLog('CHROMA QUERY RESULTS', results.map(r => ({ id: r.id, score: r.score.toFixed(4), user: r.turnPair.userText?.slice(0, 60) })));
+    return results;
   }
 
   async has(ids: string[]): Promise<Set<string>> {
     if (ids.length === 0) return new Set();
+    searchLog('CHROMA HAS', { count: ids.length });
     const res = await this.collection.get({ ids });
+    searchLog('CHROMA HAS RESULT', { found: res.ids.length });
     return new Set(res.ids);
   }
 

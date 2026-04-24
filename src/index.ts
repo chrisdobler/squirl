@@ -23,7 +23,7 @@ program
   .description('Import chat history from external sources (e.g., chatgpt). Path can be a file or directory.')
   .option('--embedder <type>', 'Embedding provider (openai or local)', 'openai')
   .option('--store <type>', 'Store type (local-chroma)', 'local-chroma')
-  .option('--chroma-url <url>', 'Chroma server URL', 'http://localhost:8000')
+  .option('--chroma-url <url>', 'Chroma v2 server URL', 'http://localhost:8000')
   .action(async (source: string, path: string, opts: any) => {
     const { getImporter } = await import('./search/importers/index.js');
     const { createEmbedder } = await import('./search/embedders/index.js');

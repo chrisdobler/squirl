@@ -1,6 +1,7 @@
 import type { MetaLLM } from './meta-extract.js';
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
+import { searchLog } from './debug.js';
 
 type OpenAICreateFn = (params: {
   model: string;
@@ -36,14 +37,19 @@ export class OpenAIMetaLLM implements MetaLLM {
     systemPrompt: string;
     messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   }): Promise<string> {
-    const response = await this.create({
+    const request = {
       model: this.model,
       messages: [
         { role: 'system', content: params.systemPrompt },
         ...params.messages,
       ],
-      max_tokens: 300,
-    });
+      max_tokens: 1024,
+      temperature: 0.1,
+      chat_template_kwargs: { enable_thinking: false },
+    };
+    searchLog('META-LLM RAW REQUEST', { model: this.model, messageCount: request.messages.length });
+    const response = await this.create(request);
+    searchLog('META-LLM RAW RESPONSE', { content: response.choices[0]?.message?.content, finishReason: (response.choices[0] as any)?.finish_reason });
     return response.choices[0]?.message?.content ?? '';
   }
 }
@@ -83,7 +89,7 @@ export class AnthropicMetaLLM implements MetaLLM {
       model: this.model,
       system: params.systemPrompt,
       messages: params.messages,
-      max_tokens: 300,
+      max_tokens: 1024,
     });
     const textBlock = response.content.find((b) => b.type === 'text');
     return textBlock?.text ?? '';

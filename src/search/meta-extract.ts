@@ -1,6 +1,8 @@
 import type { Message } from '../types.js';
+import { searchLog } from './debug.js';
 
-const SYSTEM_PROMPT = `You are a search query generator. Given the conversation below, generate 2-3 short search queries that would find relevant prior conversations from the user's history. Focus on topics, tools, concepts, or patterns the user might have discussed before. Output a JSON array of strings, nothing else.`;
+const SYSTEM_PROMPT = `/no_think
+Generate 2-3 short search queries to find relevant prior conversations. Output ONLY a JSON array. Example: ["query one", "query two"]`;
 
 export interface MetaLLM {
   complete(params: {
@@ -15,18 +17,23 @@ export async function extractSearchQueries(
   llm: MetaLLM,
 ): Promise<string[]> {
   try {
-    const messages = conversation
+    const recent = conversation
       .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }));
+      .slice(-6)
+      .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content.slice(0, 500) }));
 
-    messages.push({ role: 'user', content: userMessage });
+    const messages = [...recent, { role: 'user' as const, content: userMessage }];
 
+    searchLog('META-LLM REQUEST', { messageCount: messages.length, userMessage: userMessage.slice(0, 100) });
     const response = await llm.complete({ systemPrompt: SYSTEM_PROMPT, messages });
+    searchLog('META-LLM RESPONSE', response);
 
-    const parsed = JSON.parse(response);
+    const cleaned = response.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+    const parsed = JSON.parse(cleaned);
     if (!Array.isArray(parsed)) return [];
     return parsed.filter((q): q is string => typeof q === 'string');
-  } catch {
+  } catch (err) {
+    searchLog('META-LLM ERROR', err instanceof Error ? err.message : String(err));
     return [];
   }
 }

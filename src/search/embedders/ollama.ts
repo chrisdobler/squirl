@@ -1,4 +1,5 @@
 import type { Embedder } from '../types.js';
+import { searchLog } from '../debug.js';
 
 type FetchFn = typeof globalThis.fetch;
 
@@ -25,13 +26,19 @@ export class OllamaEmbedder implements Embedder {
   }
 
   async embed(texts: string[]): Promise<number[][]> {
+    searchLog('OLLAMA EMBED REQUEST', { model: this.model, url: this.url, texts: texts.length, chars: texts.map(t => t.length) });
     const res = await this.fetch(this.url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: this.model, input: texts }),
     });
-    if (!res.ok) throw new Error(`Ollama embed failed (${res.status}): ${await res.text()}`);
+    if (!res.ok) {
+      const body = await res.text();
+      searchLog('OLLAMA EMBED ERROR', { status: res.status, body });
+      throw new Error(`Ollama embed failed (${res.status}): ${body}`);
+    }
     const json = await res.json() as { embeddings: number[][] };
+    searchLog('OLLAMA EMBED RESPONSE', json.embeddings.map((e, i) => ({ index: i, dims: e.length, head: e.slice(0, 5).map(v => v.toFixed(4)) })));
     return json.embeddings;
   }
 }

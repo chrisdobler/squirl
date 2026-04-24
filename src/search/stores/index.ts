@@ -9,6 +9,7 @@ export interface StoreConfig {
   collection?: string;
 }
 
+// Requires Chroma server 1.0+ (v2 API) — uses chromadb client 3.x
 export async function createVectorStore(config: StoreConfig): Promise<VectorStore> {
   switch (config.type) {
     case 'null': return new NullStore();
@@ -20,7 +21,6 @@ export async function createVectorStore(config: StoreConfig): Promise<VectorStor
         host: url.hostname,
         port: parseInt(url.port || (url.protocol === 'https:' ? '443' : '8000'), 10),
         ssl: url.protocol === 'https:',
-        ...(config.chromaAuthToken ? { authCredentials: config.chromaAuthToken } : {}),
       });
       const collection = await client.getOrCreateCollection({ name: config.collection ?? 'squirl-messages' });
       return new ChromaStore(collection as any);

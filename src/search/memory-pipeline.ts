@@ -3,6 +3,7 @@ import type { Embedder, VectorStore, SearchResult } from './types.js';
 import { extractSearchQueries } from './meta-extract.js';
 import type { MetaLLM } from './meta-extract.js';
 import { formatMemorySystemMessage, formatMemoryInline } from './memory-format.js';
+import { searchLog } from './debug.js';
 
 export interface MemoryPipelineConfig {
   recallK: number;
@@ -28,6 +29,7 @@ export class MemoryPipeline {
     const empty: MemoryResult = { results: [], systemMessage: '', inlineDisplay: '' };
 
     const queries = await extractSearchQueries(conversation, userMessage, this.llm);
+    searchLog('MEMORY QUERIES', queries);
     if (queries.length === 0) return empty;
 
     const embeddings = await this.embedder.embed(queries);
@@ -55,6 +57,7 @@ export class MemoryPipeline {
 
     filtered.sort((a, b) => a.score - b.score);
     const topK = filtered.slice(0, this.config.recallK);
+    searchLog('MEMORY RESULTS', { total: allResults.length, deduped: deduped.size, filtered: filtered.length, topK: topK.length });
 
     if (topK.length === 0) return empty;
 

@@ -44,7 +44,10 @@ export class IngestQueue {
         const texts = batch.map((p) => {
           let t = `${p.userText}\n${p.assistantText}`;
           if (p.toolSummary) t += `\n${p.toolSummary}`;
-          return t.length > this.maxChars ? t.slice(0, this.maxChars) : t;
+          // Strip control chars and unpaired surrogates that break tokenizers
+          t = t.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]|[\uD800-\uDFFF]/g, '');
+          if (t.length > this.maxChars) t = t.slice(0, this.maxChars);
+          return t || ' ';
         });
         const totalChars = texts.reduce((sum, t) => sum + t.length, 0);
         this.status.update({ phase: 'embedding', pending: batch.length + this.queue.length, batchSize: batch.length, chars: totalChars, maxChars: this.maxChars });

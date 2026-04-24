@@ -6,3 +6,21 @@ services:
     volumes:
       - ~/.squirl/chroma:/chroma/chroma
     restart: unless-stopped
+  # Next.js admin UI (community image, not official Chroma). Open http://localhost:3001
+  # On first visit, set Chroma URL to http://chroma:8000 (resolved from inside this compose network).
+  chroma-admin:
+    image: fengzhichao/chromadb-admin:latest
+    ports:
+      - "3001:3001"
+    depends_on:
+      - chroma
+    restart: unless-stopped
+  postgres:
+    image: postgres:15
+    restart: always
+    environment:
+      POSTGRES_USER: vectoradmin
+      POSTGRES_PASSWORD: vectoradmin
+      POSTGRES_DB: vectoradmin
+    ports:
+      - "5432:5432"

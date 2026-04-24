@@ -65,7 +65,7 @@ const commands: SlashCommand[] = [
         ctx.setMessages((prev) => [...prev, {
           id: crypto.randomUUID(), role: 'tool' as const,
           toolCallId: 'recall', toolName: '/recall',
-          content: 'Index not enabled. Add index config to ~/.squirl/config.json and run docker compose up -d',
+          content: 'Index not enabled. Run /setup to configure ChromaDB v2 and an embedding provider.',
         }]);
         return;
       }

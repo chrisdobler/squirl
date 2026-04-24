@@ -12,7 +12,7 @@ importers:
         specifier: ^0.86.1
         version: 0.86.1
       chromadb:
-        specifier: ^3.4.3
+        specifier: 3.4.3
         version: 3.4.3
       commander:
         specifier: ^12.0.0

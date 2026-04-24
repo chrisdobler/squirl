@@ -245,7 +245,7 @@ export const App: React.FC<AppProps> = ({
 
       // Memory retrieval pipeline
       const metaProvider = config.index!.metaProvider ?? config.defaultProvider ?? 'openai';
-      const metaModel = config.index!.metaModel ?? 'gpt-4o-mini';
+      const metaModel = config.index!.metaModel ?? (metaProvider === 'local' ? (config.defaultModel ?? 'default') : 'gpt-4o-mini');
       let metaLLM: MetaLLM;
       if (metaProvider === 'anthropic') {
         metaLLM = new AnthropicMetaLLM({ model: metaModel });
