@@ -149,3 +149,87 @@ describe('loadHistory', () => {
     expect(messages).toHaveLength(0);
   });
 });
+
+describe('rewindHistoryAfter', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    testCounter++;
+    testHome = join(tmpdir(), `squirl-test-${process.pid}-${testCounter}`);
+    historyDir = join(testHome, '.squirl', 'history');
+    mkdirSync(historyDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(testHome, { recursive: true, force: true });
+  });
+
+  it('removes messages after the target id and preserves retained timestamps', async () => {
+    writeJsonl(join(historyDir, 'current.jsonl'), [
+      entry('u1', 'user', 'hello', '2026-04-10T12:00:00Z'),
+      entry('a1', 'assistant', 'hi', '2026-04-10T12:00:01Z'),
+      entry('u2', 'user', 'dirty', '2026-04-10T12:00:02Z'),
+      entry('a2', 'assistant', 'reply', '2026-04-10T12:00:03Z'),
+    ]);
+
+    const { rewindHistoryAfter, readEntries } = await import('./history.js');
+    const result = rewindHistoryAfter('a1');
+
+    expect(result.targetFound).toBe(true);
+    expect(result.removed.map((m) => m.id)).toEqual(['u2', 'a2']);
+
+    const entries = readEntries(join(historyDir, 'current.jsonl'));
+    expect(entries.map((e) => e.message.id)).toEqual(['u1', 'a1']);
+    expect(entries[1]!.timestamp).toBe('2026-04-10T12:00:01Z');
+  });
+
+  it('can remove all writable history with a null target', async () => {
+    writeJsonl(join(historyDir, 'current.jsonl'), [
+      entry('u1', 'user', 'hello', '2026-04-10T12:00:00Z'),
+      entry('a1', 'assistant', 'hi', '2026-04-10T12:00:01Z'),
+    ]);
+
+    const { rewindHistoryAfter, readEntries } = await import('./history.js');
+    const result = rewindHistoryAfter(null);
+
+    expect(result.targetFound).toBe(true);
+    expect(result.removed.map((m) => m.id)).toEqual(['u1', 'a1']);
+    expect(readEntries(join(historyDir, 'current.jsonl'))).toEqual([]);
+  });
+
+  it('rewrites current and daily logs without touching imports', async () => {
+    const importsDir = join(historyDir, 'imports');
+    mkdirSync(importsDir, { recursive: true });
+    writeJsonl(join(historyDir, '2026-04-09.jsonl'), [
+      entry('u1', 'user', 'old', '2026-04-09T12:00:00Z'),
+      entry('a1', 'assistant', 'old reply', '2026-04-09T12:00:01Z'),
+    ]);
+    writeJsonl(join(historyDir, 'current.jsonl'), [
+      entry('u2', 'user', 'new', '2026-04-10T12:00:00Z'),
+      entry('a2', 'assistant', 'new reply', '2026-04-10T12:00:01Z'),
+    ]);
+    writeJsonl(join(importsDir, 'chatgpt.jsonl'), [
+      entry('imp1', 'user', 'imported', '2026-04-10T12:00:02Z'),
+    ]);
+
+    const { rewindHistoryAfter, readEntries } = await import('./history.js');
+    const result = rewindHistoryAfter('a1');
+
+    expect(result.removed.map((m) => m.id)).toEqual(['u2', 'a2']);
+    expect(readEntries(join(historyDir, '2026-04-09.jsonl')).map((e) => e.message.id)).toEqual(['u1', 'a1']);
+    expect(readEntries(join(historyDir, 'current.jsonl'))).toEqual([]);
+    expect(readEntries(join(importsDir, 'chatgpt.jsonl')).map((e) => e.message.id)).toEqual(['imp1']);
+  });
+
+  it('does not rewrite files when the target is missing', async () => {
+    writeJsonl(join(historyDir, 'current.jsonl'), [
+      entry('u1', 'user', 'hello', '2026-04-10T12:00:00Z'),
+    ]);
+
+    const { rewindHistoryAfter, readEntries } = await import('./history.js');
+    const result = rewindHistoryAfter('missing');
+
+    expect(result.targetFound).toBe(false);
+    expect(result.removed).toEqual([]);
+    expect(readEntries(join(historyDir, 'current.jsonl')).map((e) => e.message.id)).toEqual(['u1']);
+  });
+});

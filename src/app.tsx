@@ -11,8 +11,10 @@ import { CommandPalette, type PaletteAction } from './components/CommandPalette.
 import { ToastContainer, type ToastMessage } from './components/Toast.js';
 import { Orchestrator } from './orchestrator.js';
 import { getModelConfig } from './model-config.js';
-import { loadHistory, appendMessage, readEntries, getAllHistoryFiles } from './history.js';
+import { loadHistory, appendMessage, readEntries, getAllHistoryFiles, rewindHistoryAfter } from './history.js';
 import { matchCommand, filterCommands } from './commands/registry.js';
+import { buildRewindCandidates, rewindRequestFromCandidate } from './rewind.js';
+import type { RewindRequest } from './rewind.js';
 import { estimateTokens } from './context/token-estimator.js';
 import { buildSystemPrompt } from './context/system-prompt.js';
 import { useMouseWheel } from './hooks/useMouseWheel.js';
@@ -72,6 +74,49 @@ const ApprovalPrompt: React.FC<{ command: string; onRespond: (approved: boolean)
   );
 };
 
+const RewindPrompt: React.FC<{ request: RewindRequest; onRespond: (approved: boolean) => void }> = ({ request, onRespond }) => {
+  useInput((input, key) => {
+    if (input === 'y' || input === 'Y') onRespond(true);
+    else if (input === 'n' || input === 'N' || key.escape) onRespond(false);
+  });
+  return (
+    <Box borderStyle="single" borderTop={true} borderBottom={true} borderLeft={false} borderRight={false} paddingX={1} gap={1}>
+      <Text color="yellow" bold>{'↩ '}</Text>
+      <Text>
+        Rewind to <Text color="cyan">{request.label}</Text>; remove {request.removedCount} message{request.removedCount === 1 ? '' : 's'}? <Text dimColor>(y/n)</Text>
+      </Text>
+    </Box>
+  );
+};
+
+const RewindModePrompt: React.FC<{
+  selectedCandidate: ReturnType<typeof buildRewindCandidates>[number] | undefined;
+  selectedIndex: number;
+  candidateCount: number;
+  onMove: (direction: -1 | 1) => void;
+  onSelect: () => void;
+  onClose: () => void;
+}> = ({ selectedCandidate, selectedIndex, candidateCount, onMove, onSelect, onClose }) => {
+  useInput((_input, key) => {
+    if (key.upArrow) onMove(-1);
+    else if (key.downArrow) onMove(1);
+    else if (key.return) onSelect();
+    else if (key.escape) onClose();
+  });
+
+  return (
+    <Box borderStyle="single" borderTop={true} borderBottom={true} borderLeft={false} borderRight={false} paddingX={1} gap={1}>
+      <Text color="yellow" bold>{'rewind'}</Text>
+      <Text>
+        <Text color="cyan">{selectedIndex + 1}/{candidateCount}</Text>
+        {'  '}target message {selectedCandidate ? selectedCandidate.messageIndex + 1 : '?'}
+        {'  '}remove {selectedCandidate?.removedCount ?? 0}
+        {'  '}<Text dimColor>up/down select  enter confirm  esc cancel</Text>
+      </Text>
+    </Box>
+  );
+};
+
 interface AppProps {
   workingDir?: string;
   config?: SquirlConfig;
@@ -92,7 +137,10 @@ export const App: React.FC<AppProps> = ({
   const [isContextMenuOpen, setIsContextMenuOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isImportPromptOpen, setIsImportPromptOpen] = useState(false);
+  const [isRewindPickerOpen, setIsRewindPickerOpen] = useState(false);
+  const [rewindPickerIndex, setRewindPickerIndex] = useState(0);
   const [pendingApproval, setPendingApproval] = useState<{ command: string; resolve: (approved: boolean) => void } | null>(null);
+  const [pendingRewind, setPendingRewind] = useState<RewindRequest | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [toolStatus, setToolStatus] = useState('');
   const [pipelineStatus, setPipelineStatus] = useState<QueryPipelineStatus | null>(null);
@@ -125,6 +173,7 @@ export const App: React.FC<AppProps> = ({
   const [scrollOffset, setScrollOffset] = useState(0);
   const maxScrollRef = useRef(0);
   const prevMaxScrollRef = useRef(0);
+  const rewindCandidates = buildRewindCandidates(messages);
 
   const handleMaxScroll = useCallback((max: number) => {
     const prev = prevMaxScrollRef.current;
@@ -166,7 +215,7 @@ export const App: React.FC<AppProps> = ({
 
   useMouseWheel({
     onScroll: (delta) => setScrollOffset((prev) => Math.max(0, Math.min(maxScrollRef.current, prev + delta))),
-    isActive: mouseMode && !isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen,
+    isActive: mouseMode && !isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen && !isRewindPickerOpen,
   });
 
   // Detect backend and fetch context window from local provider when not already known
@@ -306,7 +355,7 @@ export const App: React.FC<AppProps> = ({
   }, []);
 
   useInput((input, key) => {
-    if (isModelMenuOpen || isContextMenuOpen || isCommandPaletteOpen || isImportPromptOpen) return;
+    if (isModelMenuOpen || isContextMenuOpen || isCommandPaletteOpen || isImportPromptOpen || isRewindPickerOpen || pendingRewind) return;
     if (key.ctrl && input === 'c') { exit(); return; }
     if (key.ctrl && input === 'p') { if (!isStreaming) setIsCommandPaletteOpen(true); return; }
     if (key.ctrl && input === 'v') { setShowThinking((v) => !v); return; }
@@ -421,6 +470,88 @@ export const App: React.FC<AppProps> = ({
     }
   };
 
+  const openRewindPicker = useCallback(() => {
+    if (isStreaming) {
+      addToast('Cannot rewind while streaming.');
+      return;
+    }
+    const candidates = buildRewindCandidates(messages);
+    if (candidates.length === 0) {
+      addToast('No previous user messages to rewind to.');
+      return;
+    }
+    setRewindPickerIndex(candidates.length - 1);
+    setIsRewindPickerOpen(true);
+    setScrollOffset(0);
+  }, [addToast, isStreaming, messages]);
+
+  const moveRewindPicker = useCallback((direction: -1 | 1) => {
+    setRewindPickerIndex((index) => Math.max(0, Math.min(rewindCandidates.length - 1, index + direction)));
+  }, [rewindCandidates.length]);
+
+  const selectRewindCandidate = useCallback(() => {
+    const candidate = rewindCandidates[rewindPickerIndex];
+    if (!candidate) {
+      setIsRewindPickerOpen(false);
+      setScrollOffset(0);
+      addToast('No rewind target selected.');
+      return;
+    }
+    setIsRewindPickerOpen(false);
+    setScrollOffset(0);
+    setPendingRewind(rewindRequestFromCandidate(candidate));
+  }, [addToast, rewindCandidates, rewindPickerIndex]);
+
+  const performRewind = useCallback(async (request: RewindRequest) => {
+    if (isStreaming) {
+      addToast('Cannot rewind while streaming.');
+      return;
+    }
+
+    const visibleRetained = messages.slice(0, request.retainedCount);
+    const visibleRemoved = messages.slice(request.retainedCount);
+    const writableIds = new Set(
+      getAllHistoryFiles().flatMap((file) => readEntries(file).map((entry) => entry.message.id)),
+    );
+    const persistedIds = new Set(loadHistory().map((message) => message.id));
+
+    if (request.targetMessageId !== null && !writableIds.has(request.targetMessageId)) {
+      addToast('Cannot rewind to imported history; choose a Squirl message.');
+      return;
+    }
+    const nonWritableRemoved = visibleRemoved.filter((message) => !writableIds.has(message.id) && persistedIds.has(message.id));
+    if (nonWritableRemoved.length > 0) {
+      addToast('Cannot rewind across imported history; imported archives are preserved.');
+      return;
+    }
+
+    const oldPairIds = new Set(messagesToTurnPairs(messages, 'current', 'squirl').map((pair) => pair.id));
+    const retainedPairIds = new Set(messagesToTurnPairs(visibleRetained, 'current', 'squirl').map((pair) => pair.id));
+    const deleteIds = [...oldPairIds].filter((id) => !retainedPairIds.has(id));
+
+    const result = rewindHistoryAfter(request.targetMessageId);
+    if (!result.targetFound) {
+      addToast('Cannot rewind: target message is not in writable Squirl history.');
+      return;
+    }
+
+    setMessages(() => visibleRetained);
+    setScrollOffset(0);
+    historyIndexRef.current = -1;
+    savedInputRef.current = '';
+
+    if (deleteIds.length > 0 && vectorStoreRef.current) {
+      try {
+        await vectorStoreRef.current.delete(deleteIds);
+      } catch (err) {
+        addToast(`Rewound history, but recall cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
+    }
+
+    addToast(`Rewound ${visibleRemoved.length} message${visibleRemoved.length === 1 ? '' : 's'}.`, 'info');
+  }, [addToast, isStreaming, messages]);
+
   const handleSubmit = (value: string) => {
     if (!value.trim()) return;
 
@@ -447,6 +578,9 @@ export const App: React.FC<AppProps> = ({
         vectorStore: vectorStoreRef.current ?? undefined,
         indexEnabled: config?.index?.enabled ?? false,
         recallQuery: value.trim().startsWith('/recall ') ? value.trim().slice(8).trim() : '',
+        commandInput: value.trim(),
+        requestRewind: (request) => setPendingRewind(request),
+        openRewindPicker,
       });
       return;
     }
@@ -583,6 +717,8 @@ export const App: React.FC<AppProps> = ({
       : selectedModel.id
     : selectedModel.label;
   const contextWindow = selectedModel.contextWindow ?? getModelConfig(selectedModel.id).contextWindow;
+  const selectedRewindCandidate = rewindCandidates[Math.min(rewindPickerIndex, Math.max(0, rewindCandidates.length - 1))];
+  const rewindCandidateIds = new Set(rewindCandidates.map((candidate) => candidate.message.id));
 
   return (
     <Box flexDirection="column" height={terminalRows}>
@@ -606,7 +742,17 @@ export const App: React.FC<AppProps> = ({
         />
       ) : (
         <>
-          <MessageList messages={messages} showThinking={showThinking} scrollOffset={scrollOffset} onMaxScroll={handleMaxScroll} dimmed={isCommandPaletteOpen} />
+          <MessageList
+            messages={messages}
+            showThinking={showThinking}
+            scrollOffset={scrollOffset}
+            onMaxScroll={handleMaxScroll}
+            dimmed={isCommandPaletteOpen}
+            isRewindMode={isRewindPickerOpen}
+            rewindTargetMessageId={isRewindPickerOpen ? selectedRewindCandidate?.message.id ?? null : null}
+            rewindCandidateIds={isRewindPickerOpen ? rewindCandidateIds : undefined}
+            onScrollOffsetRequest={isRewindPickerOpen ? setScrollOffset : undefined}
+          />
           {isCommandPaletteOpen && (
             <CommandPalette
               onSelect={handlePaletteSelect}
@@ -617,6 +763,22 @@ export const App: React.FC<AppProps> = ({
       )}
       {pendingApproval ? (
         <ApprovalPrompt command={pendingApproval.command} onRespond={(approved) => { pendingApproval.resolve(approved); setPendingApproval(null); }} />
+      ) : pendingRewind ? (
+        <RewindPrompt request={pendingRewind} onRespond={(approved) => {
+          const request = pendingRewind;
+          setPendingRewind(null);
+          setScrollOffset(0);
+          if (approved) void performRewind(request);
+        }} />
+      ) : isRewindPickerOpen ? (
+        <RewindModePrompt
+          selectedCandidate={selectedRewindCandidate}
+          selectedIndex={Math.min(rewindPickerIndex, Math.max(0, rewindCandidates.length - 1))}
+          candidateCount={rewindCandidates.length}
+          onMove={moveRewindPicker}
+          onSelect={selectRewindCandidate}
+          onClose={() => { setIsRewindPickerOpen(false); setScrollOffset(0); }}
+        />
       ) : isImportPromptOpen ? (
         <ImportPrompt onSubmit={handleImportSubmit} onClose={() => setIsImportPromptOpen(false)} />
       ) : (
@@ -624,7 +786,7 @@ export const App: React.FC<AppProps> = ({
           value={inputValue}
           onChange={handleInputChange}
           onSubmit={handleSubmit}
-          focus={!isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen}
+          focus={!isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen && !isRewindPickerOpen}
         />
       )}
       <StatusBar tokenCount={tokenCount} contextWindow={contextWindow} isStreaming={isStreaming} toolStatus={toolStatus} tokensPerSecond={tokensPerSecond} modelName={modelDisplay} workingDir={workingDir} commandQuery={commandQuery} commandIndex={commandIndex} statusEmitter={statusEmitterRef.current} indexEnabled={config?.index?.enabled ?? false} storeName={config?.index?.store ? `${config.index.store}${config.index.chromaUrl ? ` (${config.index.chromaUrl.replace(/^https?:\/\//, '')})` : ''}` : ''} embedderName={embedderDisplay} mouseMode={mouseMode} pipelineStatus={pipelineStatus} />

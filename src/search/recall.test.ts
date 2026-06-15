@@ -14,7 +14,7 @@ describe('recall', () => {
       embed: vi.fn().mockResolvedValue([[0.1, 0.2, 0.3]]),
     };
     const store: VectorStore = {
-      upsert: vi.fn(), close: vi.fn(), has: vi.fn(),
+      upsert: vi.fn(), close: vi.fn(), has: vi.fn(), delete: vi.fn(),
       query: vi.fn().mockResolvedValue([{ id: 'r1', score: 0.1, turnPair: tp('r1') }]),
     };
 

@@ -28,7 +28,7 @@ function mockStore(results: SearchResult[][]): VectorStore & { query: ReturnType
   let callIndex = 0;
   return {
     query: vi.fn(async () => results[callIndex++] ?? []),
-    upsert: vi.fn(), has: vi.fn(), close: vi.fn(),
+    upsert: vi.fn(), has: vi.fn(), delete: vi.fn(), close: vi.fn(),
   };
 }
 

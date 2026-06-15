@@ -4,5 +4,6 @@ export class NullStore implements VectorStore {
   async upsert(_chunks: EmbeddedChunk[]): Promise<void> {}
   async query(_embedding: number[], _k: number): Promise<SearchResult[]> { return []; }
   async has(_ids: string[]): Promise<Set<string>> { return new Set(); }
+  async delete(_ids: string[]): Promise<void> {}
   async close(): Promise<void> {}
 }

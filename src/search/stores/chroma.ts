@@ -5,6 +5,7 @@ interface ChromaCollection {
   upsert(p: { ids: string[]; embeddings: number[][]; documents: string[]; metadatas: Record<string, string>[] }): Promise<void>;
   query(p: { queryEmbeddings: number[][]; nResults: number }): Promise<{ ids: string[][]; distances: number[][]; metadatas: (Record<string, string> | null)[][] }>;
   get(p: { ids: string[] }): Promise<{ ids: string[] }>;
+  delete(p: { ids: string[] }): Promise<unknown>;
 }
 
 export const DEFAULT_VECTOR_STORE_TIMEOUT_MS = 5_000;
@@ -107,6 +108,16 @@ export class ChromaStore implements VectorStore {
     );
     searchLog('CHROMA HAS RESULT', { found: res.ids.length });
     return new Set(res.ids);
+  }
+
+  async delete(ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    searchLog('CHROMA DELETE', { count: ids.length });
+    await withVectorStoreTimeout(
+      this.collection.delete({ ids }),
+      this.operationTimeoutMs,
+    );
+    searchLog('CHROMA DELETE OK');
   }
 
   async close(): Promise<void> {}

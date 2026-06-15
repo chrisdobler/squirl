@@ -17,6 +17,7 @@ const mockStore = (): VectorStore & { upsert: ReturnType<typeof vi.fn> } => ({
   upsert: vi.fn().mockResolvedValue(undefined),
   query: vi.fn().mockResolvedValue([]),
   has: vi.fn().mockResolvedValue(new Set()),
+  delete: vi.fn().mockResolvedValue(undefined),
   close: vi.fn().mockResolvedValue(undefined),
 });
 

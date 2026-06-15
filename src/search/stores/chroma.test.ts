@@ -11,6 +11,7 @@ const mockCollection = {
     metadatas: [[{ turnPair: JSON.stringify(tp('id-1')) }, { turnPair: JSON.stringify(tp('id-2')) }]],
   }),
   get: vi.fn().mockResolvedValue({ ids: ['id-1'] }),
+  delete: vi.fn().mockResolvedValue(undefined),
 };
 
 describe('ChromaStore', () => {
@@ -33,6 +34,11 @@ describe('ChromaStore', () => {
   it('checks existing IDs', async () => {
     const existing = await new ChromaStore(mockCollection as any).has(['id-1', 'id-2']);
     expect(existing).toEqual(new Set(['id-1']));
+  });
+
+  it('deletes existing IDs', async () => {
+    await new ChromaStore(mockCollection as any).delete(['id-1', 'id-2']);
+    expect(mockCollection.delete).toHaveBeenCalledWith({ ids: ['id-1', 'id-2'] });
   });
 
   it('normalizes query request timeouts', async () => {
@@ -77,6 +83,16 @@ describe('ChromaStore', () => {
     };
 
     await expect(new ChromaStore(collection as any).has(['id-1']))
+      .rejects.toThrow(VECTOR_DB_TIMEOUT_MESSAGE);
+  });
+
+  it('normalizes delete request timeouts', async () => {
+    const collection = {
+      ...mockCollection,
+      delete: vi.fn().mockRejectedValue(new Error('Request timed out.')),
+    };
+
+    await expect(new ChromaStore(collection as any).delete(['id-1']))
       .rejects.toThrow(VECTOR_DB_TIMEOUT_MESSAGE);
   });
 });

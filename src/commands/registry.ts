@@ -6,6 +6,8 @@ import { isVectorStoreError } from '../search/stores/chroma.js';
 import type { Embedder, VectorStore } from '../search/types.js';
 import type { Orchestrator } from '../orchestrator.js';
 import type { Message } from '../types.js';
+import { preview, roleLabel } from '../rewind.js';
+import type { RewindRequest } from '../rewind.js';
 
 export interface CommandContext {
   orchestrator: Orchestrator;
@@ -19,12 +21,25 @@ export interface CommandContext {
   vectorStore?: VectorStore;
   indexEnabled?: boolean;
   recallQuery?: string;
+  commandInput?: string;
+  requestRewind?: (request: RewindRequest) => void;
+  openRewindPicker?: () => void;
 }
 
 export interface SlashCommand {
   name: string;
   description: string;
   execute: (ctx: CommandContext) => void | Promise<void>;
+}
+
+function showRewindUsage(ctx: CommandContext, content = 'Usage: /rewind, /rewind list, /rewind last, or /rewind <number>'): void {
+  ctx.setMessages((prev) => [...prev, {
+    id: crypto.randomUUID(),
+    role: 'tool' as const,
+    toolCallId: 'rewind',
+    toolName: '/rewind',
+    content,
+  }]);
 }
 
 const commands: SlashCommand[] = [
@@ -101,6 +116,86 @@ const commands: SlashCommand[] = [
           content,
         }]);
       }
+    },
+  },
+  {
+    name: 'rewind',
+    description: 'Remove later messages from context and history',
+    execute: (ctx) => {
+      const arg = ctx.commandInput?.trim().split(/\s+/).slice(1).join(' ').toLowerCase() ?? '';
+      if (ctx.messages.length === 0) {
+        showRewindUsage(ctx, 'No messages to rewind.');
+        return;
+      }
+      if (!ctx.requestRewind) {
+        showRewindUsage(ctx, 'Rewind is not available in this session.');
+        return;
+      }
+      if (!arg) {
+        if (ctx.openRewindPicker) {
+          ctx.openRewindPicker();
+        } else {
+          showRewindUsage(ctx);
+        }
+        return;
+      }
+
+      if (arg === 'list') {
+        const lines = ctx.messages.map((message, index) => {
+          const number = String(index + 1).padStart(2, ' ');
+          return `${number}. ${roleLabel(message)} — ${preview(message.content)}`;
+        });
+        showRewindUsage(ctx, lines.join('\n'));
+        return;
+      }
+
+      if (arg === 'last') {
+        let lastUserIndex = -1;
+        for (let i = ctx.messages.length - 1; i >= 0; i--) {
+          if (ctx.messages[i]!.role === 'user') {
+            lastUserIndex = i;
+            break;
+          }
+        }
+        if (lastUserIndex === -1) {
+          showRewindUsage(ctx, 'No user turn found to rewind.');
+          return;
+        }
+        const retainedCount = lastUserIndex;
+        const removedCount = ctx.messages.length - retainedCount;
+        const target = retainedCount > 0 ? ctx.messages[retainedCount - 1]! : null;
+        ctx.requestRewind({
+          targetMessageId: target?.id ?? null,
+          retainedCount,
+          removedCount,
+          label: target
+            ? `${retainedCount}. ${roleLabel(target)} — ${preview(target.content)}`
+            : 'start of conversation',
+        });
+        return;
+      }
+
+      if (!/^\d+$/.test(arg)) {
+        showRewindUsage(ctx);
+        return;
+      }
+      const number = Number.parseInt(arg, 10);
+      if (number < 1 || number > ctx.messages.length) {
+        showRewindUsage(ctx, `Message ${number} is not in the current visible history. Run /rewind list.`);
+        return;
+      }
+      if (number === ctx.messages.length) {
+        showRewindUsage(ctx, 'Already at that message; nothing would be removed.');
+        return;
+      }
+
+      const target = ctx.messages[number - 1]!;
+      ctx.requestRewind({
+        targetMessageId: target.id,
+        retainedCount: number,
+        removedCount: ctx.messages.length - number,
+        label: `${number}. ${roleLabel(target)} — ${preview(target.content)}`,
+      });
     },
   },
   {

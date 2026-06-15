@@ -30,6 +30,7 @@ export interface VectorStore {
   upsert(chunks: EmbeddedChunk[]): Promise<void>;
   query(embedding: number[], k: number): Promise<SearchResult[]>;
   has(ids: string[]): Promise<Set<string>>;
+  delete(ids: string[]): Promise<void>;
   close(): Promise<void>;
 }
 

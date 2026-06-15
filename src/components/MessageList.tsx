@@ -8,6 +8,10 @@ interface MessageListProps {
   showThinking?: boolean;
   scrollOffset?: number;
   onMaxScroll?: (max: number) => void;
+  rewindTargetMessageId?: string | null;
+  rewindCandidateIds?: Set<string>;
+  isRewindMode?: boolean;
+  onScrollOffsetRequest?: (offset: number) => void;
 }
 
 function parseThinkBlocks(content: string): { thinkContent: string; visibleContent: string; thinkingInProgress: boolean } {
@@ -151,13 +155,27 @@ function renderMarkdown(content: string): React.ReactNode {
 
 // --- Message Rows ---
 
-function MessageRow({ msg, showThinking, dimmed }: { msg: Message; showThinking: boolean; dimmed: boolean }): React.ReactElement {
-  if (dimmed) {
+function MessageRow({
+  msg,
+  showThinking,
+  dimmed,
+  isRewindMode,
+  isRewindCandidate,
+  isRewindTarget,
+}: {
+  msg: Message;
+  showThinking: boolean;
+  dimmed: boolean;
+  isRewindMode: boolean;
+  isRewindCandidate: boolean;
+  isRewindTarget: boolean;
+}): React.ReactElement {
+  if (dimmed || (isRewindMode && !isRewindCandidate)) {
     switch (msg.role) {
       case 'user':
         return (
           <Box marginBottom={1} paddingX={2}>
-            <Text dimColor>{'❯ '}{msg.content}</Text>
+            <Text dimColor>{isRewindMode ? '  ' : '❯ '}{msg.content}</Text>
           </Box>
         );
       case 'assistant': {
@@ -181,6 +199,22 @@ function MessageRow({ msg, showThinking, dimmed }: { msg: Message; showThinking:
 
   switch (msg.role) {
     case 'user':
+      if (isRewindTarget) {
+        return (
+          <Box flexDirection="column" borderStyle="single" borderColor="cyan" paddingX={1} marginX={1} marginBottom={1}>
+            <Text color="cyan" bold>{'↩ rewind target'}</Text>
+            <Text color="cyan" bold>{msg.content}</Text>
+          </Box>
+        );
+      }
+      if (isRewindCandidate) {
+        return (
+          <Box marginBottom={1} paddingX={2}>
+            <Text color="cyan">{'○ '}</Text>
+            <Text>{msg.content}</Text>
+          </Box>
+        );
+      }
       return (
         <Box marginBottom={1} paddingX={2}>
           <Text color="cyan" bold>{'❯ '}</Text>
@@ -237,11 +271,22 @@ function MessageRow({ msg, showThinking, dimmed }: { msg: Message; showThinking:
   }
 }
 
-export const MessageList: React.FC<MessageListProps & { dimmed?: boolean }> = ({ messages, showThinking = false, scrollOffset = 0, onMaxScroll, dimmed = false }) => {
+export const MessageList: React.FC<MessageListProps & { dimmed?: boolean }> = ({
+  messages,
+  showThinking = false,
+  scrollOffset = 0,
+  onMaxScroll,
+  dimmed = false,
+  rewindTargetMessageId = null,
+  rewindCandidateIds = new Set(),
+  isRewindMode = false,
+  onScrollOffsetRequest,
+}) => {
   const { stdout } = useStdout();
   const boxHeight = (stdout.rows ?? 24) - 9;   // header(4) + input(3) + status(2)
   const availableRows = boxHeight - 2;           // paddingY(1) top + bottom
   const contentRef = useRef<DOMElement>(null);
+  const rowRefs = useRef(new Map<string, DOMElement>());
   const maxScrollRef = useRef(0);
 
   useLayoutEffect(() => {
@@ -250,6 +295,31 @@ export const MessageList: React.FC<MessageListProps & { dimmed?: boolean }> = ({
       const max = Math.max(0, height - availableRows);
       maxScrollRef.current = max;
       onMaxScroll?.(max);
+
+      if (isRewindMode && rewindTargetMessageId && onScrollOffsetRequest) {
+        let top = 0;
+        for (const msg of messages) {
+          const row = rowRefs.current.get(msg.id);
+          const rowHeight = row ? measureElement(row).height : 0;
+          if (msg.id === rewindTargetMessageId) {
+            const bottom = top + rowHeight;
+            const viewportTop = max - Math.min(scrollOffset, max);
+            const viewportBottom = viewportTop + availableRows;
+            let desiredViewportTop: number | null = null;
+            if (top < viewportTop) {
+              desiredViewportTop = top;
+            } else if (bottom > viewportBottom) {
+              desiredViewportTop = Math.max(0, bottom - availableRows);
+            }
+            if (desiredViewportTop !== null) {
+              const nextOffset = Math.max(0, Math.min(max, max - desiredViewportTop));
+              if (nextOffset !== scrollOffset) onScrollOffsetRequest(nextOffset);
+            }
+            break;
+          }
+          top += rowHeight;
+        }
+      }
     }
   });
 
@@ -274,7 +344,23 @@ export const MessageList: React.FC<MessageListProps & { dimmed?: boolean }> = ({
       <Box flexDirection="column" flexGrow={1} overflow="hidden" paddingY={1}>
         <Box ref={contentRef} flexDirection="column" flexShrink={0} marginTop={-(maxScroll - clampedScroll)}>
           {messages.map((msg) => (
-            <MessageRow key={msg.id} msg={msg} showThinking={showThinking} dimmed={dimmed} />
+            <Box
+              key={msg.id}
+              ref={(node) => {
+                if (node) rowRefs.current.set(msg.id, node);
+                else rowRefs.current.delete(msg.id);
+              }}
+              flexDirection="column"
+            >
+              <MessageRow
+                msg={msg}
+                showThinking={showThinking}
+                dimmed={dimmed}
+                isRewindMode={isRewindMode}
+                isRewindCandidate={rewindCandidateIds.has(msg.id)}
+                isRewindTarget={rewindTargetMessageId === msg.id}
+              />
+            </Box>
           ))}
         </Box>
       </Box>

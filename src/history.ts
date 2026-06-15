@@ -8,6 +8,12 @@ interface LogEntry {
   message: Message;
 }
 
+export interface RewindHistoryResult {
+  targetFound: boolean;
+  removed: Message[];
+  retained: Message[];
+}
+
 const HISTORY_DIR = join(homedir(), '.squirl', 'history');
 const IMPORTS_DIR = join(HISTORY_DIR, 'imports');
 const CURRENT_LOG = join(HISTORY_DIR, 'current.jsonl');
@@ -48,6 +54,11 @@ function getImportFiles(): string[] {
   return readdirSync(IMPORTS_DIR)
     .filter((f) => f.endsWith('.jsonl'))
     .sort();
+}
+
+function writeEntries(filePath: string, entries: LogEntry[]): void {
+  const lines = entries.map((e) => JSON.stringify(e)).join('\n');
+  writeFileSync(filePath, lines ? lines + '\n' : '', 'utf-8');
 }
 
 function dateKey(timestamp: string): string {
@@ -128,6 +139,62 @@ export function appendMessage(message: Message): void {
 }
 
 /**
+ * Permanently remove Squirl-owned history entries after targetMessageId.
+ * A null target rewinds before the first writable message, removing all
+ * current/daily Squirl history while leaving imported archives untouched.
+ */
+export function rewindHistoryAfter(targetMessageId: string | null): RewindHistoryResult {
+  ensureDir();
+
+  const files = getAllHistoryFiles();
+  const byFile = new Map<string, LogEntry[]>();
+  const all: Array<LogEntry & { filePath: string; originalIndex: number }> = [];
+
+  for (const filePath of files) {
+    const entries = readEntries(filePath);
+    byFile.set(filePath, entries);
+    entries.forEach((entry, originalIndex) => {
+      all.push({ ...entry, filePath, originalIndex });
+    });
+  }
+
+  all.sort((a, b) => {
+    const byTime = a.timestamp.localeCompare(b.timestamp);
+    if (byTime !== 0) return byTime;
+    const byFileName = a.filePath.localeCompare(b.filePath);
+    if (byFileName !== 0) return byFileName;
+    return a.originalIndex - b.originalIndex;
+  });
+
+  const targetIndex = targetMessageId === null
+    ? -1
+    : all.findIndex((entry) => entry.message.id === targetMessageId);
+
+  if (targetIndex === -1 && targetMessageId !== null) {
+    return {
+      targetFound: false,
+      removed: [],
+      retained: all.map((entry) => entry.message),
+    };
+  }
+
+  const retainedEntries = all.slice(0, targetIndex + 1);
+  const retainedKeys = new Set(retainedEntries.map((entry) => `${entry.filePath}:${entry.originalIndex}`));
+  const removedEntries = all.slice(targetIndex + 1);
+
+  for (const [filePath, entries] of byFile) {
+    const nextEntries = entries.filter((_entry, index) => retainedKeys.has(`${filePath}:${index}`));
+    writeEntries(filePath, nextEntries);
+  }
+
+  return {
+    targetFound: true,
+    removed: removedEntries.map((entry) => entry.message),
+    retained: retainedEntries.map((entry) => entry.message),
+  };
+}
+
+/**
  * Append a message to an import-specific log file.
  */
 export function appendImportMessage(message: Message, source: string, timestamp?: string): void {
@@ -151,6 +218,5 @@ export function updateLastMessage(message: Message): void {
   if (last && last.message.id === message.id) {
     entries[entries.length - 1] = { timestamp: last.timestamp, message };
   }
-  const lines = entries.map((e) => JSON.stringify(e)).join('\n');
-  writeFileSync(CURRENT_LOG, lines + '\n', 'utf-8');
+  writeEntries(CURRENT_LOG, entries);
 }
