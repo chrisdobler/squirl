@@ -22,7 +22,7 @@ import { fetchAvailableModels, detectLocalBackend, BACKEND_DISPLAY_NAMES } from 
 import type { SelectedModel } from './components/ModelPicker.js';
 import type { SquirlConfig } from './config.js';
 import { createEmbedder } from './search/embedders/index.js';
-import { createVectorStore } from './search/stores/index.js';
+import { createVectorStore, formatVectorStoreStartupError } from './search/stores/index.js';
 import { IngestQueue } from './search/ingest-queue.js';
 import { StatusEmitter } from './search/status.js';
 import { messagesToTurnPairs } from './search/turn-pair.js';
@@ -32,6 +32,7 @@ import { MemoryPipeline } from './search/memory-pipeline.js';
 import { OpenAIMetaLLM, AnthropicMetaLLM } from './search/meta-llm.js';
 import type { MetaLLM } from './search/meta-extract.js';
 import type { Message, AssistantMessage } from './types.js';
+import type { QueryPipelineStatus } from './pipeline-status.js';
 
 function defaultModelFromConfig(config?: SquirlConfig): SelectedModel {
   const provider = config?.defaultProvider ?? 'anthropic';
@@ -58,6 +59,19 @@ const ImportPrompt: React.FC<{ onSubmit: (path: string) => void; onClose: () => 
   );
 };
 
+const ApprovalPrompt: React.FC<{ command: string; onRespond: (approved: boolean) => void }> = ({ command, onRespond }) => {
+  useInput((input, key) => {
+    if (input === 'y' || input === 'Y') onRespond(true);
+    else if (input === 'n' || input === 'N' || key.escape) onRespond(false);
+  });
+  return (
+    <Box borderStyle="single" borderTop={true} borderBottom={true} borderLeft={false} borderRight={false} paddingX={1} gap={1}>
+      <Text color="red" bold>{'⚠ '}</Text>
+      <Text>Network command: <Text color="yellow">{command}</Text>  <Text dimColor>Allow? (y/n)</Text></Text>
+    </Box>
+  );
+};
+
 interface AppProps {
   workingDir?: string;
   config?: SquirlConfig;
@@ -78,8 +92,10 @@ export const App: React.FC<AppProps> = ({
   const [isContextMenuOpen, setIsContextMenuOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isImportPromptOpen, setIsImportPromptOpen] = useState(false);
+  const [pendingApproval, setPendingApproval] = useState<{ command: string; resolve: (approved: boolean) => void } | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [toolStatus, setToolStatus] = useState('');
+  const [pipelineStatus, setPipelineStatus] = useState<QueryPipelineStatus | null>(null);
   const [showThinking, setShowThinking] = useState(false);
   const [tokensPerSecond, setTokensPerSecond] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
@@ -177,7 +193,7 @@ export const App: React.FC<AppProps> = ({
     if (isStreaming) return;
     const cfg = getModelConfig(selectedModel.id);
     const sysMsg = buildSystemPrompt(
-      { workingDir, date: new Date().toISOString().slice(0, 10), modelId: selectedModel.id, platform: platform(), shell: process.env.SHELL ?? 'unknown' },
+      { workingDir, date: new Date().toISOString().slice(0, 10), modelId: selectedModel.id, platform: platform(), shell: process.env.SHELL ?? 'unknown', supportsTools: cfg.supportsTools },
       cfg.systemPromptStyle,
     );
     const sysContent = typeof sysMsg.content === 'string' ? sysMsg.content : '';
@@ -196,74 +212,86 @@ export const App: React.FC<AppProps> = ({
     let cancelled = false;
 
     (async () => {
-      const rawEmbedderUrl = config.index!.embedderUrl ?? (config.index as any).ollamaUrl;
-      const embedderUrl = rawEmbedderUrl?.endsWith('/v1') ? rawEmbedderUrl : rawEmbedderUrl ? rawEmbedderUrl.replace(/\/+$/, '') + '/v1' : undefined;
-      const embedderBackend = embedderUrl ? await detectLocalBackend(embedderUrl) : undefined;
-      if (cancelled) return;
-
-      // Auto-detect embedding model and context window from the server
-      let embedderModel = config.index!.embedderModel;
-      let embedderMaxTokens = 512;
-      if (embedderUrl && embedderBackend) {
-        const models = await fetchAvailableModels(embedderUrl, embedderBackend);
-        if (cancelled) return;
-        if (models.length > 0) {
-          if (!embedderModel) embedderModel = models[0]!.id;
-          const match = models.find((m) => m.id === embedderModel);
-          if (match?.contextWindow) embedderMaxTokens = match.contextWindow;
-        }
-      }
-
-      const backendLabel = embedderBackend ? BACKEND_DISPLAY_NAMES[embedderBackend] || embedderBackend : '';
-      if (config.index!.embedder === 'local' && embedderModel) {
-        setEmbedderDisplay(`${embedderModel}${backendLabel ? ` (${backendLabel})` : ''}`);
-      } else if (config.index!.embedder === 'openai') {
-        setEmbedderDisplay(`openai / ${embedderModel ?? 'text-embedding-3-small'}`);
-      }
-
-      const embedder = createEmbedder({
-        type: config.index!.embedder,
-        apiKey: config.openaiApiKey,
-        model: embedderModel,
-        baseUrl: embedderUrl,
-        detectedBackend: embedderBackend,
-      });
-      const store = await createVectorStore({
+      const storeConfig = {
         type: config.index!.store,
         chromaUrl: config.index!.chromaUrl,
         chromaAuthToken: config.index!.chromaAuthToken,
         collection: config.index!.collection,
-      });
+      } as const;
 
-      if (cancelled) { await store.close(); return; }
+      try {
+        const rawEmbedderUrl = config.index!.embedderUrl ?? (config.index as any).ollamaUrl;
+        const embedderUrl = rawEmbedderUrl?.endsWith('/v1') ? rawEmbedderUrl : rawEmbedderUrl ? rawEmbedderUrl.replace(/\/+$/, '') + '/v1' : undefined;
+        const embedderBackend = embedderUrl ? await detectLocalBackend(embedderUrl) : undefined;
+        if (cancelled) return;
 
-      embedderRef.current = embedder;
-      vectorStoreRef.current = store;
+        // Auto-detect embedding model and context window from the server
+        let embedderModel = config.index!.embedderModel;
+        let embedderMaxTokens = 512;
+        if (embedderUrl && embedderBackend) {
+          const models = await fetchAvailableModels(embedderUrl, embedderBackend);
+          if (cancelled) return;
+          if (models.length > 0) {
+            if (!embedderModel) embedderModel = models[0]!.id;
+            const match = models.find((m) => m.id === embedderModel);
+            if (match?.contextWindow) embedderMaxTokens = match.contextWindow;
+          }
+        }
 
-      const queue = new IngestQueue(embedder, store, statusEmitterRef.current, embedderMaxTokens);
-      ingestQueueRef.current = queue;
+        const backendLabel = embedderBackend ? BACKEND_DISPLAY_NAMES[embedderBackend] || embedderBackend : '';
+        if (config.index!.embedder === 'local' && embedderModel) {
+          setEmbedderDisplay(`${embedderModel}${backendLabel ? ` (${backendLabel})` : ''}`);
+        } else if (config.index!.embedder === 'openai') {
+          setEmbedderDisplay(`openai / ${embedderModel ?? 'text-embedding-3-small'}`);
+        }
 
-      // Memory retrieval pipeline
-      const metaProvider = config.index!.metaProvider ?? config.defaultProvider ?? 'openai';
-      const metaModel = config.index!.metaModel ?? (metaProvider === 'local' ? (config.defaultModel ?? 'default') : 'gpt-4o-mini');
-      let metaLLM: MetaLLM;
-      if (metaProvider === 'anthropic') {
-        metaLLM = new AnthropicMetaLLM({ model: metaModel });
-      } else {
-        metaLLM = new OpenAIMetaLLM({
-          model: metaModel,
-          ...(metaProvider === 'local' ? { baseUrl: config.localBaseUrl } : {}),
+        const embedder = createEmbedder({
+          type: config.index!.embedder,
+          apiKey: config.openaiApiKey,
+          model: embedderModel,
+          baseUrl: embedderUrl,
+          detectedBackend: embedderBackend,
         });
+        const store = await createVectorStore(storeConfig);
+
+        if (cancelled) { await store.close(); return; }
+
+        embedderRef.current = embedder;
+        vectorStoreRef.current = store;
+
+        const queue = new IngestQueue(embedder, store, statusEmitterRef.current, embedderMaxTokens);
+        ingestQueueRef.current = queue;
+
+        // Memory retrieval pipeline
+        const metaProvider = config.index!.metaProvider ?? config.defaultProvider ?? 'openai';
+        const metaModel = config.index!.metaModel ?? (metaProvider === 'local' ? (config.defaultModel ?? 'default') : 'gpt-4o-mini');
+        let metaLLM: MetaLLM;
+        if (metaProvider === 'anthropic') {
+          metaLLM = new AnthropicMetaLLM({ model: metaModel });
+        } else {
+          metaLLM = new OpenAIMetaLLM({
+            model: metaModel,
+            ...(metaProvider === 'local' ? { baseUrl: config.localBaseUrl } : {}),
+          });
+        }
+
+        const memoryPipeline = new MemoryPipeline(metaLLM, embedder, store, {
+          recallK: config.index!.recallK ?? 10,
+        });
+        orchestratorRef.current.setMemoryPipeline(memoryPipeline);
+
+        const files = getAllHistoryFiles();
+        const allEntries = files.flatMap((f) => readEntries(f));
+        await backfillFromHistory(queue, store, allEntries);
+      } catch (err) {
+        if (cancelled) return;
+        const message = formatVectorStoreStartupError(err, storeConfig);
+        embedderRef.current = null;
+        vectorStoreRef.current = null;
+        ingestQueueRef.current = null;
+        orchestratorRef.current.setMemoryPipeline(null);
+        statusEmitterRef.current.update({ phase: 'error', pending: 0, error: message });
       }
-
-      const memoryPipeline = new MemoryPipeline(metaLLM, embedder, store, {
-        recallK: config.index!.recallK ?? 10,
-      });
-      orchestratorRef.current.setMemoryPipeline(memoryPipeline);
-
-      const files = getAllHistoryFiles();
-      const allEntries = files.flatMap((f) => readEntries(f));
-      await backfillFromHistory(queue, store, allEntries);
     })();
 
     return () => {
@@ -329,6 +357,7 @@ export const App: React.FC<AppProps> = ({
         abortRef.current.abort();
         setIsStreaming(false);
         setToolStatus('');
+        setPipelineStatus(null);
         setMessages(prev => {
           const updated = [...prev];
           const last = updated[updated.length - 1];
@@ -502,6 +531,11 @@ export const App: React.FC<AppProps> = ({
             return updated;
           });
         },
+        onToolApproval: (_toolName, args) => {
+          return new Promise<boolean>((resolve) => {
+            setPendingApproval({ command: args.command as string, resolve });
+          });
+        },
         onToolStart: (name) => {
           setToolStatus(`Running ${name}...`);
         },
@@ -523,6 +557,9 @@ export const App: React.FC<AppProps> = ({
             }]);
           }
         },
+        onStatus: (stage, detail) => {
+          setPipelineStatus({ stage, detail });
+        },
       },
       abortController.signal,
     ).then((newMessages) => {
@@ -533,6 +570,7 @@ export const App: React.FC<AppProps> = ({
     }).finally(() => {
       setIsStreaming(false);
       setToolStatus('');
+      setPipelineStatus(null);
       abortRef.current = null;
     });
   };
@@ -577,7 +615,9 @@ export const App: React.FC<AppProps> = ({
           )}
         </>
       )}
-      {isImportPromptOpen ? (
+      {pendingApproval ? (
+        <ApprovalPrompt command={pendingApproval.command} onRespond={(approved) => { pendingApproval.resolve(approved); setPendingApproval(null); }} />
+      ) : isImportPromptOpen ? (
         <ImportPrompt onSubmit={handleImportSubmit} onClose={() => setIsImportPromptOpen(false)} />
       ) : (
         <InputArea
@@ -587,7 +627,7 @@ export const App: React.FC<AppProps> = ({
           focus={!isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen}
         />
       )}
-      <StatusBar tokenCount={tokenCount} contextWindow={contextWindow} isStreaming={isStreaming} toolStatus={toolStatus} tokensPerSecond={tokensPerSecond} modelName={modelDisplay} workingDir={workingDir} commandQuery={commandQuery} commandIndex={commandIndex} statusEmitter={statusEmitterRef.current} indexEnabled={config?.index?.enabled ?? false} storeName={config?.index?.store ? `${config.index.store}${config.index.chromaUrl ? ` (${config.index.chromaUrl.replace(/^https?:\/\//, '')})` : ''}` : ''} embedderName={embedderDisplay} mouseMode={mouseMode} />
+      <StatusBar tokenCount={tokenCount} contextWindow={contextWindow} isStreaming={isStreaming} toolStatus={toolStatus} tokensPerSecond={tokensPerSecond} modelName={modelDisplay} workingDir={workingDir} commandQuery={commandQuery} commandIndex={commandIndex} statusEmitter={statusEmitterRef.current} indexEnabled={config?.index?.enabled ?? false} storeName={config?.index?.store ? `${config.index.store}${config.index.chromaUrl ? ` (${config.index.chromaUrl.replace(/^https?:\/\//, '')})` : ''}` : ''} embedderName={embedderDisplay} mouseMode={mouseMode} pipelineStatus={pipelineStatus} />
     </Box>
   );
 };

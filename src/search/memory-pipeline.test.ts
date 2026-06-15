@@ -54,6 +54,15 @@ describe('MemoryPipeline', () => {
     expect(result.inlineDisplay).toContain('recalled 3 memories');
   });
 
+  it('emits pipeline status in memory query order', async () => {
+    const statuses: string[] = [];
+    const pipeline = new MemoryPipeline(mockLLM(), mockEmbedder(), mockStore([[sr('r1', 'q', 0.1)], []]), { recallK: 10 });
+
+    await pipeline.retrieve([], 'test', (stage) => statuses.push(stage));
+
+    expect(statuses).toEqual(['memory-query', 'memory-embed', 'vectordb']);
+  });
+
   it('deduplicates and keeps best score', async () => {
     const store = mockStore([[sr('r1', 'q', 0.5)], [sr('r1', 'q', 0.1)]]);
     const pipeline = new MemoryPipeline(mockLLM(), mockEmbedder(), store, { recallK: 10 });

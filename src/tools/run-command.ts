@@ -4,6 +4,27 @@ import type { ToolDefinition } from './registry.js';
 
 const MAX_OUTPUT = 10_000;
 
+const BLOCKED_PATTERNS = [
+  /\bcurl\b/i,
+  /\bwget\b/i,
+  /\bfetch\b/i,
+  /\bnc\b/,
+  /\bncat\b/i,
+  /\bhttp\b/i,
+  /\bssh\b/i,
+  /\bscp\b/i,
+  /\bsftp\b/i,
+  /\btelnet\b/i,
+  /\bopen\s+https?:/i,
+  /\bnpm\s+publish\b/i,
+  /\bpnpm\s+publish\b/i,
+  /\bgit\s+push\b/i,
+];
+
+export function isNetworkCommand(command: string): boolean {
+  return BLOCKED_PATTERNS.some((p) => p.test(command));
+}
+
 export const runCommandTool: ToolDefinition = {
   schema: {
     type: 'function',

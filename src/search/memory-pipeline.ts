@@ -4,6 +4,7 @@ import { extractSearchQueries } from './meta-extract.js';
 import type { MetaLLM } from './meta-extract.js';
 import { formatMemorySystemMessage, formatMemoryInline } from './memory-format.js';
 import { searchLog } from './debug.js';
+import type { QueryPipelineStage } from '../pipeline-status.js';
 
 export interface MemoryPipelineConfig {
   recallK: number;
@@ -25,16 +26,23 @@ export class MemoryPipeline {
     private readonly config: MemoryPipelineConfig,
   ) {}
 
-  async retrieve(conversation: Message[], userMessage: string): Promise<MemoryResult> {
+  async retrieve(
+    conversation: Message[],
+    userMessage: string,
+    onStatus?: (stage: QueryPipelineStage) => void,
+  ): Promise<MemoryResult> {
     const empty: MemoryResult = { results: [], systemMessage: '', inlineDisplay: '' };
 
+    onStatus?.('memory-query');
     const queries = await extractSearchQueries(conversation, userMessage, this.llm);
     searchLog('MEMORY QUERIES', queries);
     if (queries.length === 0) return empty;
 
+    onStatus?.('memory-embed');
     const embeddings = await this.embedder.embed(queries);
 
     const allResults: SearchResult[] = [];
+    onStatus?.('vectordb');
     for (const embedding of embeddings) {
       const results = await this.store.query(embedding, PER_QUERY_K);
       allResults.push(...results);

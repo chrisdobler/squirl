@@ -71,6 +71,7 @@ export const ContextPicker: React.FC<ContextPickerProps> = ({
         modelId,
         platform: platform(),
         shell: process.env.SHELL ?? 'unknown',
+        supportsTools: config.supportsTools,
       },
       config.systemPromptStyle,
     );

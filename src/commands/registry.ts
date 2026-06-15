@@ -2,6 +2,7 @@ import { buildSystemPrompt } from '../context/system-prompt.js';
 import { getModelConfig } from '../model-config.js';
 import { platform } from 'node:os';
 import { recall } from '../search/recall.js';
+import { isVectorStoreError } from '../search/stores/chroma.js';
 import type { Embedder, VectorStore } from '../search/types.js';
 import type { Orchestrator } from '../orchestrator.js';
 import type { Message } from '../types.js';
@@ -44,6 +45,7 @@ const commands: SlashCommand[] = [
           modelId: ctx.modelId,
           platform: platform(),
           shell: process.env.SHELL ?? 'unknown',
+          supportsTools: config.supportsTools,
         },
         config.systemPromptStyle,
       );
@@ -77,17 +79,28 @@ const commands: SlashCommand[] = [
         }]);
         return;
       }
-      const results = await recall(ctx.recallQuery, ctx.embedder, ctx.vectorStore, 5);
-      const formatted = results.length === 0
-        ? 'No results found.'
-        : results.map((r, i) =>
-          `${i + 1}. [${r.turnPair.source}] ${r.turnPair.timestamp.slice(0, 10)} (score: ${r.score.toFixed(3)})\n   Q: ${r.turnPair.userText.slice(0, 100)}\n   A: ${r.turnPair.assistantText.slice(0, 200)}`
-        ).join('\n\n');
-      ctx.setMessages((prev) => [...prev, {
-        id: crypto.randomUUID(), role: 'tool' as const,
-        toolCallId: 'recall', toolName: '/recall',
-        content: formatted,
-      }]);
+      try {
+        const results = await recall(ctx.recallQuery, ctx.embedder, ctx.vectorStore, 5);
+        const formatted = results.length === 0
+          ? 'No results found.'
+          : results.map((r, i) =>
+            `${i + 1}. [${r.turnPair.source}] ${r.turnPair.timestamp.slice(0, 10)} (score: ${r.score.toFixed(3)})\n   Q: ${r.turnPair.userText.slice(0, 100)}\n   A: ${r.turnPair.assistantText.slice(0, 200)}`
+          ).join('\n\n');
+        ctx.setMessages((prev) => [...prev, {
+          id: crypto.randomUUID(), role: 'tool' as const,
+          toolCallId: 'recall', toolName: '/recall',
+          content: formatted,
+        }]);
+      } catch (err) {
+        const content = isVectorStoreError(err)
+          ? `Error: ${err.message}`
+          : `Recall failed: ${err instanceof Error ? err.message : String(err)}`;
+        ctx.setMessages((prev) => [...prev, {
+          id: crypto.randomUUID(), role: 'tool' as const,
+          toolCallId: 'recall', toolName: '/recall',
+          content,
+        }]);
+      }
     },
   },
   {

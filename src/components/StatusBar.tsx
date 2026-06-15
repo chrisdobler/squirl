@@ -3,6 +3,7 @@ import { Box, Text, useStdout } from 'ink';
 import { getCommands } from '../commands/registry.js';
 import { IndexStatus } from './IndexStatus.js';
 import type { StatusEmitter } from '../search/status.js';
+import { formatPipelineStatus, type QueryPipelineStatus } from '../pipeline-status.js';
 
 interface StatusBarProps {
   tokenCount?: number;
@@ -19,6 +20,7 @@ interface StatusBarProps {
   storeName?: string;
   embedderName?: string;
   mouseMode?: boolean;
+  pipelineStatus?: QueryPipelineStatus | null;
 }
 
 function formatTokens(n: number): string {
@@ -26,7 +28,7 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-export const StatusBar: React.FC<StatusBarProps> = React.memo(({ tokenCount = 0, contextWindow = 0, isStreaming = false, toolStatus = '', tokensPerSecond = 0, modelName = '', workingDir = '', commandQuery = null, commandIndex = 0, statusEmitter = null, indexEnabled = false, storeName = '', embedderName = '', mouseMode = true }) => {
+export const StatusBar: React.FC<StatusBarProps> = React.memo(({ tokenCount = 0, contextWindow = 0, isStreaming = false, toolStatus = '', tokensPerSecond = 0, modelName = '', workingDir = '', commandQuery = null, commandIndex = 0, statusEmitter = null, indexEnabled = false, storeName = '', embedderName = '', mouseMode = true, pipelineStatus = null }) => {
   const { stdout } = useStdout();
   const width = stdout.columns ?? 80;
 
@@ -49,20 +51,34 @@ export const StatusBar: React.FC<StatusBarProps> = React.memo(({ tokenCount = 0,
     );
   }
 
+  const pipelineText = formatPipelineStatus(pipelineStatus);
+
   return (
     <Box flexDirection="column" paddingX={2} width={width}>
       <Box justifyContent="space-between">
         <Text dimColor>
-          {toolStatus ? <Text color="yellow">{toolStatus}{'  '}</Text> : null}
-          {isStreaming ? 'esc cancel  ' : ''}
-          ctrl+c exit{'  '}ctrl+p menu{'  '}ctrl+v thinking{'  '}ctrl+s {mouseMode ? 'scroll' : 'copy'}{'  '}
-          context: {formatTokens(tokenCount)}/{formatTokens(contextWindow)}
-          {'  '}{tokensPerSecond} t/s
+          {pipelineText ? (
+            <>
+              <Text color="yellow">{pipelineText}</Text>
+              {'  '}{isStreaming ? 'esc cancel  ' : ''}
+              {formatTokens(tokenCount)}/{formatTokens(contextWindow)}{'  '}{tokensPerSecond} t/s
+            </>
+          ) : (
+            <>
+              {toolStatus ? <Text color="yellow">{toolStatus}{'  '}</Text> : null}
+              {isStreaming ? 'esc cancel  ' : ''}
+              ctrl+c exit{'  '}ctrl+p menu{'  '}ctrl+v thinking{'  '}ctrl+s {mouseMode ? 'scroll' : 'copy'}{'  '}
+              context: {formatTokens(tokenCount)}/{formatTokens(contextWindow)}
+              {'  '}{tokensPerSecond} t/s
+            </>
+          )}
         </Text>
-        <Box>
-          {statusEmitter && <IndexStatus statusEmitter={statusEmitter} />}
-          <Text dimColor>{'  '}{modelName}{'  '}{workingDir}</Text>
-        </Box>
+        {!pipelineText && (
+          <Box>
+            {statusEmitter && <IndexStatus statusEmitter={statusEmitter} />}
+            <Text dimColor>{'  '}{modelName}{'  '}{workingDir}</Text>
+          </Box>
+        )}
       </Box>
       <Box justifyContent="flex-end">
         <Text dimColor>

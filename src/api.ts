@@ -12,6 +12,8 @@ import type { ToolCall } from './types.js';
 
 const DEBUG = !!process.env.SQUIRL_DEBUG;
 const DEBUG_LOG = join(homedir(), '.squirl', 'debug.log');
+const MODEL_REQUEST_TIMEOUT_MS = 5_000;
+const MODEL_DETECTION_TIMEOUT_MS = 2_000;
 
 function debugLog(label: string, data: unknown): void {
   if (!DEBUG) return;
@@ -41,6 +43,20 @@ export async function streamChatCompletion(options: StreamOptions): Promise<void
   return streamOpenAI(options);
 }
 
+function normalizeModelError(err: unknown, provider: 'openai' | 'anthropic' | 'local'): Error {
+  if (!(err instanceof Error)) return new Error(String(err));
+  if (err.name === 'AbortError') return err;
+  if (/timed out|timeout/i.test(err.message)) {
+    return new Error('Model request timed out.');
+  }
+  if (/connection error|fetch failed|ECONNREFUSED|ENOTFOUND/i.test(err.message)) {
+    if (provider === 'openai') return new Error('OpenAI connection error.');
+    if (provider === 'anthropic') return new Error('Anthropic connection error.');
+    return new Error('Model connection error.');
+  }
+  return err;
+}
+
 // --- OpenAI / Local ---
 
 async function streamOpenAI(options: StreamOptions): Promise<void> {
@@ -54,9 +70,9 @@ async function streamOpenAI(options: StreamOptions): Promise<void> {
         onError(new Error('OPENAI_API_KEY environment variable is not set'));
         return;
       }
-      client = new OpenAI({ apiKey });
+      client = new OpenAI({ apiKey, timeout: MODEL_REQUEST_TIMEOUT_MS, maxRetries: 0 });
     } else {
-      client = new OpenAI({ baseURL: model.baseUrl, apiKey: 'not-needed' });
+      client = new OpenAI({ baseURL: model.baseUrl, apiKey: 'not-needed', timeout: MODEL_REQUEST_TIMEOUT_MS, maxRetries: 0 });
     }
 
     let doneCalled = false;
@@ -140,7 +156,7 @@ async function streamOpenAI(options: StreamOptions): Promise<void> {
       onError(err);
       return;
     }
-    onError(err instanceof Error ? err : new Error(String(err)));
+    onError(normalizeModelError(err, model.provider === 'openai' ? 'openai' : 'local'));
   }
 }
 
@@ -236,7 +252,7 @@ async function streamAnthropic(options: StreamOptions): Promise<void> {
       return;
     }
 
-    const client = new Anthropic({ apiKey });
+    const client = new Anthropic({ apiKey, timeout: MODEL_REQUEST_TIMEOUT_MS, maxRetries: 0 });
     const { system, anthropicMessages } = toAnthropicMessages(messages);
 
     const createParams: Record<string, unknown> = {
@@ -317,7 +333,7 @@ async function streamAnthropic(options: StreamOptions): Promise<void> {
       onError(err);
       return;
     }
-    onError(err instanceof Error ? err : new Error(String(err)));
+    onError(normalizeModelError(err, 'anthropic'));
   }
 }
 
@@ -343,18 +359,28 @@ function serverRoot(baseUrl: string): string {
   return baseUrl.replace(/\/v1\/?$/, '');
 }
 
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs: number = MODEL_DETECTION_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 /**
  * Auto-detect what backend is serving at the given base URL.
  */
 export async function detectLocalBackend(baseUrl: string): Promise<LocalBackend> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5000);
-
   try {
     // Check for Ollama via its native /api/tags endpoint
-    const ollamaRes = await fetch(serverRoot(baseUrl) + '/api/tags', { signal: controller.signal });
+    const ollamaRes = await fetchWithTimeout(serverRoot(baseUrl) + '/api/tags');
     if (ollamaRes.ok) {
-      clearTimeout(timeout);
       return 'ollama';
     }
   } catch { /* not ollama */ }
@@ -362,8 +388,7 @@ export async function detectLocalBackend(baseUrl: string): Promise<LocalBackend>
   try {
     // Check /v1/models for owned_by hints
     const url = baseUrl.replace(/\/+$/, '') + '/models';
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
+    const res = await fetchWithTimeout(url);
 
     if (res.ok) {
       const json = await res.json() as { data?: Array<{ owned_by?: string }> };
@@ -374,7 +399,6 @@ export async function detectLocalBackend(baseUrl: string): Promise<LocalBackend>
     }
   } catch { /* detection failed */ }
 
-  clearTimeout(timeout);
   return 'unknown';
 }
 
@@ -385,11 +409,7 @@ export async function detectLocalBackend(baseUrl: string): Promise<LocalBackend>
 export async function fetchAvailableModels(baseUrl: string, backend?: LocalBackend): Promise<DetectedModel[]> {
   try {
     const url = baseUrl.replace(/\/+$/, '') + '/models';
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
+    const res = await fetchWithTimeout(url);
 
     if (!res.ok) return [];
 
@@ -404,7 +424,7 @@ export async function fetchAvailableModels(baseUrl: string, backend?: LocalBacke
       await Promise.all(models.map(async (model) => {
         if (model.contextWindow) return;
         try {
-          const showRes = await fetch(serverRoot(baseUrl) + '/api/show', {
+          const showRes = await fetchWithTimeout(serverRoot(baseUrl) + '/api/show', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: model.id }),

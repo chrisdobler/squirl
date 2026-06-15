@@ -2,6 +2,8 @@ import type { Embedder } from '../types.js';
 import OpenAI from 'openai';
 import { searchLog } from '../debug.js';
 
+const EMBEDDER_TIMEOUT_MS = 5_000;
+
 type CreateFn = (params: { model: string; input: string[] }) => Promise<{ data: { index: number; embedding: number[] }[] }>;
 
 interface Options {
@@ -25,7 +27,12 @@ export class OpenAIEmbedder implements Embedder {
     if (opts.createFn) {
       this.create = opts.createFn;
     } else {
-      const client = new OpenAI({ apiKey: opts.apiKey, ...(opts.baseUrl ? { baseURL: opts.baseUrl } : {}) });
+      const client = new OpenAI({
+        apiKey: opts.apiKey,
+        ...(opts.baseUrl ? { baseURL: opts.baseUrl } : {}),
+        timeout: EMBEDDER_TIMEOUT_MS,
+        maxRetries: 0,
+      });
       this.create = (params) => client.embeddings.create(params);
     }
   }

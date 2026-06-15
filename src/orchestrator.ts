@@ -8,9 +8,12 @@ import type { DirectoryContext } from './context/directory-context.js';
 import { parseFileRefs, readFileContent, formatFileContext } from './context/file-context.js';
 import { truncateToFit } from './context/truncation.js';
 import { getToolDefinitions, executeTool } from './tools/registry.js';
+import { isNetworkCommand } from './tools/run-command.js';
 import { streamChatCompletion } from './api.js';
 import { platform } from 'os';
 import type { MemoryPipeline } from './search/memory-pipeline.js';
+import { isVectorStoreError } from './search/stores/chroma.js';
+import type { QueryPipelineStage } from './pipeline-status.js';
 
 export interface ChatCallbacks {
   onToken: (token: string) => void;
@@ -21,6 +24,8 @@ export interface ChatCallbacks {
   onToolEnd?: (toolName: string, result: string) => void;
   onMemoryStart?: () => void;
   onMemoryEnd?: (inlineDisplay: string) => void;
+  onToolApproval?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
+  onStatus?: (stage: QueryPipelineStage, detail?: string) => void;
 }
 
 const MAX_TOOL_ITERATIONS = 10;
@@ -48,6 +53,8 @@ export class Orchestrator {
     signal?: AbortSignal,
   ): Promise<Message[]> {
     const newMessages: Message[] = [];
+
+    callbacks.onStatus?.('context');
 
     // 1. Parse @file references
     const { cleanedInput, filePaths } = parseFileRefs(userInput);
@@ -83,6 +90,7 @@ export class Orchestrator {
         modelId: model.id,
         platform: platform(),
         shell: process.env.SHELL ?? 'unknown',
+        supportsTools: config.supportsTools,
       },
       config.systemPromptStyle,
     );
@@ -104,13 +112,19 @@ export class Orchestrator {
     if (this.memoryPipeline) {
       callbacks.onMemoryStart?.();
       try {
-        const memResult = await this.memoryPipeline.retrieve(conversationHistory, cleanedInput);
+        const memResult = await this.memoryPipeline.retrieve(
+          conversationHistory,
+          cleanedInput,
+          (stage) => callbacks.onStatus?.(stage),
+        );
         if (memResult.systemMessage) {
           memoryMessage = { role: 'system', content: memResult.systemMessage };
         }
         callbacks.onMemoryEnd?.(memResult.inlineDisplay);
-      } catch {
-        callbacks.onMemoryEnd?.('');
+      } catch (err) {
+        callbacks.onMemoryEnd?.(
+          isVectorStoreError(err) ? `Error: ${err.message}` : '',
+        );
       }
     }
 
@@ -152,18 +166,28 @@ export class Orchestrator {
 
       let accumulatedContent = '';
       let receivedToolCalls: ToolCall[] | null = null;
+      let sawModelOutput = false;
 
       await new Promise<void>((resolve, reject) => {
+        callbacks.onStatus?.('model-connect');
         streamChatCompletion({
           messages: apiMessages,
           model,
           tools,
           onToken: (token) => {
+            if (!sawModelOutput) {
+              sawModelOutput = true;
+              callbacks.onStatus?.('model-stream');
+            }
             accumulatedContent += token;
             assistantMsg.content = accumulatedContent;
             callbacks.onToken(token);
           },
           onToolCalls: (toolCalls) => {
+            if (!sawModelOutput) {
+              sawModelOutput = true;
+              callbacks.onStatus?.('model-stream');
+            }
             receivedToolCalls = toolCalls;
             assistantMsg.toolCalls = toolCalls;
           },
@@ -203,7 +227,33 @@ export class Orchestrator {
         let args: Record<string, unknown> = {};
         try { args = JSON.parse(tc.arguments); } catch { /* use empty */ }
 
+        // Block network commands unless user approves
+        const needsApproval = tc.name === 'run_command' && isNetworkCommand(args.command as string);
+        if (needsApproval) {
+          const approved = callbacks.onToolApproval
+            ? await callbacks.onToolApproval(tc.name, args)
+            : false;
+          if (!approved) {
+            const toolMsg: Message = {
+              id: crypto.randomUUID(),
+              role: 'tool',
+              toolCallId: tc.id,
+              toolName: tc.name,
+              content: 'Blocked: network commands require user approval.',
+            };
+            newMessages.push(toolMsg);
+            callbacks.onNewMessage?.(toolMsg);
+            apiMessages = [...apiMessages, { role: 'tool' as const, tool_call_id: tc.id, content: toolMsg.content }];
+            continue;
+          }
+        }
+
+        callbacks.onStatus?.('tool', tc.name);
         callbacks.onToolStart?.(tc.name, args);
+        if (process.env.SQUIRL_DEBUG) {
+          const { searchLog } = await import('./search/debug.js');
+          searchLog('TOOL EXEC', { tool: tc.name, args });
+        }
         const result = await executeTool(tc.name, args, this.workingDir);
         callbacks.onToolEnd?.(tc.name, result);
 

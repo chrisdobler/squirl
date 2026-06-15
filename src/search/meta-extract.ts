@@ -2,7 +2,12 @@ import type { Message } from '../types.js';
 import { searchLog } from './debug.js';
 
 const SYSTEM_PROMPT = `/no_think
-Generate 2-3 short search queries to find relevant prior conversations. Output ONLY a JSON array. Example: ["query one", "query two"]`;
+You are a JSON-only search query extraction tool. You MUST respond with ONLY a raw JSON array of 2-3 search query strings. No prose, no markdown, no explanation.
+
+Your input is a conversation. Extract key topics the user might have discussed before.
+
+CORRECT output format: ["search term one", "search term two", "search term three"]
+WRONG output: Any text that is not a JSON array.`;
 
 export interface MetaLLM {
   complete(params: {
@@ -17,10 +22,15 @@ export async function extractSearchQueries(
   llm: MetaLLM,
 ): Promise<string[]> {
   try {
-    const recent = conversation
+    let recent = conversation
       .filter((m) => m.role === 'user' || m.role === 'assistant')
       .slice(-6)
       .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content.slice(0, 500) }));
+
+    // Ensure messages start with a user turn (required by some chat templates)
+    while (recent.length > 0 && recent[0]!.role !== 'user') {
+      recent = recent.slice(1);
+    }
 
     const messages = [...recent, { role: 'user' as const, content: userMessage }];
 

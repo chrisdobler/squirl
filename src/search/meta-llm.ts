@@ -3,6 +3,8 @@ import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { searchLog } from './debug.js';
 
+const META_LLM_TIMEOUT_MS = 5_000;
+
 type OpenAICreateFn = (params: {
   model: string;
   messages: Array<{ role: string; content: string }>;
@@ -28,6 +30,8 @@ export class OpenAIMetaLLM implements MetaLLM {
       const client = new OpenAI({
         apiKey: opts.apiKey ?? process.env.OPENAI_API_KEY ?? '',
         ...(opts.baseUrl ? { baseURL: opts.baseUrl } : {}),
+        timeout: META_LLM_TIMEOUT_MS,
+        maxRetries: 0,
       });
       this.create = (params) => client.chat.completions.create(params as any) as any;
     }
@@ -76,7 +80,11 @@ export class AnthropicMetaLLM implements MetaLLM {
     if (opts.createFn) {
       this.create = opts.createFn;
     } else {
-      const client = new Anthropic({ apiKey: opts.apiKey ?? process.env.ANTHROPIC_API_KEY ?? '' });
+      const client = new Anthropic({
+        apiKey: opts.apiKey ?? process.env.ANTHROPIC_API_KEY ?? '',
+        timeout: META_LLM_TIMEOUT_MS,
+        maxRetries: 0,
+      });
       this.create = (params) => client.messages.create(params as any) as any;
     }
   }
