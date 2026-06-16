@@ -6,12 +6,15 @@ services:
     volumes:
       - ~/.squirl/chroma:/chroma/chroma
     restart: unless-stopped
-  # Next.js admin UI (community image, not official Chroma). Open http://localhost:3001
-  # On first visit, set Chroma URL to http://chroma:8000 (resolved from inside this compose network).
+  # Streamlit Chroma viewer. Open http://<docker-host>:3001.
   chroma-admin:
-    image: fengzhichao/chromadb-admin:latest
+    image: squirl-chroma-admin:local
+    build: ./chroma-viewer
+    environment:
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
     ports:
-      - "3001:3001"
+      - "3001:8501"
     depends_on:
       - chroma
     restart: unless-stopped
