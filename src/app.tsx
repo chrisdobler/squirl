@@ -35,6 +35,7 @@ import { OpenAIMetaLLM, AnthropicMetaLLM } from './search/meta-llm.js';
 import type { MetaLLM } from './search/meta-extract.js';
 import type { Message, AssistantMessage } from './types.js';
 import type { QueryPipelineStatus } from './pipeline-status.js';
+import { applyScrollDelta, nextAutoscrollEnabled, nextStreamingScrollOffset } from './scroll-behavior.js';
 
 function defaultModelFromConfig(config?: SquirlConfig): SelectedModel {
   const provider = config?.defaultProvider ?? 'anthropic';
@@ -123,6 +124,8 @@ interface AppProps {
   onSetup?: () => void;
 }
 
+const FIXED_CHROME_ROWS = 9;
+
 export const App: React.FC<AppProps> = ({
   workingDir = process.cwd(),
   config,
@@ -173,6 +176,7 @@ export const App: React.FC<AppProps> = ({
   const [scrollOffset, setScrollOffset] = useState(0);
   const maxScrollRef = useRef(0);
   const prevMaxScrollRef = useRef(0);
+  const streamAutoscrollRef = useRef(false);
   const rewindCandidates = buildRewindCandidates(messages);
 
   const handleMaxScroll = useCallback((max: number) => {
@@ -180,11 +184,27 @@ export const App: React.FC<AppProps> = ({
     prevMaxScrollRef.current = max;
     maxScrollRef.current = max;
 
-    // During streaming, freeze the viewport by increasing scrollOffset
-    // as content grows — the view stays in place while tokens append below
     if (isStreaming && max > prev) {
-      setScrollOffset(offset => Math.min(max, offset + (max - prev)));
+      setScrollOffset((offset) => nextStreamingScrollOffset({
+        prevOffset: offset,
+        prevMax: prev,
+        nextMax: max,
+        autoscroll: streamAutoscrollRef.current,
+      }));
     }
+  }, [isStreaming]);
+
+  const applyManualScroll = useCallback((delta: number) => {
+    setScrollOffset((prev) => {
+      const nextOffset = applyScrollDelta(prev, delta, maxScrollRef.current);
+      streamAutoscrollRef.current = nextAutoscrollEnabled({
+        isStreaming,
+        current: streamAutoscrollRef.current,
+        delta,
+        nextOffset,
+      });
+      return nextOffset;
+    });
   }, [isStreaming]);
 
   // Surface index status as toasts
@@ -214,8 +234,9 @@ export const App: React.FC<AppProps> = ({
   }, [mouseMode]);
 
   useMouseWheel({
-    onScroll: (delta) => setScrollOffset((prev) => Math.max(0, Math.min(maxScrollRef.current, prev + delta))),
+    onScroll: applyManualScroll,
     isActive: mouseMode && !isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen && !isRewindPickerOpen,
+    linesPerWheel: config?.mouseScrollLines,
   });
 
   // Detect backend and fetch context window from local provider when not already known
@@ -361,8 +382,8 @@ export const App: React.FC<AppProps> = ({
     if (key.ctrl && input === 'v') { setShowThinking((v) => !v); return; }
     if (key.ctrl && input === 's') { setMouseMode((v) => !v); return; }
     // Shift+Up/Down to scroll message history
-    if (key.shift && key.upArrow) { setScrollOffset((prev) => Math.min(maxScrollRef.current, prev + 3)); return; }
-    if (key.shift && key.downArrow) { setScrollOffset((prev) => Math.max(0, prev - 3)); return; }
+    if (key.shift && key.upArrow) { applyManualScroll(3); return; }
+    if (key.shift && key.downArrow) { applyManualScroll(-3); return; }
     // Slash command navigation
     if (inputValue.startsWith('/') && (key.upArrow || key.downArrow || key.tab)) {
       const matches = filterCommands(inputValue.slice(1));
@@ -590,6 +611,7 @@ export const App: React.FC<AppProps> = ({
     setInputValue('');
     historyIndexRef.current = -1;
     savedInputRef.current = '';
+    streamAutoscrollRef.current = true;
     setScrollOffset(0);
     setIsStreaming(true);
     setTokensPerSecond(0);
@@ -703,6 +725,7 @@ export const App: React.FC<AppProps> = ({
       }
     }).finally(() => {
       setIsStreaming(false);
+      streamAutoscrollRef.current = false;
       setToolStatus('');
       setPipelineStatus(null);
       abortRef.current = null;
@@ -719,6 +742,7 @@ export const App: React.FC<AppProps> = ({
   const contextWindow = selectedModel.contextWindow ?? getModelConfig(selectedModel.id).contextWindow;
   const selectedRewindCandidate = rewindCandidates[Math.min(rewindPickerIndex, Math.max(0, rewindCandidates.length - 1))];
   const rewindCandidateIds = new Set(rewindCandidates.map((candidate) => candidate.message.id));
+  const messageListHeight = Math.max(1, terminalRows - FIXED_CHROME_ROWS);
 
   return (
     <Box flexDirection="column" height={terminalRows}>
@@ -744,6 +768,7 @@ export const App: React.FC<AppProps> = ({
         <>
           <MessageList
             messages={messages}
+            height={messageListHeight}
             showThinking={showThinking}
             scrollOffset={scrollOffset}
             onMaxScroll={handleMaxScroll}

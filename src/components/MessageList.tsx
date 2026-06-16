@@ -1,10 +1,10 @@
-import React, { useRef, useLayoutEffect } from 'react';
-import { Box, Text, useStdout, measureElement } from 'ink';
-import type { Message, UserMessage, AssistantMessage, ToolMessage } from '../types.js';
-import type { DOMElement } from 'ink';
+import React, { useEffect, useMemo } from 'react';
+import { Box, Text } from 'ink';
+import type { Message } from '../types.js';
 
 interface MessageListProps {
   messages: Message[];
+  height?: number;
   showThinking?: boolean;
   scrollOffset?: number;
   onMaxScroll?: (max: number) => void;
@@ -12,6 +12,71 @@ interface MessageListProps {
   rewindCandidateIds?: Set<string>;
   isRewindMode?: boolean;
   onScrollOffsetRequest?: (offset: number) => void;
+}
+
+export interface ScrollbarLayout {
+  trackHeight: number;
+  thumbTop: number;
+  thumbSize: number;
+  rows: string[];
+}
+
+export interface ViewportLine {
+  key: string;
+  text: string;
+  messageId?: string;
+  color?: 'cyan' | 'yellow' | 'gray';
+  dim?: boolean;
+  bold?: boolean;
+}
+
+export interface ViewportLayout<T> {
+  totalRows: number;
+  maxScroll: number;
+  clampedScroll: number;
+  viewportTop: number;
+  rows: T[];
+}
+
+export function viewportRowsForHeight(height: number): number {
+  return Math.max(1, height - 2);
+}
+
+export function computeScrollbarLayout(availableRows: number, maxScroll: number, scrollOffset: number): ScrollbarLayout {
+  const trackHeight = Math.max(1, availableRows);
+  const safeMaxScroll = Math.max(0, maxScroll);
+  const clampedScroll = Math.max(0, Math.min(scrollOffset, safeMaxScroll));
+  const hasScrollbar = safeMaxScroll > 0;
+  const thumbSize = hasScrollbar
+    ? Math.max(1, Math.min(trackHeight, Math.round(trackHeight * (trackHeight / (trackHeight + safeMaxScroll)))))
+    : trackHeight;
+  const scrollFraction = hasScrollbar ? 1 - (clampedScroll / safeMaxScroll) : 1;
+  const thumbTop = Math.max(0, Math.min(trackHeight - thumbSize, Math.round(scrollFraction * (trackHeight - thumbSize))));
+  const rows = Array.from({ length: trackHeight }, (_value, i) => (
+    hasScrollbar && i >= thumbTop && i < thumbTop + thumbSize ? '█' : ' '
+  ));
+
+  return { trackHeight, thumbTop, thumbSize, rows };
+}
+
+export function computeViewportLayout<T>(
+  rows: T[],
+  availableRows: number,
+  scrollOffset: number,
+  blankRow: T,
+): ViewportLayout<T> {
+  const safeAvailableRows = Math.max(1, availableRows);
+  const totalRows = rows.length;
+  const maxScroll = Math.max(0, totalRows - safeAvailableRows);
+  const clampedScroll = Math.max(0, Math.min(scrollOffset, maxScroll));
+  const viewportTop = Math.max(0, maxScroll - clampedScroll);
+  const visibleRows = rows.slice(viewportTop, viewportTop + safeAvailableRows);
+
+  while (visibleRows.length < safeAvailableRows) {
+    visibleRows.push(blankRow);
+  }
+
+  return { totalRows, maxScroll, clampedScroll, viewportTop, rows: visibleRows };
 }
 
 function parseThinkBlocks(content: string): { thinkContent: string; visibleContent: string; thinkingInProgress: boolean } {
@@ -32,247 +97,158 @@ function parseThinkBlocks(content: string): { thinkContent: string; visibleConte
   return { thinkContent: thinkContent.trim(), visibleContent, thinkingInProgress };
 }
 
-// --- Markdown Rendering ---
-
-function renderInlineMarkdown(text: string): React.ReactNode[] {
-  const nodes: React.ReactNode[] = [];
-  const inlineRegex = /(\*\*(.+?)\*\*|`([^`]+)`|\*(.+?)\*)/g;
-  let lastIndex = 0;
-  let match;
-  let key = 0;
-
-  while ((match = inlineRegex.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      nodes.push(text.slice(lastIndex, match.index));
-    }
-    if (match[2]) {
-      nodes.push(<Text key={key++} bold>{match[2]}</Text>);
-    } else if (match[3]) {
-      nodes.push(<Text key={key++} color="yellow">{match[3]}</Text>);
-    } else if (match[4]) {
-      nodes.push(<Text key={key++} dimColor>{match[4]}</Text>);
-    }
-    lastIndex = match.index + match[0].length;
-  }
-
-  if (lastIndex < text.length) {
-    nodes.push(text.slice(lastIndex));
-  }
-
-  return nodes.length > 0 ? nodes : [text];
+function stripInlineMarkdown(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*(.+?)\*/g, '$1');
 }
 
-function renderMarkdown(content: string): React.ReactNode {
-  if (!content) return null;
-
+function markdownToViewportLines(content: string): string[] {
+  if (!content) return [];
   const lines = content.split('\n');
-  const elements: React.ReactNode[] = [];
-  let i = 0;
-  let key = 0;
+  const out: string[] = [];
+  let inCode = false;
 
-  while (i < lines.length) {
+  for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
 
     if (line.trimStart().startsWith('```')) {
       const lang = line.trimStart().slice(3).trim();
-      const codeLines: string[] = [];
-      i++;
-      while (i < lines.length && !lines[i]!.trimStart().startsWith('```')) {
-        codeLines.push(lines[i]!);
-        i++;
-      }
-      i++;
-      elements.push(
-        <Box key={key++} flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} marginY={0}>
-          {lang && <Text dimColor>{lang}</Text>}
-          <Text color="yellow">{codeLines.join('\n')}</Text>
-        </Box>
-      );
+      inCode = !inCode;
+      if (inCode && lang) out.push(`  ${lang}`);
+      continue;
+    }
+
+    if (inCode) {
+      out.push(`  ${line}`);
       continue;
     }
 
     const headerMatch = line.match(/^(#{1,3})\s+(.+)/);
     if (headerMatch) {
-      elements.push(
-        <Box key={key++}>
-          <Text bold color="cyan">{headerMatch[2]}</Text>
-        </Box>
-      );
-      i++;
+      out.push(stripInlineMarkdown(headerMatch[2]!));
       continue;
     }
 
     if (line.startsWith('> ')) {
-      elements.push(
-        <Box key={key++} paddingLeft={1}>
-          <Text dimColor>{'│ '}{renderInlineMarkdown(line.slice(2))}</Text>
-        </Box>
-      );
-      i++;
+      out.push(`│ ${stripInlineMarkdown(line.slice(2))}`);
       continue;
     }
 
     const listMatch = line.match(/^(\s*)([-*])\s+(.+)/);
     if (listMatch) {
       const indent = Math.floor(listMatch[1]!.length / 2);
-      elements.push(
-        <Box key={key++} paddingLeft={indent * 2}>
-          <Text>{'  • '}{renderInlineMarkdown(listMatch[3]!)}</Text>
-        </Box>
-      );
-      i++;
+      out.push(`${' '.repeat(indent * 2)}• ${stripInlineMarkdown(listMatch[3]!)}`);
       continue;
     }
 
     const numMatch = line.match(/^(\s*)(\d+)\.\s+(.+)/);
     if (numMatch) {
       const indent = Math.floor(numMatch[1]!.length / 2);
-      elements.push(
-        <Box key={key++} paddingLeft={indent * 2}>
-          <Text>{'  '}{numMatch[2]}. {renderInlineMarkdown(numMatch[3]!)}</Text>
-        </Box>
-      );
-      i++;
+      out.push(`${' '.repeat(indent * 2)}${numMatch[2]}. ${stripInlineMarkdown(numMatch[3]!)}`);
       continue;
     }
 
     if (line.trim() === '') {
-      elements.push(<Box key={key++}><Text> </Text></Box>);
-      i++;
+      out.push(' ');
       continue;
     }
 
-    elements.push(
-      <Box key={key++}>
-        <Text>{renderInlineMarkdown(line)}</Text>
-      </Box>
-    );
-    i++;
+    out.push(stripInlineMarkdown(line));
   }
 
-  return <Box flexDirection="column">{elements}</Box>;
+  return out;
 }
 
-// --- Message Rows ---
-
-function MessageRow({
-  msg,
+function buildMessageLines({
+  messages,
   showThinking,
   dimmed,
   isRewindMode,
-  isRewindCandidate,
-  isRewindTarget,
+  rewindCandidateIds,
+  rewindTargetMessageId,
 }: {
-  msg: Message;
+  messages: Message[];
   showThinking: boolean;
   dimmed: boolean;
   isRewindMode: boolean;
-  isRewindCandidate: boolean;
-  isRewindTarget: boolean;
-}): React.ReactElement {
-  if (dimmed || (isRewindMode && !isRewindCandidate)) {
-    switch (msg.role) {
-      case 'user':
-        return (
-          <Box marginBottom={1} paddingX={2}>
-            <Text dimColor>{isRewindMode ? '  ' : '❯ '}{msg.content}</Text>
-          </Box>
-        );
-      case 'assistant': {
-        const { visibleContent } = parseThinkBlocks(msg.content);
-        return (
-          <Box flexDirection="column" marginBottom={1} paddingX={2}>
-            <Text dimColor>assistant</Text>
-            <Box paddingLeft={2}><Text dimColor>{visibleContent}</Text></Box>
-          </Box>
-        );
-      }
-      case 'tool':
-        return (
-          <Box flexDirection="column" paddingX={1} marginBottom={1} marginX={2}>
-            <Text dimColor>tool: {msg.toolName}</Text>
-            <Text dimColor>{msg.content}</Text>
-          </Box>
-        );
-    }
-  }
+  rewindCandidateIds: Set<string>;
+  rewindTargetMessageId: string | null;
+}): ViewportLine[] {
+  const rows: ViewportLine[] = [];
 
-  switch (msg.role) {
-    case 'user':
+  const add = (line: Omit<ViewportLine, 'key'>, index: number) => {
+    rows.push({ key: `${line.messageId ?? 'blank'}:${index}:${rows.length}`, ...line });
+  };
+
+  for (const msg of messages) {
+    const isRewindCandidate = rewindCandidateIds.has(msg.id);
+    const isRewindTarget = rewindTargetMessageId === msg.id;
+    const muted = dimmed || (isRewindMode && !isRewindCandidate);
+    const base = { messageId: msg.id, dim: muted };
+
+    if (msg.role === 'user') {
+      const prefix = isRewindMode ? (isRewindCandidate ? '○ ' : '  ') : '❯ ';
+      const contentLines = msg.content.split('\n');
       if (isRewindTarget) {
-        return (
-          <Box flexDirection="column" borderStyle="single" borderColor="cyan" paddingX={1} marginX={1} marginBottom={1}>
-            <Text color="cyan" bold>{'↩ rewind target'}</Text>
-            <Text color="cyan" bold>{msg.content}</Text>
-          </Box>
-        );
+        add({ ...base, text: '↩ rewind target', color: 'cyan', bold: true }, 0);
       }
-      if (isRewindCandidate) {
-        return (
-          <Box marginBottom={1} paddingX={2}>
-            <Text color="cyan">{'○ '}</Text>
-            <Text>{msg.content}</Text>
-          </Box>
-        );
-      }
-      return (
-        <Box marginBottom={1} paddingX={2}>
-          <Text color="cyan" bold>{'❯ '}</Text>
-          <Text>{msg.content}</Text>
-        </Box>
-      );
-    case 'assistant': {
+      contentLines.forEach((line, index) => {
+        add({
+          ...base,
+          text: `${index === 0 ? prefix : '  '}${line}`,
+          color: muted ? undefined : 'cyan',
+          bold: !muted && !isRewindCandidate,
+        }, index + 1);
+      });
+      add({ text: ' ', messageId: msg.id }, contentLines.length + 1);
+      continue;
+    }
+
+    if (msg.role === 'assistant') {
       const { thinkContent, visibleContent, thinkingInProgress } = parseThinkBlocks(msg.content);
       const hasThinking = thinkContent.length > 0 || thinkingInProgress;
-      return (
-        <Box flexDirection="column" marginBottom={1} paddingX={2}>
-          <Text dimColor>assistant</Text>
-          {hasThinking && (
-            <Box flexDirection="column" paddingLeft={2}>
-              {showThinking ? (
-                <>
-                  <Text dimColor>{'▼ thinking'}</Text>
-                  <Box paddingLeft={2}>
-                    <Text dimColor color="gray">{thinkContent}{thinkingInProgress ? <Text color="cyan">_</Text> : null}</Text>
-                  </Box>
-                </>
-              ) : (
-                <Text dimColor>
-                  {'▶ thinking'}
-                  {thinkingInProgress
-                    ? <Text color="cyan">...</Text>
-                    : ` (~${Math.ceil(thinkContent.length / 4)} tokens) `}
-                  {!thinkingInProgress && <Text dimColor>(expand ctrl+v)</Text>}
-                </Text>
-              )}
-            </Box>
-          )}
-          <Box paddingLeft={2}>
-            {renderMarkdown(visibleContent)}
-            {msg.isStreaming && !thinkingInProgress ? <Text color="cyan">_</Text> : null}
-          </Box>
-        </Box>
-      );
+      add({ ...base, text: 'assistant', dim: true }, 0);
+
+      if (hasThinking) {
+        if (showThinking) {
+          add({ ...base, text: '  ▼ thinking', dim: true }, 1);
+          markdownToViewportLines(thinkContent).forEach((line, index) => {
+            add({ ...base, text: `    ${line}`, color: 'gray', dim: true }, index + 2);
+          });
+          if (thinkingInProgress) add({ ...base, text: '    _', color: 'cyan' }, 3);
+        } else {
+          const status = thinkingInProgress ? '...' : ` (~${Math.ceil(thinkContent.length / 4)} tokens) (expand ctrl+v)`;
+          add({ ...base, text: `  ▶ thinking${status}`, dim: true }, 1);
+        }
+      }
+
+      const bodyLines = markdownToViewportLines(visibleContent);
+      if (msg.isStreaming && !thinkingInProgress) {
+        if (bodyLines.length === 0) bodyLines.push('_');
+        else bodyLines[bodyLines.length - 1] = `${bodyLines[bodyLines.length - 1]} _`;
+      }
+      bodyLines.forEach((line, index) => {
+        add({ ...base, text: `  ${line}` }, index + 10);
+      });
+      add({ text: ' ', messageId: msg.id }, bodyLines.length + 20);
+      continue;
     }
-    case 'tool':
-      return (
-        <Box
-          flexDirection="column"
-          borderStyle="round"
-          borderColor="yellow"
-          paddingX={1}
-          marginBottom={1}
-          marginX={2}
-        >
-          <Text color="yellow" bold>tool: {msg.toolName}</Text>
-          <Text dimColor>{msg.content}</Text>
-        </Box>
-      );
+
+    add({ ...base, text: `tool: ${msg.toolName}`, color: muted ? undefined : 'yellow', bold: !muted }, 0);
+    msg.content.split('\n').forEach((line, index) => {
+      add({ ...base, text: `  ${line}`, dim: true }, index + 1);
+    });
+    add({ text: ' ', messageId: msg.id }, 100);
   }
+
+  return rows;
 }
 
 export const MessageList: React.FC<MessageListProps & { dimmed?: boolean }> = ({
   messages,
+  height = 15,
   showThinking = false,
   scrollOffset = 0,
   onMaxScroll,
@@ -282,90 +258,69 @@ export const MessageList: React.FC<MessageListProps & { dimmed?: boolean }> = ({
   isRewindMode = false,
   onScrollOffsetRequest,
 }) => {
-  const { stdout } = useStdout();
-  const boxHeight = (stdout.rows ?? 24) - 9;   // header(4) + input(3) + status(2)
-  const availableRows = boxHeight - 2;           // paddingY(1) top + bottom
-  const contentRef = useRef<DOMElement>(null);
-  const rowRefs = useRef(new Map<string, DOMElement>());
-  const maxScrollRef = useRef(0);
+  const boxHeight = Math.max(1, height);
+  const availableRows = viewportRowsForHeight(boxHeight);
+  const rows = useMemo(() => buildMessageLines({
+    messages,
+    showThinking,
+    dimmed,
+    isRewindMode,
+    rewindCandidateIds,
+    rewindTargetMessageId,
+  }), [messages, showThinking, dimmed, isRewindMode, rewindCandidateIds, rewindTargetMessageId]);
+  const viewport = computeViewportLayout<ViewportLine>(
+    rows,
+    availableRows,
+    scrollOffset,
+    { key: 'blank', text: ' ' },
+  );
 
-  useLayoutEffect(() => {
-    if (contentRef.current) {
-      const { height } = measureElement(contentRef.current);
-      const max = Math.max(0, height - availableRows);
-      maxScrollRef.current = max;
-      onMaxScroll?.(max);
+  useEffect(() => {
+    onMaxScroll?.(viewport.maxScroll);
 
-      if (isRewindMode && rewindTargetMessageId && onScrollOffsetRequest) {
-        let top = 0;
-        for (const msg of messages) {
-          const row = rowRefs.current.get(msg.id);
-          const rowHeight = row ? measureElement(row).height : 0;
-          if (msg.id === rewindTargetMessageId) {
-            const bottom = top + rowHeight;
-            const viewportTop = max - Math.min(scrollOffset, max);
-            const viewportBottom = viewportTop + availableRows;
-            let desiredViewportTop: number | null = null;
-            if (top < viewportTop) {
-              desiredViewportTop = top;
-            } else if (bottom > viewportBottom) {
-              desiredViewportTop = Math.max(0, bottom - availableRows);
-            }
-            if (desiredViewportTop !== null) {
-              const nextOffset = Math.max(0, Math.min(max, max - desiredViewportTop));
-              if (nextOffset !== scrollOffset) onScrollOffsetRequest(nextOffset);
-            }
-            break;
-          }
-          top += rowHeight;
-        }
+    if (isRewindMode && rewindTargetMessageId && onScrollOffsetRequest) {
+      const targetTop = rows.findIndex((line) => line.messageId === rewindTargetMessageId);
+      if (targetTop < 0) return;
+      let targetBottom = targetTop + 1;
+      while (targetBottom < rows.length && rows[targetBottom]!.messageId === rewindTargetMessageId) {
+        targetBottom++;
+      }
+
+      const viewportBottom = viewport.viewportTop + availableRows;
+      let desiredViewportTop: number | null = null;
+      if (targetTop < viewport.viewportTop) {
+        desiredViewportTop = targetTop;
+      } else if (targetBottom > viewportBottom) {
+        desiredViewportTop = Math.max(0, targetBottom - availableRows);
+      }
+      if (desiredViewportTop !== null) {
+        const nextOffset = Math.max(0, Math.min(viewport.maxScroll, viewport.maxScroll - desiredViewportTop));
+        if (nextOffset !== scrollOffset) onScrollOffsetRequest(nextOffset);
       }
     }
   });
 
-  const clampedScroll = Math.min(scrollOffset, maxScrollRef.current);
-  const maxScroll = maxScrollRef.current;
-
-  // Scrollbar: compute thumb position and size
-  const trackHeight = availableRows;
-  const hasScrollbar = maxScroll > 0;
-  const thumbSize = hasScrollbar ? Math.max(1, Math.min(trackHeight, Math.round(trackHeight * (availableRows / (availableRows + maxScroll))))) : trackHeight;
-  // scrollOffset=0 is bottom, maxScroll is top — invert for scrollbar (top=0)
-  const scrollFraction = hasScrollbar ? 1 - (clampedScroll / maxScroll) : 1;
-  const thumbTop = Math.max(0, Math.min(trackHeight - thumbSize, Math.round(scrollFraction * (trackHeight - thumbSize))));
-
-  const scrollbar: string[] = [];
-  for (let i = 0; i < trackHeight; i++) {
-    scrollbar.push(i >= thumbTop && i < thumbTop + thumbSize ? '█' : '│');
-  }
+  const scrollbar = computeScrollbarLayout(availableRows, viewport.maxScroll, viewport.clampedScroll);
 
   return (
     <Box flexDirection="row" height={boxHeight}>
-      <Box flexDirection="column" flexGrow={1} overflow="hidden" paddingY={1}>
-        <Box ref={contentRef} flexDirection="column" flexShrink={0} marginTop={-(maxScroll - clampedScroll)}>
-          {messages.map((msg) => (
-            <Box
-              key={msg.id}
-              ref={(node) => {
-                if (node) rowRefs.current.set(msg.id, node);
-                else rowRefs.current.delete(msg.id);
-              }}
-              flexDirection="column"
-            >
-              <MessageRow
-                msg={msg}
-                showThinking={showThinking}
-                dimmed={dimmed}
-                isRewindMode={isRewindMode}
-                isRewindCandidate={rewindCandidateIds.has(msg.id)}
-                isRewindTarget={rewindTargetMessageId === msg.id}
-              />
-            </Box>
-          ))}
-        </Box>
+      <Box flexDirection="column" flexGrow={1} paddingY={1}>
+        {viewport.rows.map((line, i) => (
+          <Text
+            key={`${line.key}:${i}`}
+            color={line.color}
+            dimColor={line.dim}
+            bold={line.bold}
+            wrap="truncate-end"
+          >
+            {line.text}
+          </Text>
+        ))}
       </Box>
-      <Box flexDirection="column" paddingY={1} width={1}>
-        <Text dimColor>{scrollbar.join('\n')}</Text>
+      <Box flexDirection="column" paddingY={1} width={2}>
+        {scrollbar.rows.map((row, i) => (
+          <Text key={i} dimColor>{` ${row}`}</Text>
+          ))}
       </Box>
     </Box>
   );

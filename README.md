@@ -147,6 +147,13 @@ Config lives at:
 ~/.squirl/config.json
 ```
 
+Mouse wheel scrolling follows Vim/Neovim-style fixed line steps. To tune it:
+```json
+{
+  "mouseScrollLines": 5
+}
+```
+
 ---
 
 ## Keybindings

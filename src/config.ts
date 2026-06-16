@@ -11,6 +11,7 @@ export interface SquirlConfig {
   defaultModel?: string;
   localBaseUrl?: string;
   localBackend?: LocalBackend;
+  mouseScrollLines?: number;
   index?: {
     enabled: boolean;
     store: 'local-chroma' | 'remote-chroma' | 'null';
