@@ -669,7 +669,7 @@ export const App: React.FC<AppProps> = ({
           setMessages(prev => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
-            if (last && last.role === 'assistant' && last.isStreaming) {
+            if (last && last.role === 'assistant') {
               const finalized = { ...last, content: last.content + remaining, isStreaming: false } as AssistantMessage;
               updated[updated.length - 1] = finalized;
               appendMessage(finalized);

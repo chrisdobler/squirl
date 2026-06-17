@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
+import { execFileSync, spawn } from 'node:child_process';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -13,6 +14,7 @@ import type { ToolCall } from './types.js';
 const DEBUG = !!process.env.SQUIRL_DEBUG;
 const DEBUG_LOG = join(homedir(), '.squirl', 'debug.log');
 const MODEL_REQUEST_TIMEOUT_MS = 5_000;
+const LOCAL_MODEL_REQUEST_TIMEOUT_MS = 60_000;
 const MODEL_DETECTION_TIMEOUT_MS = 2_000;
 
 function debugLog(label: string, data: unknown): void {
@@ -72,7 +74,7 @@ async function streamOpenAI(options: StreamOptions): Promise<void> {
       }
       client = new OpenAI({ apiKey, timeout: MODEL_REQUEST_TIMEOUT_MS, maxRetries: 0 });
     } else {
-      client = new OpenAI({ baseURL: model.baseUrl, apiKey: 'not-needed', timeout: MODEL_REQUEST_TIMEOUT_MS, maxRetries: 0 });
+      client = new OpenAI({ baseURL: model.baseUrl, apiKey: 'not-needed', timeout: LOCAL_MODEL_REQUEST_TIMEOUT_MS, maxRetries: 0 });
     }
 
     let doneCalled = false;
@@ -91,7 +93,11 @@ async function streamOpenAI(options: StreamOptions): Promise<void> {
         ...baseParams,
         stream_options: { include_usage: true },
       }, { signal });
-    } catch {
+    } catch (err) {
+      debugLog('OpenAI STREAM_OPTIONS RETRY', {
+        provider: model.provider,
+        error: err instanceof Error ? { name: err.name, message: err.message } : String(err),
+      });
       stream = await client.chat.completions.create(baseParams, { signal });
     }
 
@@ -156,8 +162,163 @@ async function streamOpenAI(options: StreamOptions): Promise<void> {
       onError(err);
       return;
     }
+    if (model.provider === 'local' && isConnectionLikeError(err)) {
+      try {
+        await streamOpenAICompatibleWithCurl(options);
+        return;
+      } catch (fallbackErr) {
+        debugLog('OpenAI CURL FALLBACK ERROR', {
+          provider: model.provider,
+          baseUrl: model.baseUrl,
+          model: model.id,
+          error: fallbackErr instanceof Error ? { name: fallbackErr.name, message: fallbackErr.message, stack: fallbackErr.stack } : String(fallbackErr),
+        });
+        onError(normalizeModelError(fallbackErr, 'local'));
+        return;
+      }
+    }
+    debugLog('OpenAI ERROR', {
+      provider: model.provider,
+      baseUrl: model.baseUrl,
+      model: model.id,
+      error: err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : String(err),
+    });
     onError(normalizeModelError(err, model.provider === 'openai' ? 'openai' : 'local'));
   }
+}
+
+function isConnectionLikeError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const text = `${err.name} ${err.message} ${JSON.stringify((err as { cause?: unknown }).cause ?? '')}`;
+  return /connection error|fetch failed|EHOSTUNREACH|ECONNREFUSED|ENOTFOUND/i.test(text);
+}
+
+async function streamOpenAICompatibleWithCurl(options: StreamOptions): Promise<void> {
+  const { messages, model, tools, onToken, onToolCalls, onDone, signal } = options;
+  const url = `${(model.baseUrl ?? '').replace(/\/+$/, '')}/chat/completions`;
+  const body = JSON.stringify({
+    model: model.id,
+    messages,
+    stream: true,
+    ...(tools && tools.length > 0 ? { tools } : {}),
+  });
+
+  debugLog('OpenAI CURL REQUEST', { url, model: model.id, messages, tools: tools?.length ?? 0 });
+
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('curl', [
+      '-sS',
+      '-N',
+      '--connect-timeout',
+      '10',
+      url,
+      '-H',
+      'Content-Type: application/json',
+      '-d',
+      body,
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    let stdoutBuffer = '';
+    let stderr = '';
+    let completionChars = 0;
+    let doneCalled = false;
+    const pendingToolCalls = new Map<number, { id: string; name: string; arguments: string }>();
+
+    const finishDone = () => {
+      if (doneCalled) return;
+      doneCalled = true;
+      const estimatedPrompt = messages.reduce((sum, msg) => {
+        const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
+        return sum + Math.ceil(content.length / 4);
+      }, 0);
+      const toolChars = pendingToolCalls.size > 0 ? JSON.stringify([...pendingToolCalls.values()]).length : 0;
+      const estimatedCompletion = Math.ceil((completionChars + toolChars) / 4);
+      onDone({
+        promptTokens: estimatedPrompt,
+        completionTokens: estimatedCompletion,
+        totalTokens: estimatedPrompt + estimatedCompletion,
+      });
+    };
+
+    const handleLine = (rawLine: string) => {
+      const line = rawLine.trim();
+      if (!line || !line.startsWith('data:')) return;
+      const data = line.slice('data:'.length).trim();
+      if (data === '[DONE]') {
+        if (pendingToolCalls.size > 0 && onToolCalls) onToolCalls([...pendingToolCalls.values()]);
+        finishDone();
+        return;
+      }
+      const chunk = JSON.parse(data) as {
+        choices?: Array<{
+          delta?: {
+            content?: string;
+            tool_calls?: Array<{
+              index: number;
+              id?: string;
+              function?: { name?: string; arguments?: string };
+            }>;
+          };
+        }>;
+      };
+      const choice = chunk.choices?.[0];
+      const delta = choice?.delta?.content;
+      if (delta) {
+        completionChars += delta.length;
+        onToken(delta);
+      }
+      const tcDeltas = choice?.delta?.tool_calls;
+      if (tcDeltas) {
+        for (const tc of tcDeltas) {
+          const existing = pendingToolCalls.get(tc.index) ?? { id: '', name: '', arguments: '' };
+          if (tc.id) existing.id = tc.id;
+          if (tc.function?.name) existing.name = tc.function.name;
+          if (tc.function?.arguments) existing.arguments += tc.function.arguments;
+          pendingToolCalls.set(tc.index, existing);
+        }
+      }
+    };
+
+    const abort = () => {
+      child.kill('SIGTERM');
+      reject(new DOMException('The operation was aborted.', 'AbortError'));
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutBuffer += chunk.toString('utf-8');
+      const lines = stdoutBuffer.split(/\r?\n/);
+      stdoutBuffer = lines.pop() ?? '';
+      try {
+        for (const line of lines) handleLine(line);
+      } catch (err) {
+        child.kill('SIGTERM');
+        reject(err);
+      }
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf-8');
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      signal?.removeEventListener('abort', abort);
+      if (stdoutBuffer.trim()) {
+        try {
+          for (const line of stdoutBuffer.split(/\r?\n/)) handleLine(line);
+        } catch (err) {
+          reject(err);
+          return;
+        }
+      }
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || `curl exited with code ${code}`));
+        return;
+      }
+      if (pendingToolCalls.size > 0 && onToolCalls) onToolCalls([...pendingToolCalls.values()]);
+      finishDone();
+      resolve();
+    });
+  });
 }
 
 // --- Anthropic ---
@@ -373,31 +534,47 @@ async function fetchWithTimeout(
   }
 }
 
+async function fetchJsonWithFallback<T>(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs: number = MODEL_DETECTION_TIMEOUT_MS,
+): Promise<T> {
+  try {
+    const res = await fetchWithTimeout(url, init, timeoutMs);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json() as T;
+  } catch (err) {
+    if (init.method && init.method !== 'GET') throw err;
+    const raw = execFileSync('curl', [
+      '-sS',
+      '--max-time',
+      String(Math.max(1, Math.ceil(timeoutMs / 1000))),
+      url,
+    ], { encoding: 'utf-8', maxBuffer: 1024 * 1024 });
+    return JSON.parse(raw) as T;
+  }
+}
+
 /**
  * Auto-detect what backend is serving at the given base URL.
  */
 export async function detectLocalBackend(baseUrl: string): Promise<LocalBackend> {
   try {
-    // Check for Ollama via its native /api/tags endpoint
-    const ollamaRes = await fetchWithTimeout(serverRoot(baseUrl) + '/api/tags');
-    if (ollamaRes.ok) {
-      return 'ollama';
-    }
-  } catch { /* not ollama */ }
+    // Prefer /v1/models ownership hints; ai-picker gateways can expose
+    // Ollama-compatible side endpoints while routing chat through vLLM.
+    const url = baseUrl.replace(/\/+$/, '') + '/models';
+    const json = await fetchJsonWithFallback<{ data?: Array<{ owned_by?: string }> }>(url);
+    const ownedBy = json.data?.[0]?.owned_by?.toLowerCase() ?? '';
+    if (ownedBy === 'vllm') return 'vllm';
+    if (ownedBy.includes('lmstudio') || ownedBy.includes('lm-studio')) return 'lmstudio';
+    if (ownedBy.includes('llamacpp') || ownedBy.includes('llama.cpp') || ownedBy.includes('llama-cpp')) return 'llamacpp';
+  } catch { /* detection failed */ }
 
   try {
-    // Check /v1/models for owned_by hints
-    const url = baseUrl.replace(/\/+$/, '') + '/models';
-    const res = await fetchWithTimeout(url);
-
-    if (res.ok) {
-      const json = await res.json() as { data?: Array<{ owned_by?: string }> };
-      const ownedBy = json.data?.[0]?.owned_by?.toLowerCase() ?? '';
-      if (ownedBy === 'vllm') return 'vllm';
-      if (ownedBy.includes('lmstudio') || ownedBy.includes('lm-studio')) return 'lmstudio';
-      if (ownedBy.includes('llamacpp') || ownedBy.includes('llama.cpp') || ownedBy.includes('llama-cpp')) return 'llamacpp';
-    }
-  } catch { /* detection failed */ }
+    // Check for Ollama via its native /api/tags endpoint after /models.
+    await fetchJsonWithFallback(serverRoot(baseUrl) + '/api/tags');
+    return 'ollama';
+  } catch { /* not ollama */ }
 
   return 'unknown';
 }
@@ -409,11 +586,8 @@ export async function detectLocalBackend(baseUrl: string): Promise<LocalBackend>
 export async function fetchAvailableModels(baseUrl: string, backend?: LocalBackend): Promise<DetectedModel[]> {
   try {
     const url = baseUrl.replace(/\/+$/, '') + '/models';
-    const res = await fetchWithTimeout(url);
+    const json = await fetchJsonWithFallback<{ data?: Array<{ id: string; owned_by?: string; context_window?: number; context_length?: number; max_model_len?: number; max_context_length?: number }> }>(url);
 
-    if (!res.ok) return [];
-
-    const json = await res.json() as { data?: Array<{ id: string; owned_by?: string; context_window?: number; context_length?: number; max_model_len?: number; max_context_length?: number }> };
     const models = (json.data ?? []).map((m) => ({
       id: m.id,
       contextWindow: m.context_window ?? m.context_length ?? m.max_model_len ?? m.max_context_length,
@@ -424,17 +598,14 @@ export async function fetchAvailableModels(baseUrl: string, backend?: LocalBacke
       await Promise.all(models.map(async (model) => {
         if (model.contextWindow) return;
         try {
-          const showRes = await fetchWithTimeout(serverRoot(baseUrl) + '/api/show', {
+          const info = await fetchJsonWithFallback<{ model_info?: Record<string, unknown> }>(serverRoot(baseUrl) + '/api/show', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: model.id }),
           });
-          if (showRes.ok) {
-            const info = await showRes.json() as { model_info?: Record<string, unknown> };
-            const ctxLength = info.model_info?.['context_length'];
-            if (typeof ctxLength === 'number') {
-              model.contextWindow = ctxLength;
-            }
+          const ctxLength = info.model_info?.['context_length'];
+          if (typeof ctxLength === 'number') {
+            model.contextWindow = ctxLength;
           }
         } catch { /* skip */ }
       }));
