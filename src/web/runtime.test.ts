@@ -42,9 +42,9 @@ vi.mock('../orchestrator.js', () => ({
       const user = { id: 'web-user', role: 'user', content: input };
       const assistant = { id: 'web-assistant', role: 'assistant', content: '', isStreaming: true };
       callbacks.onNewMessage(user);
-      callbacks.onNewMessage(assistant);
+      callbacks.onNewMessage({ ...assistant });
       assistant.content = 'ok';
-      callbacks.onToken('ok');
+      callbacks.onToken('ok', { ...assistant });
       assistant.isStreaming = false;
       callbacks.onDone({ promptTokens: 1, completionTokens: 1, totalTokens: 2 });
       return [user, { ...assistant, content: 'ok', isStreaming: false }];
@@ -127,5 +127,18 @@ describe('SquirlRuntime shared history', () => {
       'user:web message',
       'assistant:ok',
     ]);
+  });
+
+  it('emits absolute assistant updates while streaming', async () => {
+    writeJsonl(join(historyDir, 'current.jsonl'), []);
+    const runtime = await loadRuntime();
+    const events: any[] = [];
+
+    await runtime.chat('web message', (event) => { events.push(event); });
+
+    expect(events).toContainEqual({
+      type: 'assistant-update',
+      message: { id: 'web-assistant', role: 'assistant', content: 'ok', isStreaming: true },
+    });
   });
 });

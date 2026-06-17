@@ -399,13 +399,14 @@ export class SquirlRuntime extends EventEmitter {
             }
             emit({ type: 'message', message });
           },
-          onToken: (token) => {
-            this.streamTokens++;
+          onToken: (token, assistant) => {
+            if (token) this.streamTokens++;
             const elapsed = (Date.now() - this.streamStart) / 1000;
             if (elapsed > 0.5) this.tokensPerSecond = Math.round(this.streamTokens / elapsed);
             const last = this.messages[this.messages.length - 1];
-            if (last?.role === 'assistant' && last.isStreaming) {
-              emit({ type: 'token', token, assistantId: last.id });
+            if (last?.role === 'assistant' && last.isStreaming && last.id === assistant.id) {
+              this.messages = [...this.messages.slice(0, -1), assistant];
+              emit({ type: 'assistant-update', message: assistant });
             }
             emit({ type: 'status', status: this.getStatus() });
           },

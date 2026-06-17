@@ -16,7 +16,7 @@ import { isVectorStoreError } from './search/stores/chroma.js';
 import type { QueryPipelineStage } from './pipeline-status.js';
 
 export interface ChatCallbacks {
-  onToken: (token: string) => void;
+  onToken: (token: string, assistant: AssistantMessage) => void;
   onDone: (usage: { promptTokens: number; completionTokens: number; totalTokens: number }) => void;
   onError: (error: Error) => void;
   onNewMessage?: (message: Message) => void;
@@ -30,6 +30,13 @@ export interface ChatCallbacks {
 
 const MAX_TOOL_ITERATIONS = 10;
 const DIR_CONTEXT_TTL = 30_000;
+
+function cloneAssistantMessage(message: AssistantMessage): AssistantMessage {
+  return {
+    ...message,
+    toolCalls: message.toolCalls ? message.toolCalls.map((toolCall) => ({ ...toolCall })) : undefined,
+  };
+}
 
 export class Orchestrator {
   private contextFiles = new Map<string, string>();
@@ -162,7 +169,7 @@ export class Orchestrator {
         isStreaming: true,
       };
       newMessages.push(assistantMsg);
-      callbacks.onNewMessage?.(assistantMsg);
+      callbacks.onNewMessage?.(cloneAssistantMessage(assistantMsg));
 
       let accumulatedContent = '';
       let receivedToolCalls: ToolCall[] | null = null;
@@ -181,7 +188,7 @@ export class Orchestrator {
             }
             accumulatedContent += token;
             assistantMsg.content = accumulatedContent;
-            callbacks.onToken(token);
+            callbacks.onToken(token, cloneAssistantMessage(assistantMsg));
           },
           onToolCalls: (toolCalls) => {
             if (!sawModelOutput) {

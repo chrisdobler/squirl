@@ -501,6 +501,9 @@ function App() {
         const event = JSON.parse(line) as ChatEvent;
         if (event.type === 'state') setState(event.state);
         if (event.type === 'message') setState((prev) => prev ? { ...prev, messages: [...prev.messages, event.message] } : prev);
+        if (event.type === 'assistant-update') {
+          setState((prev) => prev ? { ...prev, messages: prev.messages.map((msg) => msg.id === event.message.id ? event.message : msg) } : prev);
+        }
         if (event.type === 'token') {
           setState((prev) => {
             if (!prev) return prev;

@@ -40,6 +40,7 @@ export interface ChatRequest {
 export type ChatEvent =
   | { type: 'state'; state: AppState }
   | { type: 'message'; message: Message }
+  | { type: 'assistant-update'; message: Message }
   | { type: 'token'; token: string; assistantId: string }
   | { type: 'assistant-final'; message: Message }
   | { type: 'status'; status: RuntimeStatus }

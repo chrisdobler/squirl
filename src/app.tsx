@@ -153,6 +153,7 @@ export const App: React.FC<AppProps> = ({
   const streamStartRef = useRef(0);
   const streamTokensRef = useRef(0);
   const streamBufferRef = useRef('');
+  const latestAssistantRef = useRef<AssistantMessage | null>(null);
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const orchestratorRef = useRef(new Orchestrator(workingDir));
   const statusEmitterRef = useRef(new StatusEmitter());
@@ -617,6 +618,8 @@ export const App: React.FC<AppProps> = ({
     setTokensPerSecond(0);
     streamStartRef.current = Date.now();
     streamTokensRef.current = 0;
+    streamBufferRef.current = '';
+    latestAssistantRef.current = null;
 
     const abortController = new AbortController();
     abortRef.current = abortController;
@@ -627,13 +630,17 @@ export const App: React.FC<AppProps> = ({
       selectedModel,
       {
         onNewMessage: (msg) => {
+          if (msg.role === 'assistant') {
+            latestAssistantRef.current = msg;
+          }
           setMessages(prev => [...prev, msg]);
           if (msg.role !== 'assistant') {
             appendMessage(msg);
           }
         },
-        onToken: (token) => {
-          streamTokensRef.current++;
+        onToken: (token, assistant) => {
+          latestAssistantRef.current = assistant;
+          if (token) streamTokensRef.current++;
           streamBufferRef.current += token;
 
           // Throttle renders to ~30fps
@@ -648,11 +655,12 @@ export const App: React.FC<AppProps> = ({
               if (elapsed > 0.5) {
                 setTokensPerSecond(Math.round(streamTokensRef.current / elapsed));
               }
+              const latestAssistant = latestAssistantRef.current;
               setMessages(prev => {
                 const updated = [...prev];
                 const last = updated[updated.length - 1];
-                if (last && last.role === 'assistant' && last.isStreaming) {
-                  updated[updated.length - 1] = { ...last, content: last.content + buffered };
+                if (last && last.role === 'assistant' && last.isStreaming && latestAssistant?.id === last.id) {
+                  updated[updated.length - 1] = { ...last, ...latestAssistant };
                 }
                 return updated;
               });
@@ -666,11 +674,18 @@ export const App: React.FC<AppProps> = ({
           }
           const remaining = streamBufferRef.current;
           streamBufferRef.current = '';
+          const latestAssistant = latestAssistantRef.current;
           setMessages(prev => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
             if (last && last.role === 'assistant') {
-              const finalized = { ...last, content: last.content + remaining, isStreaming: false } as AssistantMessage;
+              const content = latestAssistant?.id === last.id ? latestAssistant.content : last.content + remaining;
+              const finalized = {
+                ...last,
+                ...(latestAssistant?.id === last.id ? latestAssistant : {}),
+                content,
+                isStreaming: false,
+              } as AssistantMessage;
               updated[updated.length - 1] = finalized;
               appendMessage(finalized);
             }
