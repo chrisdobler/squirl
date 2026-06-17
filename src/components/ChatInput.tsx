@@ -1,6 +1,14 @@
 import React, { useRef, useReducer } from 'react';
 import { Text, useInput } from 'ink';
 
+export const PASTE_COLLAPSE_CHAR_THRESHOLD = 1000;
+export const PASTE_COLLAPSE_LINE_THRESHOLD = 20;
+
+export interface PasteRegion {
+  start: number;
+  length: number;
+}
+
 interface ChatInputProps {
   value: string;
   onChange: (value: string) => void;
@@ -19,7 +27,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   mask,
 }) => {
   const cursorRef = useRef(value.length);
-  const pasteRegionRef = useRef<{ start: number; length: number } | null>(null);
+  const pasteRegionRef = useRef<PasteRegion | null>(null);
   const [, forceRender] = useReducer((x: number) => x + 1, 0);
 
   // Clamp cursor if value shrunk externally (e.g. parent cleared it)
@@ -141,11 +149,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     return <Text><Text inverse>{ph[0]}</Text><Text dimColor>{ph.slice(1)}</Text></Text>;
   }
 
-  const PASTE_COLLAPSE_THRESHOLD = 40;
   const pr = pasteRegionRef.current;
-  const collapsed = pr && pr.length > PASTE_COLLAPSE_THRESHOLD && pr.start + pr.length <= displayValue.length;
+  const collapsed = shouldCollapsePasteRegion(displayValue, pr);
 
-  if (collapsed) {
+  if (collapsed && pr) {
     const pasteEnd = pr.start + pr.length;
     const pastedText = displayValue.slice(pr.start, pasteEnd);
     const lines = pastedText.split('\n').length;
@@ -201,6 +208,17 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     </Text>
   );
 };
+
+export function shouldCollapsePasteRegion(displayValue: string, pasteRegion: PasteRegion | null): boolean {
+  if (!pasteRegion) return false;
+
+  const { start, length } = pasteRegion;
+  if (start < 0 || length < 0 || start + length > displayValue.length) return false;
+  if (length > PASTE_COLLAPSE_CHAR_THRESHOLD) return true;
+
+  const pastedText = displayValue.slice(start, start + length);
+  return pastedText.split('\n').length > PASTE_COLLAPSE_LINE_THRESHOLD;
+}
 
 // --- Word boundary helpers ---
 
