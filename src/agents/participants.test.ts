@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildRegistry, participantFromDescriptor, resolveParticipant, SQUIRL_PARTICIPANT, USER_PARTICIPANT } from './participants.js';
+import { buildRegistry, participantFromDescriptor, resolveParticipant, roomMembers, SQUIRL_PARTICIPANT, USER_PARTICIPANT } from './participants.js';
 import type { AgentDescriptor } from './types.js';
 
 const ccDescriptor: AgentDescriptor = { id: 'cc', kind: 'claude-code', label: 'claude-code', transport: 'local', cwd: '/repo' };
@@ -21,6 +21,13 @@ describe('participants', () => {
     expect(resolveParticipant({ role: 'user' }, registry).label).toBe('you');
     expect(resolveParticipant({ role: 'assistant' }, registry).label).toBe('squirl');
     expect(resolveParticipant({ role: 'assistant', participantId: 'cc' }, registry).label).toBe('claude-code');
+  });
+
+  it('roomMembers keeps squirl and agents but excludes the user', () => {
+    const cc = participantFromDescriptor(ccDescriptor, 0);
+    const members = roomMembers([USER_PARTICIPANT, SQUIRL_PARTICIPANT, cc]);
+    expect(members.map((p) => p.id)).toEqual(['squirl', 'cc']);
+    expect(roomMembers([USER_PARTICIPANT, SQUIRL_PARTICIPANT])).toHaveLength(1);
   });
 
   it('falls back gracefully for an unknown participantId', () => {

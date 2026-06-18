@@ -5,7 +5,7 @@ import type { SelectedModel } from '../components/ModelPicker.js';
 import type { Message } from '../types.js';
 import type { AppState, ChatEvent, ContextFileSummary, RuntimeStatus, ToolApprovalRequest } from './types.js';
 import type { Participant, ParticipantColor } from '../agents/types.js';
-import { SQUIRL_PARTICIPANT, USER_PARTICIPANT, buildRegistry, resolveParticipant } from '../agents/participants.js';
+import { SQUIRL_PARTICIPANT, USER_PARTICIPANT, buildRegistry, resolveParticipant, roomMembers } from '../agents/participants.js';
 import './styles.css';
 
 const PARTICIPANT_CSS_COLOR: Record<ParticipantColor, string> = {
@@ -431,6 +431,34 @@ function ApprovalModal({ request, onRespond }: {
   );
 }
 
+function RoomRosterModal({ participants, onClose }: { participants: Participant[]; onClose: () => void }) {
+  const members = roomMembers(participants);
+  return (
+    <div className="modalShade" onClick={onClose}>
+      <div className="modal" onClick={(event) => event.stopPropagation()}>
+        <header>
+          <h2>◈ In this room ({members.length})</h2>
+          <button onClick={onClose}>Close</button>
+        </header>
+        <div className="rosterList">
+          {members.map((p) => {
+            const isRemote = p.kind !== 'user' && p.kind !== 'local-llm';
+            return (
+              <div className="rosterRow" key={p.id}>
+                <span className="rosterDot" style={{ background: PARTICIPANT_CSS_COLOR[p.color] }} aria-hidden="true" />
+                <span className="rosterName" style={{ color: PARTICIPANT_CSS_COLOR[p.color] }}>{p.label}</span>
+                <span className="rosterHandle">{isRemote ? `@${p.id}` : 'local'}</span>
+                <span className="rosterMeta">{p.status ?? 'ready'}{p.mode ? ` · ${p.mode}` : ''}</span>
+              </div>
+            );
+          })}
+        </div>
+        <p className="hint">Invite with <code>/agent add claude-code</code> or <code>/agent add codex</code>; address with <code>@cc</code> / <code>@codex</code>.</p>
+      </div>
+    </div>
+  );
+}
+
 function RewindModal({ candidates, onClose, onApply }: {
   candidates: Array<{ label: string; preview: string } & Record<string, unknown>>;
   onClose: () => void;
@@ -461,6 +489,7 @@ function App() {
   const [activePanel, setActivePanel] = useState<'settings' | 'models' | 'context' | 'memory' | 'rewind'>('context');
   const [showThinking, setShowThinking] = useState(false);
   const [approval, setApproval] = useState<ToolApprovalRequest | null>(null);
+  const [rosterOpen, setRosterOpen] = useState(false);
   const [toast, setToast] = useState('');
   const [rewindCandidates, setRewindCandidates] = useState<Array<{ label: string; preview: string } & Record<string, unknown>> | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -538,6 +567,8 @@ function App() {
   const sendMessage = async () => {
     const message = input.trim();
     if (!message || status.isStreaming) return;
+    // /room opens the roster client-side (the modal lives here, not on the server).
+    if (message === '/room') { setInput(''); setRosterOpen(true); return; }
     stickToBottomRef.current = true;
     setInput('');
     const res = await fetch(`${API_BASE}/api/chat`, {
@@ -678,6 +709,9 @@ function App() {
             <span>{status.embedderName || 'index not configured'}</span>
           </div>
           <div className="topActions">
+            <button className="chip" onClick={() => setRosterOpen(true)} title="Show who is in the room">
+              ◈ {roomMembers(participants).length} in room
+            </button>
             <label className="check">
               <input type="checkbox" checked={showThinking} onChange={(event) => setShowThinking(event.target.checked)} />
               thinking
@@ -719,6 +753,7 @@ function App() {
 
       <aside className="rightPane">{activePanelView}</aside>
 
+      {rosterOpen && <RoomRosterModal participants={participants} onClose={() => setRosterOpen(false)} />}
       {approval && <ApprovalModal request={approval} onRespond={approve} />}
       {rewindCandidates && <RewindModal
         candidates={rewindCandidates}

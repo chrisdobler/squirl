@@ -461,3 +461,64 @@ nav button.active,
     grid-template-columns: 210px minmax(420px, 1fr) 320px;
   }
 }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #2e3b45;
+  border-radius: 12px;
+  background: #0d1217;
+  color: #dfe8ef;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chip:hover {
+  border-color: #3d4d59;
+}
+
+.rosterList {
+  display: grid;
+  gap: 10px;
+}
+
+.rosterRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.rosterDot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.rosterName {
+  font-weight: 600;
+}
+
+.rosterHandle {
+  color: #7f909b;
+  font-size: 12px;
+}
+
+.rosterMeta {
+  margin-left: auto;
+  color: #7f909b;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.hint {
+  color: #7f909b;
+  font-size: 12px;
+}
+
+.hint code {
+  color: #8fc1ce;
+}

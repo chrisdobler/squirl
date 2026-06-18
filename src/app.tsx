@@ -3,6 +3,7 @@ import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import TextInput from 'ink-text-input';
 import { Header } from './components/Header.js';
 import { MessageList } from './components/MessageList.js';
+import { RoomRoster } from './components/RoomRoster.js';
 import { InputArea } from './components/InputArea.js';
 import { StatusBar } from './components/StatusBar.js';
 import { ModelPicker } from './components/ModelPicker.js';
@@ -146,6 +147,7 @@ export const App: React.FC<AppProps> = ({
   const [isContextMenuOpen, setIsContextMenuOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isImportPromptOpen, setIsImportPromptOpen] = useState(false);
+  const [isRoomRosterOpen, setIsRoomRosterOpen] = useState(false);
   const [isRewindPickerOpen, setIsRewindPickerOpen] = useState(false);
   const [rewindPickerIndex, setRewindPickerIndex] = useState(0);
   const [pendingApproval, setPendingApproval] = useState<{ command: string; resolve: (approved: boolean) => void } | null>(null);
@@ -262,7 +264,7 @@ export const App: React.FC<AppProps> = ({
 
   useMouseWheel({
     onScroll: applyManualScroll,
-    isActive: mouseMode && !isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen && !isRewindPickerOpen,
+    isActive: mouseMode && !isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen && !isRewindPickerOpen && !isRoomRosterOpen,
     linesPerWheel: config?.mouseScrollLines,
   });
 
@@ -403,9 +405,10 @@ export const App: React.FC<AppProps> = ({
   }, []);
 
   useInput((input, key) => {
-    if (isModelMenuOpen || isContextMenuOpen || isCommandPaletteOpen || isImportPromptOpen || isRewindPickerOpen || pendingRewind) return;
+    if (isModelMenuOpen || isContextMenuOpen || isCommandPaletteOpen || isImportPromptOpen || isRewindPickerOpen || isRoomRosterOpen || pendingRewind) return;
     if (key.ctrl && input === 'c') { exit(); return; }
     if (key.ctrl && input === 'p') { if (!isStreaming) setIsCommandPaletteOpen(true); return; }
+    if (key.ctrl && input === 'r') { setIsRoomRosterOpen(true); return; }
     if (key.ctrl && input === 'v') { setShowThinking((v) => !v); return; }
     if (key.ctrl && input === 's') { setMouseMode((v) => !v); return; }
     // Shift+Up/Down to scroll message history
@@ -769,6 +772,7 @@ export const App: React.FC<AppProps> = ({
         commandInput: value.trim(),
         requestRewind: (request) => setPendingRewind(request),
         openRewindPicker,
+        openRoomRoster: () => setIsRoomRosterOpen(true),
         addAgent: addAgentCmd,
         stopAgent: stopAgentCmd,
         listAgents: listAgentsCmd,
@@ -941,8 +945,10 @@ export const App: React.FC<AppProps> = ({
   return (
     <Box flexDirection="column" height={terminalRows}>
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
-      <Header />
-      {isContextMenuOpen ? (
+      <Header participants={participants} />
+      {isRoomRosterOpen ? (
+        <RoomRoster participants={participants} onClose={() => setIsRoomRosterOpen(false)} />
+      ) : isContextMenuOpen ? (
         <ContextPicker
           orchestrator={orchestratorRef.current}
           workingDir={workingDir}
@@ -1006,7 +1012,7 @@ export const App: React.FC<AppProps> = ({
           value={inputValue}
           onChange={handleInputChange}
           onSubmit={handleSubmit}
-          focus={!isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen && !isRewindPickerOpen}
+          focus={!isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen && !isRewindPickerOpen && !isRoomRosterOpen}
         />
       )}
       <StatusBar tokenCount={tokenCount} contextWindow={contextWindow} isStreaming={isStreaming} toolStatus={toolStatus} tokensPerSecond={tokensPerSecond} modelName={modelDisplay} workingDir={workingDir} commandQuery={commandQuery} commandIndex={commandIndex} statusEmitter={statusEmitterRef.current} indexEnabled={config?.index?.enabled ?? false} storeName={config?.index?.store ? `${config.index.store}${config.index.chromaUrl ? ` (${config.index.chromaUrl.replace(/^https?:\/\//, '')})` : ''}` : ''} embedderName={embedderDisplay} mouseMode={mouseMode} pipelineStatus={pipelineStatus} />

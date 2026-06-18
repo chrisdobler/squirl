@@ -34,6 +34,11 @@ export function buildRegistry(participants: Participant[]): Map<string, Particip
   return new Map(participants.map((p) => [p.id, p]));
 }
 
+/** The participants that occupy "the room" — squirl's local LLM and any remote agents (not the user). */
+export function roomMembers(participants: Participant[]): Participant[] {
+  return participants.filter((p) => p.kind !== 'user');
+}
+
 /** Resolve the participant a message belongs to, for label/color rendering. */
 export function resolveParticipant(
   message: { role: string; participantId?: string },

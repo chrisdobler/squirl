@@ -34,6 +34,7 @@ export interface CommandContext {
   commandInput?: string;
   requestRewind?: (request: RewindRequest) => void;
   openRewindPicker?: () => void;
+  openRoomRoster?: () => void;
   addAgent?: (kind: AgentKind, opts?: { id?: string; model?: string }) => Promise<AddAgentResult>;
   stopAgent?: (id: string) => Promise<boolean>;
   listAgents?: () => AgentSummary[];
@@ -280,6 +281,19 @@ const commands: SlashCommand[] = [
         return;
       }
       pushToolMessage(ctx, 'agents', formatAgentList(ctx.listAgents()));
+    },
+  },
+  {
+    name: 'room',
+    description: 'Show who is in the room (squirl + connected agents)',
+    execute: (ctx) => {
+      if (ctx.openRoomRoster) {
+        ctx.openRoomRoster();
+      } else if (ctx.listAgents) {
+        pushToolMessage(ctx, 'room', formatAgentList(ctx.listAgents()));
+      } else {
+        pushToolMessage(ctx, 'room', 'Remote agents are not available in this session.');
+      }
     },
   },
   {
