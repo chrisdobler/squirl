@@ -142,3 +142,41 @@ describe('SquirlRuntime shared history', () => {
     });
   });
 });
+
+describe('SquirlRuntime agents', () => {
+  beforeEach(() => {
+    testCounter++;
+    testHome = join(tmpdir(), `squirl-web-runtime-agents-${process.pid}-${testCounter}`);
+    historyDir = join(testHome, '.squirl', 'history');
+    mkdirSync(historyDir, { recursive: true });
+    writeFileSync(join(testHome, '.squirl', 'config.json'), JSON.stringify({ defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6' }) + '\n', 'utf-8');
+    writeJsonl(join(historyDir, 'current.jsonl'), []);
+  });
+
+  afterEach(() => {
+    rmSync(testHome, { recursive: true, force: true });
+  });
+
+  it('exposes user and squirl as participants by default', async () => {
+    const runtime = await loadRuntime();
+    expect(runtime.getState().participants.map((p) => p.id)).toEqual(['user', 'squirl']);
+    expect(runtime.listAgents()).toEqual([]);
+  });
+
+  it('adds and removes a codex agent with conservative defaults', async () => {
+    // Codex start() spawns nothing (per-turn model), so no real subprocess is launched here.
+    const runtime = await loadRuntime();
+
+    const result = await runtime.addAgent('codex');
+    expect(result).toEqual({ ok: true, id: 'codex', label: 'codex' });
+    expect(runtime.getState().participants.map((p) => p.id)).toContain('codex');
+
+    const listed = runtime.listAgents();
+    expect(listed.map((a) => a.id)).toEqual(['codex']);
+    expect(listed[0]!.mode).toBe('sandbox: read-only');
+
+    expect(await runtime.stopAgent('codex')).toBe(true);
+    expect(runtime.listAgents()).toEqual([]);
+    expect(await runtime.stopAgent('codex')).toBe(false);
+  });
+});

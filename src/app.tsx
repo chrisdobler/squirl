@@ -36,6 +36,12 @@ import type { MetaLLM } from './search/meta-extract.js';
 import type { Message, AssistantMessage } from './types.js';
 import type { QueryPipelineStatus } from './pipeline-status.js';
 import { applyScrollDelta, nextAutoscrollEnabled, nextStreamingScrollOffset } from './scroll-behavior.js';
+import { GroupChatCoordinator } from './agents/coordinator.js';
+import { LocalSpawnTransport } from './agents/transport/local-spawn.js';
+import { buildAgentDescriptor } from './agents/factory.js';
+import { parseMentions } from './agents/mentions.js';
+import { SQUIRL_PARTICIPANT, USER_PARTICIPANT } from './agents/participants.js';
+import type { AgentEvent, AgentKind, Participant } from './agents/types.js';
 
 function defaultModelFromConfig(config?: SquirlConfig): SelectedModel {
   const provider = config?.defaultProvider ?? 'anthropic';
@@ -179,6 +185,26 @@ export const App: React.FC<AppProps> = ({
   const prevMaxScrollRef = useRef(0);
   const streamAutoscrollRef = useRef(false);
   const rewindCandidates = buildRewindCandidates(messages);
+
+  // ---- Multi-agent group chat ----
+  const [participants, setParticipants] = useState<Participant[]>([USER_PARTICIPANT, SQUIRL_PARTICIPANT]);
+  const messagesRef = useRef<Message[]>(messages);
+  messagesRef.current = messages;
+  const participantsRef = useRef<Participant[]>(participants);
+  participantsRef.current = participants;
+  const agentContentRef = useRef<Map<string, string>>(new Map());
+  const agentFlushRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleAgentEventRef = useRef<(event: AgentEvent) => void>(() => {});
+  const runLocalTurnRef = useRef<(input: string, emit: (e: AgentEvent) => void, signal: AbortSignal) => Promise<void>>(async () => {});
+  const coordinatorRef = useRef<GroupChatCoordinator | null>(null);
+  if (!coordinatorRef.current) {
+    coordinatorRef.current = new GroupChatCoordinator({
+      config: { autoHandoff: config?.agents?.autoHandoff, maxHops: config?.agents?.maxHops },
+      transport: new LocalSpawnTransport(),
+      localTurn: (input, emit, signal) => runLocalTurnRef.current(input, emit, signal),
+    });
+    coordinatorRef.current.onEvent((event) => handleAgentEventRef.current(event));
+  }
 
   const handleMaxScroll = useCallback((max: number) => {
     const prev = prevMaxScrollRef.current;
@@ -574,6 +600,146 @@ export const App: React.FC<AppProps> = ({
     addToast(`Rewound ${visibleRemoved.length} message${visibleRemoved.length === 1 ? '' : 's'}.`, 'info');
   }, [addToast, isStreaming, messages]);
 
+  const flushAgentContent = useCallback(() => {
+    if (agentFlushRef.current) return;
+    agentFlushRef.current = setTimeout(() => {
+      agentFlushRef.current = null;
+      const snapshot = agentContentRef.current;
+      if (snapshot.size === 0) return;
+      setMessages((prev) => prev.map((m) => (snapshot.has(m.id) ? { ...m, content: snapshot.get(m.id)! } : m)));
+    }, 33);
+  }, []);
+
+  const participantLabel = useCallback((id: string) => participantsRef.current.find((p) => p.id === id)?.label ?? id, []);
+
+  const handleAgentEvent = useCallback((event: AgentEvent) => {
+    const pid = event.participantId === SQUIRL_PARTICIPANT.id ? undefined : event.participantId;
+    switch (event.type) {
+      case 'message-start': {
+        agentContentRef.current.set(event.messageId, '');
+        setMessages((prev) => [...prev, { id: event.messageId, role: 'assistant', content: '', isStreaming: true, participantId: pid }]);
+        break;
+      }
+      case 'token': {
+        agentContentRef.current.set(event.messageId, (agentContentRef.current.get(event.messageId) ?? '') + event.token);
+        flushAgentContent();
+        break;
+      }
+      case 'message-end': {
+        agentContentRef.current.delete(event.messageId);
+        const finalized: AssistantMessage = { id: event.messageId, role: 'assistant', content: event.content, isStreaming: false, participantId: pid };
+        setMessages((prev) => prev.map((m) => (m.id === event.messageId ? finalized : m)));
+        appendMessage(finalized);
+        break;
+      }
+      case 'tool-start': {
+        setToolStatus(`${participantLabel(event.participantId)}: ${event.toolName}`);
+        break;
+      }
+      case 'tool-end': {
+        setToolStatus('');
+        const trimmed = event.result.length > 600 ? `${event.result.slice(0, 600)}…` : event.result;
+        const toolMsg: Message = {
+          id: crypto.randomUUID(), role: 'tool',
+          toolCallId: event.toolId || crypto.randomUUID(),
+          toolName: `${participantLabel(event.participantId)}:${event.toolName}`,
+          content: trimmed || (event.ok ? '(ok)' : '(failed)'),
+          participantId: event.participantId,
+        };
+        setMessages((prev) => [...prev, toolMsg]);
+        appendMessage(toolMsg);
+        break;
+      }
+      case 'session-status': {
+        setParticipants((prev) => prev.map((p) => (p.id === event.participantId ? { ...p, status: event.status } : p)));
+        break;
+      }
+      case 'error': {
+        addToast(`${participantLabel(event.participantId)}: ${event.message}`);
+        break;
+      }
+      default:
+        break;
+    }
+  }, [addToast, flushAgentContent, participantLabel]);
+  handleAgentEventRef.current = handleAgentEvent;
+
+  const runLocalTurn = useCallback((input: string, emit: (e: AgentEvent) => void, signal: AbortSignal): Promise<void> => {
+    let assistantId = '';
+    let lastContent = '';
+    return orchestratorRef.current.chat(input, messagesRef.current, selectedModel, {
+      onNewMessage: (msg) => {
+        if (msg.role === 'assistant') { assistantId = msg.id; emit({ type: 'message-start', participantId: SQUIRL_PARTICIPANT.id, messageId: msg.id }); }
+        else if (msg.role === 'tool') { emit({ type: 'tool-end', participantId: SQUIRL_PARTICIPANT.id, toolId: msg.toolCallId, toolName: msg.toolName, result: msg.content, ok: true }); }
+      },
+      onToken: (token, assistant) => { assistantId = assistant.id; lastContent = assistant.content; emit({ type: 'token', participantId: SQUIRL_PARTICIPANT.id, messageId: assistant.id, token }); },
+      onDone: () => { if (assistantId) emit({ type: 'message-end', participantId: SQUIRL_PARTICIPANT.id, messageId: assistantId, content: lastContent }); emit({ type: 'turn-end', participantId: SQUIRL_PARTICIPANT.id }); },
+      onError: (err) => { emit({ type: 'error', participantId: SQUIRL_PARTICIPANT.id, message: err.message }); emit({ type: 'turn-end', participantId: SQUIRL_PARTICIPANT.id }); },
+      onToolApproval: (_name, args) => new Promise<boolean>((resolve) => setPendingApproval({ command: String(args.command ?? ''), resolve })),
+      onToolStart: (name) => emit({ type: 'tool-start', participantId: SQUIRL_PARTICIPANT.id, toolId: '', toolName: name, input: {} }),
+    }, signal).then(() => undefined);
+  }, [selectedModel]);
+  runLocalTurnRef.current = runLocalTurn;
+
+  const addAgentCmd = useCallback(async (kind: AgentKind, opts?: { id?: string; model?: string }) => {
+    try {
+      const descriptor = buildAgentDescriptor({
+        kind, cwd: workingDir, id: opts?.id, model: opts?.model,
+        bin: kind === 'claude-code' ? config?.agents?.claudeBin : config?.agents?.codexBin,
+        permissionMode: config?.agents?.defaultClaudePermissionMode,
+        sandbox: config?.agents?.defaultCodexSandbox,
+      });
+      const participant = await coordinatorRef.current!.addAgent(descriptor);
+      setParticipants(coordinatorRef.current!.listParticipants());
+      return { ok: true as const, id: participant.id, label: participant.label };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    }
+  }, [workingDir, config]);
+
+  const stopAgentCmd = useCallback(async (id: string) => {
+    if (!coordinatorRef.current!.hasAgent(id)) return false;
+    await coordinatorRef.current!.removeAgent(id);
+    setParticipants(coordinatorRef.current!.listParticipants());
+    return true;
+  }, []);
+
+  const listAgentsCmd = useCallback(() => coordinatorRef.current!.listParticipants()
+    .filter((p) => p.kind !== 'user' && p.kind !== 'local-llm')
+    .map((p) => ({ id: p.id, label: p.label, status: p.status ?? '?', mode: p.mode ?? '' })), []);
+
+  const runAgentDispatch = useCallback((value: string) => {
+    const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: value };
+    setMessages((prev) => [...prev, userMsg]);
+    appendMessage(userMsg);
+    setInputValue('');
+    historyIndexRef.current = -1;
+    savedInputRef.current = '';
+    streamAutoscrollRef.current = true;
+    setScrollOffset(0);
+    setIsStreaming(true);
+    const abortController = new AbortController();
+    abortRef.current = abortController;
+    coordinatorRef.current!.dispatch(value, abortController.signal)
+      .catch((err) => addToast(err instanceof Error ? err.message : String(err)))
+      .finally(() => {
+        setIsStreaming(false);
+        streamAutoscrollRef.current = false;
+        setToolStatus('');
+        abortRef.current = null;
+      });
+  }, [addToast]);
+
+  // Auto-start agents configured to launch on startup.
+  useEffect(() => {
+    const defaults = config?.agents?.defaults;
+    if (!defaults?.length) return;
+    (async () => {
+      for (const d of defaults) await addAgentCmd(d.kind, { id: d.id, model: d.model });
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleSubmit = (value: string) => {
     if (!value.trim()) return;
 
@@ -603,11 +769,24 @@ export const App: React.FC<AppProps> = ({
         commandInput: value.trim(),
         requestRewind: (request) => setPendingRewind(request),
         openRewindPicker,
+        addAgent: addAgentCmd,
+        stopAgent: stopAgentCmd,
+        listAgents: listAgentsCmd,
       });
       return;
     }
 
     if (isStreaming) return;
+
+    // Group-chat routing: if the input @mentions a connected agent, route through the coordinator.
+    const agentIds = listAgentsCmd().map((a) => a.id);
+    if (agentIds.length > 0) {
+      const mention = parseMentions(value.trim(), [SQUIRL_PARTICIPANT.id, ...agentIds]);
+      if (mention.targets.some((id) => agentIds.includes(id))) {
+        runAgentDispatch(value.trim());
+        return;
+      }
+    }
 
     setInputValue('');
     historyIndexRef.current = -1;
@@ -783,6 +962,7 @@ export const App: React.FC<AppProps> = ({
         <>
           <MessageList
             messages={messages}
+            participants={participants}
             height={messageListHeight}
             showThinking={showThinking}
             scrollOffset={scrollOffset}

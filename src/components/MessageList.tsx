@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import type { Message } from '../types.js';
+import type { Participant, ParticipantColor } from '../agents/types.js';
+import { SQUIRL_PARTICIPANT, USER_PARTICIPANT, buildRegistry, resolveParticipant } from '../agents/participants.js';
 
 interface MessageListProps {
   messages: Message[];
@@ -12,6 +14,7 @@ interface MessageListProps {
   rewindCandidateIds?: Set<string>;
   isRewindMode?: boolean;
   onScrollOffsetRequest?: (offset: number) => void;
+  participants?: Participant[];
 }
 
 export interface ScrollbarLayout {
@@ -25,7 +28,7 @@ export interface ViewportLine {
   key: string;
   text: string;
   messageId?: string;
-  color?: 'cyan' | 'yellow' | 'gray';
+  color?: ParticipantColor | 'yellow';
   dim?: boolean;
   bold?: boolean;
 }
@@ -161,13 +164,14 @@ function markdownToViewportLines(content: string): string[] {
   return out;
 }
 
-function buildMessageLines({
+export function buildMessageLines({
   messages,
   showThinking,
   dimmed,
   isRewindMode,
   rewindCandidateIds,
   rewindTargetMessageId,
+  participants,
 }: {
   messages: Message[];
   showThinking: boolean;
@@ -175,8 +179,10 @@ function buildMessageLines({
   isRewindMode: boolean;
   rewindCandidateIds: Set<string>;
   rewindTargetMessageId: string | null;
+  participants?: Participant[];
 }): ViewportLine[] {
   const rows: ViewportLine[] = [];
+  const registry = buildRegistry(participants ?? [USER_PARTICIPANT, SQUIRL_PARTICIPANT]);
 
   const add = (line: Omit<ViewportLine, 'key'>, index: number) => {
     rows.push({ key: `${line.messageId ?? 'blank'}:${index}:${rows.length}`, ...line });
@@ -209,7 +215,9 @@ function buildMessageLines({
     if (msg.role === 'assistant') {
       const { thinkContent, visibleContent, thinkingInProgress } = parseThinkBlocks(msg.content);
       const hasThinking = thinkContent.length > 0 || thinkingInProgress;
-      add({ ...base, text: 'assistant', dim: true }, 0);
+      const participant = resolveParticipant(msg, registry);
+      const isLocal = participant.kind === 'local-llm';
+      add({ ...base, text: participant.label, color: muted || isLocal ? undefined : participant.color, dim: muted || isLocal, bold: !muted && !isLocal }, 0);
 
       if (hasThinking) {
         if (showThinking) {
@@ -257,6 +265,7 @@ export const MessageList: React.FC<MessageListProps & { dimmed?: boolean }> = ({
   rewindCandidateIds = new Set(),
   isRewindMode = false,
   onScrollOffsetRequest,
+  participants,
 }) => {
   const boxHeight = Math.max(1, height);
   const availableRows = viewportRowsForHeight(boxHeight);
@@ -267,7 +276,8 @@ export const MessageList: React.FC<MessageListProps & { dimmed?: boolean }> = ({
     isRewindMode,
     rewindCandidateIds,
     rewindTargetMessageId,
-  }), [messages, showThinking, dimmed, isRewindMode, rewindCandidateIds, rewindTargetMessageId]);
+    participants,
+  }), [messages, showThinking, dimmed, isRewindMode, rewindCandidateIds, rewindTargetMessageId, participants]);
   const viewport = computeViewportLayout<ViewportLine>(
     rows,
     availableRows,

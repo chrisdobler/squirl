@@ -4,7 +4,13 @@ import type { SquirlConfig } from '../config.js';
 import type { SelectedModel } from '../components/ModelPicker.js';
 import type { Message } from '../types.js';
 import type { AppState, ChatEvent, ContextFileSummary, RuntimeStatus, ToolApprovalRequest } from './types.js';
+import type { Participant, ParticipantColor } from '../agents/types.js';
+import { SQUIRL_PARTICIPANT, USER_PARTICIPANT, buildRegistry, resolveParticipant } from '../agents/participants.js';
 import './styles.css';
+
+const PARTICIPANT_CSS_COLOR: Record<ParticipantColor, string> = {
+  cyan: '#22d3ee', green: '#4ade80', yellow: '#facc15', magenta: '#e879f9', blue: '#60a5fa', gray: '#9ca3af',
+};
 
 const API_BASE = import.meta.env.VITE_SQUIRL_API_BASE || window.location.origin;
 
@@ -30,9 +36,9 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-function messageLabel(message: Message): string {
+function messageLabel(message: Message, registry: Map<string, Participant>): string {
   if (message.role === 'tool') return message.toolName;
-  return message.role;
+  return resolveParticipant(message, registry).label;
 }
 
 function visibleAssistantContent(content: string, showThinking: boolean): string {
@@ -81,6 +87,10 @@ function SettingsPanel({
         ...patch,
       },
     }));
+  };
+
+  const updateAgents = (patch: Partial<NonNullable<SquirlConfig['agents']>>) => {
+    setDraft((prev) => ({ ...prev, agents: { ...prev.agents, ...patch } }));
   };
 
   return (
@@ -194,6 +204,50 @@ function SettingsPanel({
       <label>
         Recall K
         <input type="number" min="1" max="50" value={draft.index?.recallK ?? 10} onChange={(event) => updateIndex({ recallK: Number(event.target.value) })} />
+      </label>
+
+      <div className="divider" />
+
+      <h3>Remote agents</h3>
+      <p className="hint">Add agents from chat with <code>/agent add claude-code</code> or <code>/agent add codex</code>, then address them with <code>@cc</code> / <code>@codex</code>.</p>
+
+      <label className="check">
+        <input type="checkbox" checked={draft.agents?.autoHandoff ?? false} onChange={(event) => updateAgents({ autoHandoff: event.target.checked })} />
+        Auto-handoff (let an agent's @mention route to another participant)
+      </label>
+
+      <label>
+        Max handoff hops
+        <input type="number" min="1" max="10" value={draft.agents?.maxHops ?? 3} onChange={(event) => updateAgents({ maxHops: Number(event.target.value) })} />
+      </label>
+
+      <label>
+        Default Claude permission mode
+        <select value={draft.agents?.defaultClaudePermissionMode ?? 'default'} onChange={(event) => updateAgents({ defaultClaudePermissionMode: event.target.value as NonNullable<SquirlConfig['agents']>['defaultClaudePermissionMode'] })}>
+          <option value="default">default (asks before edits/commands)</option>
+          <option value="acceptEdits">acceptEdits</option>
+          <option value="plan">plan</option>
+          <option value="bypassPermissions">bypassPermissions (dangerous)</option>
+        </select>
+      </label>
+
+      <label>
+        Default Codex sandbox
+        <select value={draft.agents?.defaultCodexSandbox ?? 'read-only'} onChange={(event) => updateAgents({ defaultCodexSandbox: event.target.value as NonNullable<SquirlConfig['agents']>['defaultCodexSandbox'] })}>
+          <option value="read-only">read-only</option>
+          <option value="workspace-write">workspace-write</option>
+          <option value="danger-full-access">danger-full-access (dangerous)</option>
+        </select>
+      </label>
+
+      <label>
+        claude binary
+        <input value={draft.agents?.claudeBin ?? ''} onChange={(event) => updateAgents({ claudeBin: event.target.value || undefined })} placeholder="claude" />
+      </label>
+
+      <label>
+        codex binary
+        <input value={draft.agents?.codexBin ?? ''} onChange={(event) => updateAgents({ codexBin: event.target.value || undefined })} placeholder="codex" />
       </label>
     </section>
   );
@@ -342,12 +396,15 @@ function RewindPanel({ onRewind }: { onRewind: () => Promise<void> }) {
   );
 }
 
-function MessageView({ message, showThinking }: { message: Message; showThinking: boolean }) {
+function MessageView({ message, showThinking, registry }: { message: Message; showThinking: boolean; registry: Map<string, Participant> }) {
   const content = message.role === 'assistant' ? visibleAssistantContent(message.content, showThinking) : message.content;
+  const participant = message.role === 'tool' ? undefined : resolveParticipant(message, registry);
+  const isRemoteAgent = participant ? participant.kind !== 'user' && participant.kind !== 'local-llm' : false;
+  const labelColor = isRemoteAgent && participant ? PARTICIPANT_CSS_COLOR[participant.color] : undefined;
   return (
-    <article className={`message ${message.role}`}>
+    <article className={`message ${message.role}`} data-participant={message.participantId ?? ''}>
       <div className="messageMeta">
-        <span>{messageLabel(message)}</span>
+        <span style={labelColor ? { color: labelColor, fontWeight: 600 } : undefined}>{messageLabel(message, registry)}</span>
         {message.role === 'assistant' && message.isStreaming && <strong>streaming</strong>}
       </div>
       <pre>{content || (message.role === 'assistant' && message.isStreaming ? '_' : '')}</pre>
@@ -414,6 +471,8 @@ function App() {
 
   const status = state?.status ?? defaultStatus();
   const messages = state?.messages ?? [];
+  const participants = state?.participants ?? [USER_PARTICIPANT, SQUIRL_PARTICIPANT];
+  const participantRegistry = useMemo(() => buildRegistry(participants), [participants]);
   const lastMessage = messages[messages.length - 1];
   const scrollSignature = `${messages.length}:${lastMessage?.id ?? ''}:${lastMessage?.content.length ?? 0}`;
 
@@ -519,6 +578,9 @@ function App() {
           setState((prev) => prev ? { ...prev, messages: prev.messages.map((msg) => msg.id === event.message.id ? event.message : msg) } : prev);
         }
         if (event.type === 'status') setState((prev) => prev ? { ...prev, status: event.status } : prev);
+        if (event.type === 'agent-status') {
+          setState((prev) => prev ? { ...prev, participants: prev.participants.map((p) => p.id === event.participantId ? { ...p, status: event.status as Participant['status'] } : p) } : prev);
+        }
         if (event.type === 'tool-approval') setApproval(event.request);
         if (event.type === 'toast') pushToast(event.message);
         if (event.type === 'error') pushToast(event.message);
@@ -630,7 +692,7 @@ function App() {
               <h2>Start a Squirl session</h2>
               <p>Ask a question, attach files from Context, or import ChatGPT history from Memory.</p>
             </div>
-          ) : messages.map((message) => <MessageView key={message.id} message={message} showThinking={showThinking} />)}
+          ) : messages.map((message) => <MessageView key={message.id} message={message} showThinking={showThinking} registry={participantRegistry} />)}
           <div ref={bottomRef} className="bottomSentinel" aria-hidden="true" />
           {!isAtLatest && (
             <button className="latestButton" onClick={() => scrollToLatest('smooth')}>

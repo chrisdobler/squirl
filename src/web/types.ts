@@ -3,6 +3,7 @@ import type { SelectedModel } from '../components/ModelPicker.js';
 import type { Message } from '../types.js';
 import type { QueryPipelineStatus } from '../pipeline-status.js';
 import type { LocalBackend } from '../api.js';
+import type { Participant } from '../agents/types.js';
 
 export interface RuntimeStatus {
   selectedModel: SelectedModel;
@@ -31,6 +32,7 @@ export interface AppState {
   status: RuntimeStatus;
   contextFiles: ContextFileSummary[];
   commands: Array<{ name: string; description: string }>;
+  participants: Participant[];
 }
 
 export interface ChatRequest {
@@ -44,6 +46,7 @@ export type ChatEvent =
   | { type: 'token'; token: string; assistantId: string }
   | { type: 'assistant-final'; message: Message }
   | { type: 'status'; status: RuntimeStatus }
+  | { type: 'agent-status'; participantId: string; status: string }
   | { type: 'tool-approval'; request: ToolApprovalRequest }
   | { type: 'toast'; level: 'info' | 'error'; message: string }
   | { type: 'done' }

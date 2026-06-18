@@ -3,6 +3,24 @@ import { homedir } from 'os';
 import { join } from 'path';
 
 import type { LocalBackend } from './api.js';
+import type { ClaudePermissionMode, CodexSandbox } from './agents/types.js';
+
+export interface AgentsConfig {
+  /** When true, an agent's @mention of another participant auto-routes the turn. Default false. */
+  autoHandoff?: boolean;
+  /** Max consecutive auto-handoffs per dispatch. Default 3. */
+  maxHops?: number;
+  /** Path/name of the claude binary. Default 'claude' (on PATH). */
+  claudeBin?: string;
+  /** Path/name of the codex binary. Default 'codex' (on PATH). */
+  codexBin?: string;
+  /** Default Claude permission mode for new agents. Default 'default' (asks before edits/commands). */
+  defaultClaudePermissionMode?: ClaudePermissionMode;
+  /** Default Codex sandbox for new agents. Default 'read-only'. */
+  defaultCodexSandbox?: CodexSandbox;
+  /** Agents to auto-start when squirl launches. */
+  defaults?: Array<{ kind: 'claude-code' | 'codex'; id?: string; model?: string }>;
+}
 
 export interface SquirlConfig {
   anthropicApiKey?: string;
@@ -25,6 +43,7 @@ export interface SquirlConfig {
     metaProvider?: 'openai' | 'anthropic' | 'local';
     recallK?: number;
   };
+  agents?: AgentsConfig;
 }
 
 const CONFIG_DIR = join(homedir(), '.squirl');

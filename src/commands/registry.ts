@@ -8,6 +8,16 @@ import type { Orchestrator } from '../orchestrator.js';
 import type { Message } from '../types.js';
 import { preview, roleLabel } from '../rewind.js';
 import type { RewindRequest } from '../rewind.js';
+import type { AgentKind } from '../agents/types.js';
+
+export interface AgentSummary {
+  id: string;
+  label: string;
+  status: string;
+  mode: string;
+}
+
+export type AddAgentResult = { ok: true; id: string; label: string } | { ok: false; error: string };
 
 export interface CommandContext {
   orchestrator: Orchestrator;
@@ -24,6 +34,31 @@ export interface CommandContext {
   commandInput?: string;
   requestRewind?: (request: RewindRequest) => void;
   openRewindPicker?: () => void;
+  addAgent?: (kind: AgentKind, opts?: { id?: string; model?: string }) => Promise<AddAgentResult>;
+  stopAgent?: (id: string) => Promise<boolean>;
+  listAgents?: () => AgentSummary[];
+}
+
+function pushToolMessage(ctx: CommandContext, name: string, content: string): void {
+  ctx.setMessages((prev) => [...prev, {
+    id: crypto.randomUUID(),
+    role: 'tool' as const,
+    toolCallId: name,
+    toolName: `/${name}`,
+    content,
+  }]);
+}
+
+function normalizeAgentKind(token?: string): AgentKind | null {
+  const t = (token ?? '').toLowerCase();
+  if (t === 'claude-code' || t === 'claude' || t === 'cc') return 'claude-code';
+  if (t === 'codex') return 'codex';
+  return null;
+}
+
+function formatAgentList(agents: AgentSummary[]): string {
+  if (agents.length === 0) return 'No agents connected. Add one with /agent add claude-code or /agent add codex.';
+  return agents.map((a) => `@${a.id} — ${a.label} [${a.status}] ${a.mode}`).join('\n');
 }
 
 export interface SlashCommand {
@@ -196,6 +231,55 @@ const commands: SlashCommand[] = [
         removedCount: ctx.messages.length - number,
         label: `${number}. ${roleLabel(target)} — ${preview(target.content)}`,
       });
+    },
+  },
+  {
+    name: 'agent',
+    description: 'Add, list, or stop a remote agent: /agent add <claude-code|codex> [id]',
+    execute: async (ctx) => {
+      if (!ctx.addAgent || !ctx.stopAgent || !ctx.listAgents) {
+        pushToolMessage(ctx, 'agent', 'Remote agents are not available in this session.');
+        return;
+      }
+      const tokens = (ctx.commandInput ?? '').trim().split(/\s+/);
+      const sub = (tokens[1] ?? 'list').toLowerCase();
+
+      if (sub === 'add') {
+        const kind = normalizeAgentKind(tokens[2]);
+        if (!kind) {
+          pushToolMessage(ctx, 'agent', 'Usage: /agent add <claude-code|codex> [id]');
+          return;
+        }
+        const result = await ctx.addAgent(kind, { id: tokens[3] });
+        pushToolMessage(ctx, 'agent', result.ok
+          ? `${result.label} joined as @${result.id}. Address it with "@${result.id} <message>".`
+          : `Could not add agent: ${result.error}`);
+        return;
+      }
+
+      if (sub === 'stop' || sub === 'remove') {
+        const id = tokens[2];
+        if (!id) {
+          pushToolMessage(ctx, 'agent', 'Usage: /agent stop <id>');
+          return;
+        }
+        const ok = await ctx.stopAgent(id);
+        pushToolMessage(ctx, 'agent', ok ? `Stopped @${id}.` : `No agent @${id}.`);
+        return;
+      }
+
+      pushToolMessage(ctx, 'agent', formatAgentList(ctx.listAgents()));
+    },
+  },
+  {
+    name: 'agents',
+    description: 'List connected remote agents',
+    execute: (ctx) => {
+      if (!ctx.listAgents) {
+        pushToolMessage(ctx, 'agents', 'Remote agents are not available in this session.');
+        return;
+      }
+      pushToolMessage(ctx, 'agents', formatAgentList(ctx.listAgents()));
     },
   },
   {

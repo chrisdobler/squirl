@@ -23,6 +23,13 @@ import { OpenAIMetaLLM, AnthropicMetaLLM } from '../search/meta-llm.js';
 import { recall } from '../search/recall.js';
 import { isVectorStoreError } from '../search/stores/chroma.js';
 import { backfillFromHistory } from '../search/backfill.js';
+import { GroupChatCoordinator } from '../agents/coordinator.js';
+import { LocalSpawnTransport } from '../agents/transport/local-spawn.js';
+import { buildAgentDescriptor } from '../agents/factory.js';
+import { parseMentions } from '../agents/mentions.js';
+import { SQUIRL_PARTICIPANT } from '../agents/participants.js';
+import type { AgentEvent, AgentKind, Participant } from '../agents/types.js';
+import type { AddAgentResult, AgentSummary } from '../commands/registry.js';
 import type { SelectedModel } from '../components/ModelPicker.js';
 import type { Message, AssistantMessage } from '../types.js';
 import type { QueryPipelineStatus } from '../pipeline-status.js';
@@ -141,6 +148,8 @@ export class SquirlRuntime extends EventEmitter {
   private pendingApprovals = new Map<string, PendingApproval>();
   private historySignature = '';
   private configSignature = '';
+  private coordinator: GroupChatCoordinator;
+  private activeEmit: ((event: ChatEvent) => void) | null = null;
 
   constructor(workingDir = process.cwd()) {
     super();
@@ -150,8 +159,15 @@ export class SquirlRuntime extends EventEmitter {
     this.messages = loadHistory();
     this.selectedModel = defaultModelFromConfig(this.config);
     this.orchestrator = new Orchestrator(workingDir);
+    this.coordinator = new GroupChatCoordinator({
+      config: { autoHandoff: this.config.agents?.autoHandoff, maxHops: this.config.agents?.maxHops },
+      transport: new LocalSpawnTransport(),
+      localTurn: (input, emit, signal) => this.runLocalTurn(input, emit, signal),
+    });
+    this.coordinator.onEvent((event) => this.handleAgentEvent(event));
     void this.initializeIndex();
     void this.hydrateSelectedLocalModel();
+    void this.startDefaultAgents();
   }
 
   getState(): AppState {
@@ -162,6 +178,7 @@ export class SquirlRuntime extends EventEmitter {
       status: this.getStatus(),
       contextFiles: this.getContextFiles(),
       commands: getCommands().map(({ name, description }) => ({ name, description })),
+      participants: this.coordinator.listParticipants(),
     };
   }
 
@@ -371,6 +388,9 @@ export class SquirlRuntime extends EventEmitter {
         commandInput: value,
         requestRewind: (request) => { void this.rewind(request).then((state) => emit({ type: 'state', state })).catch((err) => emit({ type: 'error', message: err instanceof Error ? err.message : String(err) })); },
         openRewindPicker: () => emit({ type: 'toast', level: 'info', message: 'Open the Rewind panel to choose a visual target.' }),
+        addAgent: (kind, opts) => this.addAgent(kind, opts),
+        stopAgent: (id) => this.stopAgent(id),
+        listAgents: () => this.listAgents(),
       });
       emit({ type: 'state', state: this.getState() });
       return;
@@ -385,6 +405,26 @@ export class SquirlRuntime extends EventEmitter {
     emit({ type: 'status', status: this.getStatus() });
 
     try {
+      // Group-chat routing: if the input @mentions a connected agent, route through the coordinator.
+      const agentIds = this.coordinator.listParticipants()
+        .filter((p) => p.kind !== 'user' && p.kind !== 'local-llm')
+        .map((p) => p.id);
+      const mention = agentIds.length ? parseMentions(value, [SQUIRL_PARTICIPANT.id, ...agentIds]) : null;
+      if (mention && mention.targets.some((id) => agentIds.includes(id))) {
+        const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: value };
+        this.messages = [...this.messages, userMsg];
+        appendMessage(userMsg);
+        this.historySignature = historySignature();
+        emit({ type: 'message', message: userMsg });
+        this.activeEmit = emit;
+        try {
+          await this.coordinator.dispatch(value, this.abortController.signal);
+        } finally {
+          this.activeEmit = null;
+        }
+        return;
+      }
+
       const priorMessages = this.messages;
       const newMessages = await this.orchestrator.chat(
         value,
@@ -481,6 +521,122 @@ export class SquirlRuntime extends EventEmitter {
       emit({ type: 'status', status: this.getStatus() });
       emit({ type: 'done' });
     }
+  }
+
+  private participantLabel(id: string): string {
+    return this.coordinator.listParticipants().find((p) => p.id === id)?.label ?? id;
+  }
+
+  /** Map the coordinator's AgentEvents onto the existing ChatEvent stream + this.messages. */
+  private handleAgentEvent(event: AgentEvent): void {
+    const emit = this.activeEmit;
+    const pid = event.participantId === SQUIRL_PARTICIPANT.id ? undefined : event.participantId;
+    switch (event.type) {
+      case 'message-start': {
+        const message: Message = { id: event.messageId, role: 'assistant', content: '', isStreaming: true, participantId: pid };
+        this.messages = [...this.messages, message];
+        emit?.({ type: 'message', message });
+        break;
+      }
+      case 'token': {
+        this.messages = this.messages.map((m) => (m.id === event.messageId && m.role === 'assistant' ? { ...m, content: m.content + event.token } : m));
+        emit?.({ type: 'token', token: event.token, assistantId: event.messageId });
+        break;
+      }
+      case 'message-end': {
+        const finalized: AssistantMessage = { id: event.messageId, role: 'assistant', content: event.content, isStreaming: false, participantId: pid };
+        this.messages = this.messages.map((m) => (m.id === event.messageId ? finalized : m));
+        appendMessage(finalized);
+        this.historySignature = historySignature();
+        emit?.({ type: 'assistant-final', message: finalized });
+        break;
+      }
+      case 'tool-start': {
+        this.toolStatus = `${this.participantLabel(event.participantId)}: ${event.toolName}`;
+        emit?.({ type: 'status', status: this.getStatus() });
+        break;
+      }
+      case 'tool-end': {
+        this.toolStatus = '';
+        const trimmed = event.result.length > 600 ? `${event.result.slice(0, 600)}…` : event.result;
+        const message: Message = {
+          id: crypto.randomUUID(), role: 'tool',
+          toolCallId: event.toolId || crypto.randomUUID(),
+          toolName: `${this.participantLabel(event.participantId)}:${event.toolName}`,
+          content: trimmed || (event.ok ? '(ok)' : '(failed)'),
+          participantId: event.participantId,
+        };
+        this.messages = [...this.messages, message];
+        appendMessage(message);
+        emit?.({ type: 'message', message });
+        emit?.({ type: 'status', status: this.getStatus() });
+        break;
+      }
+      case 'session-status': {
+        emit?.({ type: 'agent-status', participantId: event.participantId, status: event.status });
+        break;
+      }
+      case 'error': {
+        emit?.({ type: 'toast', level: 'error', message: `${this.participantLabel(event.participantId)}: ${event.message}` });
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  /** Run a squirl local-LLM turn as a coordinator participant (used for handoffs). */
+  private runLocalTurn(input: string, emit: (event: AgentEvent) => void, signal: AbortSignal): Promise<void> {
+    let assistantId = '';
+    let lastContent = '';
+    return this.orchestrator.chat(input, this.messages, this.selectedModel, {
+      onNewMessage: (msg) => {
+        if (msg.role === 'assistant') { assistantId = msg.id; emit({ type: 'message-start', participantId: SQUIRL_PARTICIPANT.id, messageId: msg.id }); }
+        else if (msg.role === 'tool') { emit({ type: 'tool-end', participantId: SQUIRL_PARTICIPANT.id, toolId: msg.toolCallId, toolName: msg.toolName, result: msg.content, ok: true }); }
+      },
+      onToken: (token, assistant) => { assistantId = assistant.id; lastContent = assistant.content; emit({ type: 'token', participantId: SQUIRL_PARTICIPANT.id, messageId: assistant.id, token }); },
+      onDone: () => { if (assistantId) emit({ type: 'message-end', participantId: SQUIRL_PARTICIPANT.id, messageId: assistantId, content: lastContent }); emit({ type: 'turn-end', participantId: SQUIRL_PARTICIPANT.id }); },
+      onError: (err) => { emit({ type: 'error', participantId: SQUIRL_PARTICIPANT.id, message: err.message }); emit({ type: 'turn-end', participantId: SQUIRL_PARTICIPANT.id }); },
+      onToolApproval: (toolName, args) => new Promise<boolean>((resolve) => {
+        const id = crypto.randomUUID();
+        const request = { id, toolName, command: String(args.command ?? '') };
+        this.pendingApprovals.set(id, { request, resolve });
+        this.activeEmit?.({ type: 'tool-approval', request });
+      }),
+    }, signal).then(() => undefined);
+  }
+
+  async addAgent(kind: AgentKind, opts?: { id?: string; model?: string }): Promise<AddAgentResult> {
+    try {
+      const descriptor = buildAgentDescriptor({
+        kind, cwd: this.workingDir, id: opts?.id, model: opts?.model,
+        bin: kind === 'claude-code' ? this.config.agents?.claudeBin : this.config.agents?.codexBin,
+        permissionMode: this.config.agents?.defaultClaudePermissionMode,
+        sandbox: this.config.agents?.defaultCodexSandbox,
+      });
+      const participant = await this.coordinator.addAgent(descriptor);
+      return { ok: true, id: participant.id, label: participant.label };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  async stopAgent(id: string): Promise<boolean> {
+    if (!this.coordinator.hasAgent(id)) return false;
+    await this.coordinator.removeAgent(id);
+    return true;
+  }
+
+  listAgents(): AgentSummary[] {
+    return this.coordinator.listParticipants()
+      .filter((p: Participant) => p.kind !== 'user' && p.kind !== 'local-llm')
+      .map((p) => ({ id: p.id, label: p.label, status: p.status ?? '?', mode: p.mode ?? '' }));
+  }
+
+  private async startDefaultAgents(): Promise<void> {
+    const defaults = this.config.agents?.defaults;
+    if (!defaults?.length) return;
+    for (const d of defaults) await this.addAgent(d.kind, { id: d.id, model: d.model });
   }
 
   async recall(query: string): Promise<Message> {

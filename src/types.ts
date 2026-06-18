@@ -10,6 +10,8 @@ export interface UserMessage {
   id: string;
   role: 'user';
   content: string;
+  /** Which agent the user addressed, if any. Undefined = the default chat. */
+  participantId?: string;
 }
 
 export interface AssistantMessage {
@@ -18,6 +20,8 @@ export interface AssistantMessage {
   content: string;
   isStreaming?: boolean;
   toolCalls?: ToolCall[];
+  /** Authoring participant. Undefined = squirl's local LLM; otherwise a remote agent id. */
+  participantId?: string;
 }
 
 export interface ToolMessage {
@@ -26,6 +30,8 @@ export interface ToolMessage {
   toolCallId: string;
   toolName: string;
   content: string;
+  /** Owning participant for tool activity surfaced from a remote agent. */
+  participantId?: string;
 }
 
 export type Message = UserMessage | AssistantMessage | ToolMessage;
