@@ -8,6 +8,12 @@ let historyDir: string;
 let testCounter = 0;
 let capturedHistory: any[] = [];
 
+// Use timestamps relative to "now" so fixture entries stay inside history.ts's 24h
+// rollover window regardless of the calendar date the suite runs on (otherwise rollover
+// moves them into daily files and re-appends on each load).
+const TS_EARLY = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(); // 2h ago
+const TS_LATE = new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString();  // 1h ago
+
 vi.mock('os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('os')>();
   return {
@@ -85,13 +91,13 @@ describe('SquirlRuntime shared history', () => {
 
   it('reloads disk history when state is requested after terminal writes', async () => {
     writeJsonl(join(historyDir, 'current.jsonl'), [
-      entry('u1', 'user', 'before startup', '2026-06-17T12:00:00.000Z'),
+      entry('u1', 'user', 'before startup', TS_EARLY),
     ]);
     const runtime = await loadRuntime();
 
     writeJsonl(join(historyDir, 'current.jsonl'), [
-      entry('u1', 'user', 'before startup', '2026-06-17T12:00:00.000Z'),
-      entry('u2', 'user', 'terminal message', '2026-06-17T12:01:00.000Z'),
+      entry('u1', 'user', 'before startup', TS_EARLY),
+      entry('u2', 'user', 'terminal message', TS_LATE),
     ]);
 
     expect(runtime.getState().messages.map((message) => message.content)).toContain('terminal message');
@@ -99,13 +105,13 @@ describe('SquirlRuntime shared history', () => {
 
   it('uses the latest disk history as context for web chat', async () => {
     writeJsonl(join(historyDir, 'current.jsonl'), [
-      entry('u1', 'user', 'initial', '2026-06-17T12:00:00.000Z'),
+      entry('u1', 'user', 'initial', TS_EARLY),
     ]);
     const runtime = await loadRuntime();
 
     writeJsonl(join(historyDir, 'current.jsonl'), [
-      entry('u1', 'user', 'initial', '2026-06-17T12:00:00.000Z'),
-      entry('a1', 'assistant', 'terminal reply', '2026-06-17T12:01:00.000Z'),
+      entry('u1', 'user', 'initial', TS_EARLY),
+      entry('a1', 'assistant', 'terminal reply', TS_LATE),
     ]);
 
     await runtime.chat('web message', () => {});
