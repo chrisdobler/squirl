@@ -7,7 +7,7 @@ import { formatPipelineStatus, type QueryPipelineStatus } from '../pipeline-stat
 
 interface StatusBarProps {
   tokenCount?: number;
-  contextWindow?: number;
+  contextWindow?: number | null;
   isStreaming?: boolean;
   toolStatus?: string;
   tokensPerSecond?: number;
@@ -28,7 +28,11 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-export const StatusBar: React.FC<StatusBarProps> = React.memo(({ tokenCount = 0, contextWindow = 0, isStreaming = false, toolStatus = '', tokensPerSecond = 0, modelName = '', workingDir = '', commandQuery = null, commandIndex = 0, statusEmitter = null, indexEnabled = false, storeName = '', embedderName = '', mouseMode = true, pipelineStatus = null }) => {
+function formatWindow(n: number | null | undefined): string {
+  return n == null ? '?' : formatTokens(n);
+}
+
+export const StatusBar: React.FC<StatusBarProps> = React.memo(({ tokenCount = 0, contextWindow = null, isStreaming = false, toolStatus = '', tokensPerSecond = 0, modelName = '', workingDir = '', commandQuery = null, commandIndex = 0, statusEmitter = null, indexEnabled = false, storeName = '', embedderName = '', mouseMode = true, pipelineStatus = null }) => {
   const { stdout } = useStdout();
   const width = stdout.columns ?? 80;
 
@@ -61,14 +65,14 @@ export const StatusBar: React.FC<StatusBarProps> = React.memo(({ tokenCount = 0,
             <>
               <Text color="yellow">{pipelineText}</Text>
               {'  '}{isStreaming ? 'esc cancel  ' : ''}
-              {formatTokens(tokenCount)}/{formatTokens(contextWindow)}{'  '}{tokensPerSecond} t/s
+              {formatTokens(tokenCount)}/{formatWindow(contextWindow)}{'  '}{tokensPerSecond} t/s
             </>
           ) : (
             <>
               {toolStatus ? <Text color="yellow">{toolStatus}{'  '}</Text> : null}
               {isStreaming ? 'esc cancel  ' : ''}
               ctrl+c exit{'  '}ctrl+p menu{'  '}ctrl+v thinking{'  '}ctrl+s {mouseMode ? 'scroll' : 'copy'}{'  '}
-              context: {formatTokens(tokenCount)}/{formatTokens(contextWindow)}
+              context: {formatTokens(tokenCount)}/{formatWindow(contextWindow)}
               {'  '}{tokensPerSecond} t/s
             </>
           )}

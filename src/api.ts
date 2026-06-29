@@ -187,6 +187,21 @@ async function streamOpenAI(options: StreamOptions): Promise<void> {
   }
 }
 
+/**
+ * Build a legible error from a local endpoint that replied with a non-SSE body (e.g. a JSON error,
+ * or a gateway status string like `sync_okay` when the model is still loading) instead of a stream.
+ */
+function describeEndpointBody(body: string, stderr: string): string {
+  const text = body.trim() || stderr.trim();
+  if (!text) return 'model endpoint returned an empty response';
+  try {
+    const parsed = JSON.parse(text) as { error?: { message?: string } | string; message?: string };
+    const msg = (typeof parsed.error === 'object' ? parsed.error?.message : parsed.error) ?? parsed.message;
+    if (typeof msg === 'string' && msg.trim()) return `model endpoint error: ${msg.trim()}`;
+  } catch { /* not JSON — fall through to raw text */ }
+  return `model endpoint returned: ${text.replace(/\s+/g, ' ').slice(0, 300)}`;
+}
+
 function isConnectionLikeError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const text = `${err.name} ${err.message} ${JSON.stringify((err as { cause?: unknown }).cause ?? '')}`;
@@ -222,6 +237,8 @@ async function streamOpenAICompatibleWithCurl(options: StreamOptions): Promise<v
     let stderr = '';
     let completionChars = 0;
     let doneCalled = false;
+    let sawData = false;
+    let nonDataOutput = '';
     const pendingToolCalls = new Map<number, { id: string; name: string; arguments: string }>();
 
     const finishDone = () => {
@@ -242,7 +259,13 @@ async function streamOpenAICompatibleWithCurl(options: StreamOptions): Promise<v
 
     const handleLine = (rawLine: string) => {
       const line = rawLine.trim();
-      if (!line || !line.startsWith('data:')) return;
+      if (!line) return;
+      if (!line.startsWith('data:')) {
+        // Not an SSE event — capture it so a non-stream body (error JSON / gateway status) can be surfaced.
+        nonDataOutput += (nonDataOutput ? '\n' : '') + line;
+        return;
+      }
+      sawData = true;
       const data = line.slice('data:'.length).trim();
       if (data === '[DONE]') {
         if (pendingToolCalls.size > 0 && onToolCalls) onToolCalls([...pendingToolCalls.values()]);
@@ -311,7 +334,14 @@ async function streamOpenAICompatibleWithCurl(options: StreamOptions): Promise<v
         }
       }
       if (code !== 0) {
-        reject(new Error(stderr.trim() || `curl exited with code ${code}`));
+        reject(new Error(describeEndpointBody(nonDataOutput, stderr) || `curl exited with code ${code}`));
+        return;
+      }
+      if (!sawData) {
+        // Transfer succeeded but the endpoint never streamed an SSE event — it replied with a
+        // non-stream body (e.g. an error JSON, or a gateway status like `sync_okay`). Surface it
+        // instead of finishing with a silent empty completion.
+        reject(new Error(describeEndpointBody(nonDataOutput, stderr)));
         return;
       }
       if (pendingToolCalls.size > 0 && onToolCalls) onToolCalls([...pendingToolCalls.values()]);

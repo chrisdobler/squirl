@@ -4,7 +4,7 @@ import { extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { SquirlRuntime } from './runtime.js';
-import type { ChatEvent } from './types.js';
+import type { ChatEvent, EvalEvent, EvalRunRequest } from './types.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
@@ -63,7 +63,7 @@ function parseUrl(req: IncomingMessage): URL {
   return new URL(req.url ?? '/', 'http://127.0.0.1');
 }
 
-function createEventWriter(res: ServerResponse): (event: ChatEvent) => void {
+function createEventWriter<T = ChatEvent>(res: ServerResponse): (event: T) => void {
   res.writeHead(200, {
     'Content-Type': 'application/x-ndjson; charset=utf-8',
     'Cache-Control': 'no-cache, no-transform',
@@ -211,6 +211,24 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
         const write = createEventWriter(res);
         try {
           await runtime.chat(body.message ?? '', write);
+        } catch (err) {
+          write({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+          write({ type: 'done' });
+        }
+        res.end();
+        return;
+      }
+
+      if (url.pathname === '/api/eval/history' && req.method === 'GET') {
+        sendJson(res, 200, { history: runtime.getEvalHistory() });
+        return;
+      }
+
+      if (url.pathname === '/api/eval/run' && req.method === 'POST') {
+        const body = await readBody(req) as EvalRunRequest;
+        const write = createEventWriter<EvalEvent>(res);
+        try {
+          await runtime.runEval(body, write);
         } catch (err) {
           write({ type: 'error', message: err instanceof Error ? err.message : String(err) });
           write({ type: 'done' });

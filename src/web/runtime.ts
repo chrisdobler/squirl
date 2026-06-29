@@ -5,12 +5,13 @@ import { join, resolve } from 'node:path';
 import { execSync } from 'node:child_process';
 
 import { Orchestrator } from '../orchestrator.js';
-import { getModelConfig } from '../model-config.js';
+import { getModelConfig, resolveContextWindow } from '../model-config.js';
 import { buildSystemPrompt } from '../context/system-prompt.js';
 import { estimateTokens } from '../context/token-estimator.js';
-import { loadConfig, saveConfig, applyConfigToEnv, type SquirlConfig } from '../config.js';
+import { loadConfig, saveConfig, applyConfigToEnv, rememberContextWindow, type SquirlConfig } from '../config.js';
 import { appendMessage, loadHistory, appendImportMessage, getAllHistoryFiles, readEntries, rewindHistoryAfter } from '../history.js';
 import { detectLocalBackend, fetchAvailableModels, streamChatCompletion, BACKEND_DISPLAY_NAMES } from '../api.js';
+import { buildHealthTargets, probeChat, probeEmbedder, probeVectorStore, unknownReport, type HealthReport, type HealthEntry } from './health.js';
 import { getCommands, matchCommand } from '../commands/registry.js';
 import { buildRewindCandidates, rewindRequestFromCandidate, type RewindRequest } from '../rewind.js';
 import { messagesToTurnPairs } from '../search/turn-pair.js';
@@ -19,9 +20,12 @@ import { createVectorStore, formatVectorStoreStartupError } from '../search/stor
 import { IngestQueue } from '../search/ingest-queue.js';
 import { StatusEmitter } from '../search/status.js';
 import { MemoryPipeline } from '../search/memory-pipeline.js';
-import { OpenAIMetaLLM, AnthropicMetaLLM } from '../search/meta-llm.js';
+import { createMetaLLM } from '../search/meta-llm.js';
 import { recall } from '../search/recall.js';
 import { isVectorStoreError } from '../search/stores/chroma.js';
+import { executeEvalRun, evalConfigFromSquirl, answerModelFromSquirl, judgeFromSquirl } from '../search/eval/run.js';
+import { readHistory, type HistoryEntry } from '../search/eval/history.js';
+import type { EvalRunRequest, EvalEvent } from './types.js';
 import { backfillFromHistory } from '../search/backfill.js';
 import { GroupChatCoordinator } from '../agents/coordinator.js';
 import { LocalSpawnTransport } from '../agents/transport/local-spawn.js';
@@ -34,7 +38,6 @@ import type { SelectedModel } from '../components/ModelPicker.js';
 import type { Message, AssistantMessage } from '../types.js';
 import type { QueryPipelineStatus } from '../pipeline-status.js';
 import type { VectorStore } from '../search/types.js';
-import type { MetaLLM } from '../search/meta-extract.js';
 import type { AppState, ChatEvent, ContextFileSummary, ImportRequest, ImportResult, ModelDetectionResult, RuntimeStatus, ToolApprovalRequest } from './types.js';
 
 interface PendingApproval {
@@ -62,6 +65,21 @@ function defaultModelFromConfig(config?: SquirlConfig): SelectedModel {
 
 function resolveUserPath(path: string): string {
   return path.trim().replace(/\\ /g, ' ').replace(/^~/, process.env.HOME ?? '');
+}
+
+/** Authed model-list GET for hosted providers (no tokens spent). Throws on missing key / non-OK. */
+async function fetchModelIds(url: string, headers: Record<string, string>, key?: string): Promise<string[]> {
+  if (!key) throw new Error('no API key configured');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5_000);
+  try {
+    const res = await fetch(url, { headers, signal: controller.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json() as { data?: Array<{ id: string }> };
+    return (json.data ?? []).map((m) => m.id);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function listGitFiles(cwd: string): string[] {
@@ -150,6 +168,11 @@ export class SquirlRuntime extends EventEmitter {
   private configSignature = '';
   private coordinator: GroupChatCoordinator;
   private activeEmit: ((event: ChatEvent) => void) | null = null;
+  private evalMonitorTimer: ReturnType<typeof setInterval> | null = null;
+  private evalMonitorRunning = false;
+  private healthReport: HealthReport;
+  private healthTimer: ReturnType<typeof setInterval> | null = null;
+  private healthChecking = false;
 
   constructor(workingDir = process.cwd()) {
     super();
@@ -158,6 +181,7 @@ export class SquirlRuntime extends EventEmitter {
     applyConfigToEnv(this.config);
     this.messages = loadHistory();
     this.selectedModel = defaultModelFromConfig(this.config);
+    this.healthReport = unknownReport(this.config, this.selectedModel);
     this.orchestrator = new Orchestrator(workingDir);
     this.coordinator = new GroupChatCoordinator({
       config: { autoHandoff: this.config.agents?.autoHandoff, maxHops: this.config.agents?.maxHops },
@@ -165,9 +189,11 @@ export class SquirlRuntime extends EventEmitter {
       localTurn: (input, emit, signal) => this.runLocalTurn(input, emit, signal),
     });
     this.coordinator.onEvent((event) => this.handleAgentEvent(event));
-    void this.initializeIndex();
+    void this.initializeIndex().then(() => this.refreshHealth());
     void this.hydrateSelectedLocalModel();
     void this.startDefaultAgents();
+    this.startEvalMonitor();
+    this.startHealthChecks();
   }
 
   getState(): AppState {
@@ -179,11 +205,12 @@ export class SquirlRuntime extends EventEmitter {
       contextFiles: this.getContextFiles(),
       commands: getCommands().map(({ name, description }) => ({ name, description })),
       participants: this.coordinator.listParticipants(),
+      health: this.healthReport,
     };
   }
 
   getStatus(): RuntimeStatus {
-    const contextWindow = this.selectedModel.contextWindow ?? getModelConfig(this.selectedModel.id).contextWindow;
+    const contextWindow = resolveContextWindow(this.selectedModel, this.config) ?? null;
     return {
       selectedModel: this.selectedModel,
       modelDisplay: this.modelDisplay(),
@@ -209,6 +236,9 @@ export class SquirlRuntime extends EventEmitter {
     this.selectedModel = defaultModelFromConfig(next);
     await this.initializeIndex();
     await this.hydrateSelectedLocalModel();
+    this.startEvalMonitor(); // pick up monitor config changes
+    this.healthReport = unknownReport(this.config, this.selectedModel); // targets may have changed
+    void this.refreshHealth();
     this.configSignature = '';
     return this.getState();
   }
@@ -216,6 +246,7 @@ export class SquirlRuntime extends EventEmitter {
   async selectModel(model: SelectedModel): Promise<AppState> {
     this.selectedModel = model;
     await this.hydrateSelectedLocalModel();
+    this.persistContextWindow();
     return this.getState();
   }
 
@@ -458,6 +489,11 @@ export class SquirlRuntime extends EventEmitter {
               appendMessage(finalized);
               this.historySignature = historySignature();
               emit({ type: 'assistant-final', message: finalized });
+              // A finalized-but-empty reply (no error, no tokens) otherwise renders as a silent blank
+              // bubble. Surface it so "no response" always says why.
+              if (!finalized.content.trim() && !this.abortController?.signal.aborted) {
+                emit({ type: 'toast', level: 'error', message: 'The model returned an empty response.' });
+              }
             }
           },
           onError: (error) => {
@@ -657,6 +693,119 @@ export class SquirlRuntime extends EventEmitter {
     }
   }
 
+  // ---- Eval dashboard ----
+
+  getEvalHistory(): HistoryEntry[] {
+    return readHistory();
+  }
+
+  /** Run an eval layer in-process, streaming coarse progress, and append a history entry. */
+  async runEval(req: EvalRunRequest, emit: (event: EvalEvent) => void): Promise<void> {
+    this.refreshConfigFromDisk();
+    const config = evalConfigFromSquirl(this.config, req);
+
+    const deps: Parameters<typeof executeEvalRun>[1] = {};
+    if (config.layer === 3) {
+      deps.answerModel = answerModelFromSquirl(this.config);
+      const judge = judgeFromSquirl(this.config);
+      deps.judgeLLM = judge.llm;
+      deps.judgeLabel = `${judge.provider}:${judge.model}`;
+    }
+
+    const result = await executeEvalRun(config, deps, (e) => emit({ type: 'progress', stage: e.stage, ...(e.detail ? { detail: e.detail } : {}) }));
+    emit({ type: 'result', result });
+    emit({ type: 'done' });
+  }
+
+  /** (Re)start the self-monitoring timer from config.eval.monitor. Default off; safe to call repeatedly. */
+  startEvalMonitor(): void {
+    if (this.evalMonitorTimer) {
+      clearInterval(this.evalMonitorTimer);
+      this.evalMonitorTimer = null;
+    }
+    const monitor = this.config.eval?.monitor;
+    if (!monitor?.enabled) return;
+
+    const intervalHours = monitor.intervalHours ?? 24;
+    const intervalMs = Math.max(1, intervalHours) * 60 * 60 * 1000;
+    const layer = (monitor.layer ?? 1) as 1 | 2 | 3;
+    const mode = monitor.mode ?? 'frozen';
+
+    // Run once on startup if the latest matching run is stale (or there is none).
+    const latest = this.getEvalHistory().filter((e) => e.layer === layer && e.mode === mode).pop();
+    const stale = !latest || (Date.now() - new Date(latest.timestamp).getTime()) >= intervalMs;
+    if (stale) void this.runMonitorEval(layer, mode);
+
+    this.evalMonitorTimer = setInterval(() => void this.runMonitorEval(layer, mode), intervalMs);
+  }
+
+  stopEvalMonitor(): void {
+    if (this.evalMonitorTimer) clearInterval(this.evalMonitorTimer);
+    this.evalMonitorTimer = null;
+  }
+
+  private async runMonitorEval(layer: 1 | 2 | 3, mode: 'frozen' | 'live'): Promise<void> {
+    if (this.evalMonitorRunning) return; // never overlap runs
+    this.evalMonitorRunning = true;
+    try {
+      await this.runEval({ layer, mode, label: 'monitor' }, () => {});
+    } catch (err) {
+      console.error('[eval-monitor] run failed:', err instanceof Error ? err.message : String(err));
+    } finally {
+      this.evalMonitorRunning = false;
+    }
+  }
+
+  // ---- Dependency health checks ----
+
+  /** Start the periodic dependency health checks (first run shortly after boot, then every 30s). */
+  startHealthChecks(): void {
+    if (this.healthTimer) { clearInterval(this.healthTimer); this.healthTimer = null; }
+    setTimeout(() => void this.refreshHealth(), 2_000); // let index init settle first
+    this.healthTimer = setInterval(() => void this.refreshHealth(), 30_000);
+  }
+
+  stopHealthChecks(): void {
+    if (this.healthTimer) clearInterval(this.healthTimer);
+    this.healthTimer = null;
+  }
+
+  /** Probe every configured dependency concurrently and cache the snapshot. Non-overlapping. */
+  async refreshHealth(): Promise<void> {
+    if (this.healthChecking) return;
+    this.healthChecking = true;
+    try {
+      const targets = buildHealthTargets(this.config, this.selectedModel);
+      const entries = await Promise.all(targets.map((t) => this.probeTarget(t)));
+      this.healthReport = { entries, checkedAt: new Date().toISOString() };
+    } finally {
+      this.healthChecking = false;
+    }
+  }
+
+  private probeTarget(target: ReturnType<typeof buildHealthTargets>[number]): Promise<HealthEntry> {
+    if (target.kind === 'embedder') {
+      if (!this.embedder) return Promise.resolve({ id: target.id, label: target.label, state: 'down', detail: 'embedder not initialized' });
+      return probeEmbedder(this.embedder, target.label);
+    }
+    if (target.kind === 'vectorstore') {
+      if (!this.vectorStore) return Promise.resolve({ id: target.id, label: target.label, state: 'down', detail: 'vector store not initialized' });
+      return probeVectorStore(this.vectorStore, target.label);
+    }
+    return probeChat(target, this.listModelsFor(target));
+  }
+
+  private listModelsFor(target: ReturnType<typeof buildHealthTargets>[number]): () => Promise<string[]> {
+    if (target.provider === 'openai') {
+      return () => fetchModelIds('https://api.openai.com/v1/models', { Authorization: `Bearer ${process.env.OPENAI_API_KEY ?? ''}` }, process.env.OPENAI_API_KEY);
+    }
+    if (target.provider === 'anthropic') {
+      return () => fetchModelIds('https://api.anthropic.com/v1/models', { 'x-api-key': process.env.ANTHROPIC_API_KEY ?? '', 'anthropic-version': '2023-06-01' }, process.env.ANTHROPIC_API_KEY);
+    }
+    const baseUrl = target.baseUrl ?? this.config.localBaseUrl ?? 'http://localhost:8000/v1';
+    return () => fetchAvailableModels(baseUrl).then((models) => models.map((m) => m.id));
+  }
+
   private refreshSharedState(): void {
     this.refreshConfigFromDisk();
     this.refreshHistoryFromDisk();
@@ -749,9 +898,11 @@ export class SquirlRuntime extends EventEmitter {
 
       const metaProvider = this.config.index.metaProvider ?? this.config.defaultProvider ?? 'openai';
       const metaModel = this.config.index.metaModel ?? (metaProvider === 'local' ? (this.config.defaultModel ?? 'default') : 'gpt-4o-mini');
-      const metaLLM: MetaLLM = metaProvider === 'anthropic'
-        ? new AnthropicMetaLLM({ model: metaModel })
-        : new OpenAIMetaLLM({ model: metaModel, ...(metaProvider === 'local' ? { baseUrl: this.config.localBaseUrl } : {}) });
+      const metaLLM = createMetaLLM({
+        provider: metaProvider,
+        model: metaModel,
+        ...(metaProvider === 'local' ? { baseUrl: this.config.localBaseUrl } : {}),
+      });
       this.orchestrator.setMemoryPipeline(new MemoryPipeline(metaLLM, this.embedder, this.vectorStore, {
         recallK: this.config.index.recallK ?? 10,
       }));
@@ -776,6 +927,20 @@ export class SquirlRuntime extends EventEmitter {
       backend,
       ...(match?.contextWindow ? { contextWindow: match.contextWindow } : {}),
     };
+    this.persistContextWindow();
+  }
+
+  /** Persist the selected model's context window when we know it, so it survives restarts. */
+  private persistContextWindow(): void {
+    const window = resolveContextWindow(this.selectedModel, this.config);
+    if (!window) return;
+    const next = rememberContextWindow(this.config, this.selectedModel.id, window);
+    if (next === this.config) return;
+    this.config = next;
+    saveConfig(this.config);
+    // Keep the signature in sync with our own write, so the periodic disk poll
+    // (refreshConfigFromDisk) doesn't mistake it for an external edit and reset the model.
+    this.configSignature = JSON.stringify(this.config);
   }
 
   private modelDisplay(): string {

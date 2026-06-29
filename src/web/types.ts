@@ -4,13 +4,17 @@ import type { Message } from '../types.js';
 import type { QueryPipelineStatus } from '../pipeline-status.js';
 import type { LocalBackend } from '../api.js';
 import type { Participant } from '../agents/types.js';
+import type { HealthReport, HealthEntry, HealthState } from './health.js';
+
+export type { HealthReport, HealthEntry, HealthState };
 
 export interface RuntimeStatus {
   selectedModel: SelectedModel;
   modelDisplay: string;
   workingDir: string;
   tokenCount: number;
-  contextWindow: number;
+  /** Resolved model context window, or null when it's genuinely unknown (UI shows "?"). */
+  contextWindow: number | null;
   isStreaming: boolean;
   toolStatus: string;
   tokensPerSecond: number;
@@ -33,6 +37,7 @@ export interface AppState {
   contextFiles: ContextFileSummary[];
   commands: Array<{ name: string; description: string }>;
   participants: Participant[];
+  health: HealthReport;
 }
 
 export interface ChatRequest {
@@ -75,3 +80,16 @@ export interface ImportResult {
   count: number;
   source: string;
 }
+
+// ---- Eval dashboard ----
+import type { EvalRunRequest } from '../search/eval/run.js';
+import type { HistoryEntry } from '../search/eval/history.js';
+import type { RunResult, JudgeSummary } from '../search/eval/types.js';
+
+export type { EvalRunRequest, HistoryEntry, RunResult, JudgeSummary };
+
+export type EvalEvent =
+  | { type: 'progress'; stage: string; detail?: string }
+  | { type: 'result'; result: RunResult }
+  | { type: 'error'; message: string }
+  | { type: 'done' };

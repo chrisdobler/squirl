@@ -3,11 +3,16 @@ import type { Embedder, VectorStore, SearchResult } from './types.js';
 import { extractSearchQueries } from './meta-extract.js';
 import type { MetaLLM } from './meta-extract.js';
 import { formatMemorySystemMessage, formatMemoryInline } from './memory-format.js';
+import { rankResults } from './ranker.js';
 import { searchLog } from './debug.js';
 import type { QueryPipelineStage } from '../pipeline-status.js';
 
 export interface MemoryPipelineConfig {
   recallK: number;
+  /** Results requested per extracted query before dedup/ranking. Defaults to 8. */
+  perQueryK?: number;
+  /** Drop results already present in the current conversation. Defaults to true. */
+  filterConversation?: boolean;
 }
 
 export interface MemoryResult {
@@ -43,29 +48,17 @@ export class MemoryPipeline {
 
     const allResults: SearchResult[] = [];
     onStatus?.('vectordb');
+    const perQueryK = this.config.perQueryK ?? PER_QUERY_K;
     for (const embedding of embeddings) {
-      const results = await this.store.query(embedding, PER_QUERY_K);
+      const results = await this.store.query(embedding, perQueryK);
       allResults.push(...results);
     }
 
-    const deduped = new Map<string, SearchResult>();
-    for (const r of allResults) {
-      const existing = deduped.get(r.id);
-      if (!existing || r.score < existing.score) {
-        deduped.set(r.id, r);
-      }
-    }
-
-    const conversationTexts = new Set(
-      conversation.filter((m) => m.role === 'user').map((m) => m.content),
-    );
-    const filtered = [...deduped.values()].filter(
-      (r) => !conversationTexts.has(r.turnPair.userText),
-    );
-
-    filtered.sort((a, b) => a.score - b.score);
-    const topK = filtered.slice(0, this.config.recallK);
-    searchLog('MEMORY RESULTS', { total: allResults.length, deduped: deduped.size, filtered: filtered.length, topK: topK.length });
+    const topK = rankResults(allResults, conversation, {
+      recallK: this.config.recallK,
+      filterConversation: this.config.filterConversation ?? true,
+    });
+    searchLog('MEMORY RESULTS', { total: allResults.length, topK: topK.length });
 
     if (topK.length === 0) return empty;
 

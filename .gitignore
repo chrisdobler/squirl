@@ -5,3 +5,6 @@ dist-web/
 .DS_Store
 *.log
 .env
+
+# eval harness run outputs (fixtures under src/search/eval/fixtures are committed)
+results/

@@ -11,7 +11,8 @@ import { ContextPicker } from './components/ContextPicker.js';
 import { CommandPalette, type PaletteAction } from './components/CommandPalette.js';
 import { ToastContainer, type ToastMessage } from './components/Toast.js';
 import { Orchestrator } from './orchestrator.js';
-import { getModelConfig } from './model-config.js';
+import { getModelConfig, resolveContextWindow } from './model-config.js';
+import { loadConfig, saveConfig, rememberContextWindow } from './config.js';
 import { loadHistory, appendMessage, readEntries, getAllHistoryFiles, rewindHistoryAfter } from './history.js';
 import { matchCommand, filterCommands } from './commands/registry.js';
 import { buildRewindCandidates, rewindRequestFromCandidate } from './rewind.js';
@@ -284,6 +285,13 @@ export const App: React.FC<AppProps> = ({
         backend,
         ...(match?.contextWindow ? { contextWindow: match.contextWindow } : {}),
       }));
+      // Persist the discovered window so it survives restarts. Merge into the
+      // latest on-disk config to avoid clobbering unrelated fields.
+      if (match?.contextWindow) {
+        const fresh = loadConfig();
+        const next = rememberContextWindow(fresh, selectedModel.id, match.contextWindow);
+        if (next !== fresh) saveConfig(next);
+      }
     })();
     return () => { cancelled = true; };
   }, [selectedModel.id, selectedModel.provider, selectedModel.baseUrl, selectedModel.backend, selectedModel.contextWindow]);
@@ -937,7 +945,7 @@ export const App: React.FC<AppProps> = ({
       ? `${selectedModel.id} (${BACKEND_DISPLAY_NAMES[selectedModel.backend]})`
       : selectedModel.id
     : selectedModel.label;
-  const contextWindow = selectedModel.contextWindow ?? getModelConfig(selectedModel.id).contextWindow;
+  const contextWindow = resolveContextWindow(selectedModel, config ?? {});
   const selectedRewindCandidate = rewindCandidates[Math.min(rewindPickerIndex, Math.max(0, rewindCandidates.length - 1))];
   const rewindCandidateIds = new Set(rewindCandidates.map((candidate) => candidate.message.id));
   const messageListHeight = Math.max(1, terminalRows - FIXED_CHROME_ROWS);
@@ -953,7 +961,7 @@ export const App: React.FC<AppProps> = ({
           orchestrator={orchestratorRef.current}
           workingDir={workingDir}
           messages={messages}
-          contextWindow={contextWindow}
+          contextWindow={contextWindow ?? getModelConfig(selectedModel.id).contextWindow}
           modelId={selectedModel.id}
           onClose={() => setIsContextMenuOpen(false)}
         />

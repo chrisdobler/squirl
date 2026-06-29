@@ -3,9 +3,11 @@ import { createRoot } from 'react-dom/client';
 import type { SquirlConfig } from '../config.js';
 import type { SelectedModel } from '../components/ModelPicker.js';
 import type { Message } from '../types.js';
-import type { AppState, ChatEvent, ContextFileSummary, RuntimeStatus, ToolApprovalRequest } from './types.js';
+import type { AppState, ChatEvent, ContextFileSummary, RuntimeStatus, ToolApprovalRequest, EvalEvent, EvalRunRequest, HistoryEntry, JudgeSummary } from './types.js';
 import type { Participant, ParticipantColor } from '../agents/types.js';
 import { SQUIRL_PARTICIPANT, USER_PARTICIPANT, buildRegistry, resolveParticipant, roomMembers } from '../agents/participants.js';
+import { EvalDashboard } from './EvalDashboard.js';
+import { EvalRunView } from './EvalRunView.js';
 import './styles.css';
 
 const PARTICIPANT_CSS_COLOR: Record<ParticipantColor, string> = {
@@ -52,7 +54,7 @@ function defaultStatus(): RuntimeStatus {
     modelDisplay: 'Claude Sonnet 4.6',
     workingDir: '',
     tokenCount: 0,
-    contextWindow: 0,
+    contextWindow: null,
     isStreaming: false,
     toolStatus: '',
     tokensPerSecond: 0,
@@ -486,7 +488,17 @@ function RewindModal({ candidates, onClose, onApply }: {
 function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [input, setInput] = useState('');
-  const [activePanel, setActivePanel] = useState<'settings' | 'models' | 'context' | 'memory' | 'rewind'>('context');
+  const [activePanel, setActivePanel] = useState<'settings' | 'models' | 'context' | 'memory' | 'rewind' | 'eval'>('context');
+  const [evalHistory, setEvalHistory] = useState<HistoryEntry[]>([]);
+  const [evalRunning, setEvalRunning] = useState(false);
+  const [evalProgress, setEvalProgress] = useState<string | undefined>(undefined);
+  const [evalError, setEvalError] = useState<string | undefined>(undefined);
+  // Layer 3 chat-pane takeover
+  const [evalRunActive, setEvalRunActive] = useState(false);
+  const [evalRunTitle, setEvalRunTitle] = useState('');
+  const [evalRunLines, setEvalRunLines] = useState<string[]>([]);
+  const [evalRunDone, setEvalRunDone] = useState(false);
+  const [evalRunSummary, setEvalRunSummary] = useState<JudgeSummary | undefined>(undefined);
   const [showThinking, setShowThinking] = useState(false);
   const [approval, setApproval] = useState<ToolApprovalRequest | null>(null);
   const [rosterOpen, setRosterOpen] = useState(false);
@@ -646,8 +658,93 @@ function App() {
     setApproval(null);
   };
 
+  const loadEvalHistory = async () => {
+    const result = await api<{ history: HistoryEntry[] }>('/api/eval/history');
+    setEvalHistory(result.history);
+  };
+
+  useEffect(() => {
+    if (activePanel === 'eval') void loadEvalHistory();
+  }, [activePanel]);
+
+  const runEval = async (req: EvalRunRequest) => {
+    // Layer 3 is slow (LLM calls per case) → take over the chat pane with a live log.
+    const takeover = req.layer === 3;
+    setEvalRunning(true);
+    setEvalProgress('starting…');
+    setEvalError(undefined);
+    if (takeover) {
+      setEvalRunActive(true);
+      setEvalRunTitle(`eval · layer ${req.layer} (${req.mode})`);
+      setEvalRunLines(['starting…']);
+      setEvalRunDone(false);
+      setEvalRunSummary(undefined);
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/eval/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req),
+      });
+      if (!res.body) throw new Error('No response stream');
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line) as EvalEvent;
+          if (event.type === 'progress') {
+            const text = event.detail ?? event.stage;
+            setEvalProgress(text);
+            if (takeover) setEvalRunLines((prev) => [...prev, text]);
+          } else if (event.type === 'result') {
+            if (takeover) setEvalRunSummary(event.result.judge);
+          } else if (event.type === 'error') {
+            setEvalError(event.message);
+          }
+        }
+      }
+      await loadEvalHistory(); // reconcile with the canonical log
+    } catch (err) {
+      setEvalError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setEvalRunning(false);
+      setEvalProgress(undefined);
+      if (takeover) setEvalRunDone(true);
+    }
+  };
+
+  // Escape returns to the regular chat from the eval takeover (the run continues server-side).
+  useEffect(() => {
+    if (!evalRunActive) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setEvalRunActive(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [evalRunActive]);
+
   const activePanelView = useMemo(() => {
     if (!state) return null;
+    if (activePanel === 'eval') {
+      return <EvalDashboard
+        history={evalHistory}
+        running={evalRunning}
+        progress={evalProgress}
+        error={evalError}
+        monitorEnabled={!!state.config.eval?.monitor?.enabled}
+        onRefresh={() => void loadEvalHistory()}
+        onRun={(req) => void runEval(req)}
+        onToggleMonitor={(enabled) => void saveConfig({
+          ...state.config,
+          eval: { ...state.config.eval, monitor: { ...state.config.eval?.monitor, enabled } },
+        })}
+      />;
+    }
     if (activePanel === 'settings') return <SettingsPanel state={state} onSave={saveConfig} onDetectLocal={detectLocal} />;
     if (activePanel === 'models') return <ModelPanel current={status.selectedModel} onSelect={selectModel} onDetect={detectLocal} />;
     if (activePanel === 'memory') {
@@ -675,7 +772,7 @@ function App() {
       onRemove={async (path) => setState(await api<AppState>('/api/context/remove', { method: 'POST', body: JSON.stringify({ path }) }))}
       onClear={async () => setState(await api<AppState>('/api/context/clear', { method: 'POST' }))}
     />;
-  }, [activePanel, state, status.selectedModel, approval]);
+  }, [activePanel, state, status.selectedModel, approval, evalHistory, evalRunning, evalProgress, evalError]);
 
   return (
     <main className="appShell">
@@ -688,21 +785,42 @@ function App() {
           </div>
         </div>
         <nav>
-          {(['context', 'models', 'memory', 'rewind', 'settings'] as const).map((panel) => (
+          {(['context', 'models', 'memory', 'rewind', 'eval', 'settings'] as const).map((panel) => (
             <button key={panel} className={activePanel === panel ? 'active' : ''} onClick={() => setActivePanel(panel)}>
               {panel}
             </button>
           ))}
         </nav>
+        {state?.health && state.health.entries.length > 0 && (
+          <div className="healthLights">
+            {state.health.entries.map((h) => (
+              <div key={h.id} className="healthRow" title={h.detail ?? h.state}>
+                <span className={`healthDot ${h.state}`} />
+                <span className="healthLabel">{h.label}</span>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="telemetry">
           <span>model</span><strong>{status.modelDisplay}</strong>
-          <span>context</span><strong>{formatTokens(status.tokenCount)} / {formatTokens(status.contextWindow)}</strong>
+          <span>context</span><strong>{formatTokens(status.tokenCount)} / {status.contextWindow == null ? '?' : formatTokens(status.contextWindow)}</strong>
           <span>speed</span><strong>{status.tokensPerSecond} t/s</strong>
           <span>memory</span><strong>{status.indexEnabled ? status.storeName || 'enabled' : 'off'}</strong>
         </div>
       </aside>
 
-      <section className="chatPane">
+      <section className={evalRunActive ? 'chatPane chatPaneTakeover' : 'chatPane'}>
+        {evalRunActive ? (
+          <EvalRunView
+            title={evalRunTitle}
+            lines={evalRunLines}
+            done={evalRunDone}
+            error={evalError}
+            summary={evalRunSummary}
+            onClose={() => setEvalRunActive(false)}
+          />
+        ) : (
+        <>
         <header className="topBar">
           <div>
             <strong>{status.pipelineStatus ? `${status.pipelineStatus.stage}${status.pipelineStatus.detail ? ` · ${status.pipelineStatus.detail}` : ''}` : status.toolStatus || 'ready'}</strong>
@@ -749,6 +867,8 @@ function App() {
           />
           <button className="primary" disabled={status.isStreaming} onClick={() => void sendMessage()}>Send</button>
         </footer>
+        </>
+        )}
       </section>
 
       <aside className="rightPane">{activePanelView}</aside>

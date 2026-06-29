@@ -11,13 +11,21 @@
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "dev:web": "tsx src/web/dev.ts",
+    "dev:web:split": "tsx src/web/dev-split.ts",
+    "dev:web:api": "tsx watch src/web/dev-api.ts",
     "build:web": "vite build",
     "start:web": "node dist/web/server.js",
     "dev:electron": "pnpm build && pnpm build:web && electron dist/electron/main.js",
     "start:electron": "electron dist/electron/main.js",
     "start": "node dist/index.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "eval": "tsx src/search/eval/runner.ts run --mode frozen --layer 1 --embedder local --embedder-model BAAI/bge-large-en-v1.5",
+    "eval:e2e": "tsx src/search/eval/runner.ts run --mode frozen --layer 2 --embedder local --embedder-model BAAI/bge-large-en-v1.5",
+    "eval:live": "tsx src/search/eval/runner.ts run --mode live --layer 2 --embedder local --embedder-model BAAI/bge-large-en-v1.5 --embedder-url http://gpu1.skyhouse.dobsys.com:8000/v1",
+    "eval:judge": "tsx src/search/eval/runner.ts run --mode frozen --layer 3 --embedder local --embedder-model BAAI/bge-large-en-v1.5",
+    "eval:refresh": "tsx src/search/eval/runner.ts refresh --embedder local --embedder-model BAAI/bge-large-en-v1.5 --embedder-url http://gpu1.skyhouse.dobsys.com:8000/v1",
+    "eval:compare": "tsx src/search/eval/runner.ts compare"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.86.1",

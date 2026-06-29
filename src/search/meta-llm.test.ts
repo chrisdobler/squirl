@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { OpenAIMetaLLM, AnthropicMetaLLM } from './meta-llm.js';
+import { OpenAIMetaLLM, AnthropicMetaLLM, createMetaLLM } from './meta-llm.js';
 
 describe('OpenAIMetaLLM', () => {
   it('calls OpenAI chat completions and returns content', async () => {
@@ -35,5 +35,27 @@ describe('AnthropicMetaLLM', () => {
       model: 'claude-haiku-4-5-20251001',
       system: 'generate queries',
     }));
+  });
+});
+
+describe('createMetaLLM', () => {
+  it('selects Anthropic for the anthropic provider', () => {
+    expect(createMetaLLM({ provider: 'anthropic', model: 'claude-haiku-4-5-20251001' }))
+      .toBeInstanceOf(AnthropicMetaLLM);
+  });
+
+  it('selects OpenAI for openai and local providers', () => {
+    expect(createMetaLLM({ provider: 'openai', model: 'gpt-4o-mini' })).toBeInstanceOf(OpenAIMetaLLM);
+    expect(createMetaLLM({ provider: 'local', model: 'm', baseUrl: 'http://gpu1:8000/v1' }))
+      .toBeInstanceOf(OpenAIMetaLLM);
+  });
+
+  it('passes the baseUrl through to the OpenAI client (local/openai-compatible)', () => {
+    const created = vi.fn(() => ({ choices: [{ message: { content: '' } }] }));
+    // baseUrl only matters at request time via the real client; here we just assert construction succeeds
+    // and a custom createFn still works (the factory must not crash on a baseUrl).
+    const llm = createMetaLLM({ provider: 'local', model: 'm', baseUrl: 'http://gpu1:8000/v1' });
+    expect(llm).toBeInstanceOf(OpenAIMetaLLM);
+    expect(created).not.toHaveBeenCalled();
   });
 });

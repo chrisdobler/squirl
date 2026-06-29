@@ -180,6 +180,49 @@ nav button.active,
   font-weight: 600;
 }
 
+.healthLights {
+  display: grid;
+  gap: 7px;
+  border-top: 1px solid #24313a;
+  padding-top: 14px;
+  font-size: 12px;
+}
+
+.healthRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #9fb0bb;
+}
+
+.healthDot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #74858f; /* unknown */
+  box-shadow: 0 0 5px transparent;
+}
+
+.healthDot.ok {
+  background: #4ade80;
+  box-shadow: 0 0 6px rgba(74, 222, 128, 0.6);
+}
+
+.healthDot.degraded {
+  background: #facc15;
+  box-shadow: 0 0 6px rgba(250, 204, 21, 0.55);
+}
+
+.healthDot.down {
+  background: #f87171;
+  box-shadow: 0 0 6px rgba(248, 113, 113, 0.6);
+}
+
+.healthLabel {
+  text-transform: capitalize;
+}
+
 .chatPane {
   display: grid;
   grid-template-rows: 62px minmax(0, 1fr) 118px;
@@ -521,4 +564,200 @@ nav button.active,
 
 .hint code {
   color: #8fc1ce;
+}
+
+/* ---- Eval dashboard ---- */
+.evalMonitor {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: #8fc1ce;
+  margin-left: auto;
+}
+.evalMonitor input {
+  width: auto;
+}
+.evalRun {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.evalRun input,
+.evalRun select {
+  min-width: 0;
+}
+.evalRun .primary {
+  grid-column: 1 / -1;
+}
+.evalSeries {
+  width: 100%;
+}
+.evalStatus {
+  color: #8fc1ce;
+  font-size: 12px;
+  margin: 0;
+}
+.evalError {
+  color: #e8a0a0;
+  font-size: 12px;
+  margin: 0;
+}
+.evalEmpty {
+  color: #7f909b;
+  font-size: 13px;
+}
+.evalChart {
+  width: 100%;
+  height: auto;
+  background: #0b1117;
+  border: 1px solid #24313a;
+  border-radius: 8px;
+}
+.evalGrid {
+  stroke: #1c2730;
+  stroke-width: 1;
+}
+.evalAxis {
+  fill: #6b7a85;
+  font-size: 9px;
+}
+.evalLegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.evalLegend button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  padding: 3px 7px;
+  background: #131b22;
+  border: 1px solid #24313a;
+  border-radius: 12px;
+  color: #c1cbd2;
+}
+.evalLegend button.off {
+  opacity: 0.4;
+}
+.evalLegend .swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.evalTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.evalTable th,
+.evalTable td {
+  text-align: right;
+  padding: 4px 6px;
+  border-bottom: 1px solid #1c2730;
+  white-space: nowrap;
+}
+.evalTable th:first-child,
+.evalTable td:first-child,
+.evalTable th:nth-child(2),
+.evalTable td:nth-child(2) {
+  text-align: left;
+}
+.evalTable th {
+  color: #7f909b;
+  font-weight: 600;
+}
+.evalTable td:nth-child(2) {
+  color: #8fc1ce;
+}
+
+/* ---- Eval run takeover (replaces the chat pane during a Layer 3 run) ---- */
+.chatPane.chatPaneTakeover {
+  display: flex;
+  flex-direction: column;
+}
+
+.evalRunView {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.evalRunHeader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 62px;
+  padding: 0 18px;
+  border-bottom: 1px solid #24313a;
+  color: #dce8ee;
+  font-size: 13px;
+}
+
+.evalRunSpinner {
+  color: #22d3ee;
+  animation: evalPulse 1.1s ease-in-out infinite;
+}
+
+@keyframes evalPulse {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 1; }
+}
+
+.evalRunLog {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 18px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.evalRunLine {
+  color: #b8c4cd;
+  white-space: pre-wrap;
+}
+
+.evalRunSummary {
+  margin-top: 8px;
+  color: #4ade80;
+  font-weight: 600;
+}
+
+.evalRunErr {
+  margin-top: 8px;
+  color: #f87171;
+}
+
+.evalRunFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 56px;
+  padding: 0 18px;
+  border-top: 1px solid #24313a;
+  font-size: 13px;
+}
+
+.evalRunReturnHint {
+  color: #8fc1ce;
+}
+
+.evalRunRunning {
+  color: #74858f;
+}
+
+.evalRunFooter kbd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  background: #1c2730;
+  border: 1px solid #2e3b45;
+  border-radius: 4px;
+  padding: 1px 5px;
 }

@@ -29,6 +29,8 @@ export interface SquirlConfig {
   defaultModel?: string;
   localBaseUrl?: string;
   localBackend?: LocalBackend;
+  /** Per-model context window sizes, captured when a model is first configured. Keyed by model id. */
+  modelContextWindows?: Record<string, number>;
   mouseScrollLines?: number;
   index?: {
     enabled: boolean;
@@ -42,6 +44,15 @@ export interface SquirlConfig {
     metaModel?: string;
     metaProvider?: 'openai' | 'anthropic' | 'local';
     recallK?: number;
+  };
+  eval?: {
+    /** Automatic self-monitoring: periodically run an eval so the app tracks its own memory quality. */
+    monitor?: {
+      enabled?: boolean;
+      intervalHours?: number;       // default 24
+      layer?: 1 | 2 | 3;            // default 1
+      mode?: 'frozen' | 'live';     // default 'frozen'
+    };
   };
   agents?: AgentsConfig;
 }
@@ -66,6 +77,16 @@ export function loadConfig(): SquirlConfig {
 export function saveConfig(config: SquirlConfig): void {
   mkdirSync(CONFIG_DIR, { recursive: true });
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+}
+
+/**
+ * Return a config with `modelId`'s context window recorded, so it survives restarts.
+ * Returns the same config unchanged when there's nothing new to store (callers can
+ * skip persisting in that case). Does not write to disk — the caller decides when.
+ */
+export function rememberContextWindow(config: SquirlConfig, modelId: string, window: number): SquirlConfig {
+  if (!window || config.modelContextWindows?.[modelId] === window) return config;
+  return { ...config, modelContextWindows: { ...config.modelContextWindows, [modelId]: window } };
 }
 
 /**

@@ -7,6 +7,8 @@ let testHome: string;
 let historyDir: string;
 let testCounter = 0;
 let capturedHistory: any[] = [];
+let mockDetectedModels: Array<{ id: string; contextWindow?: number }> = [];
+let mockAssistantContent = 'ok';
 
 // Use timestamps relative to "now" so fixture entries stay inside history.ts's 24h
 // rollover window regardless of the calendar date the suite runs on (otherwise rollover
@@ -49,14 +51,25 @@ vi.mock('../orchestrator.js', () => ({
       const assistant = { id: 'web-assistant', role: 'assistant', content: '', isStreaming: true };
       callbacks.onNewMessage(user);
       callbacks.onNewMessage({ ...assistant });
-      assistant.content = 'ok';
-      callbacks.onToken('ok', { ...assistant });
+      if (mockAssistantContent) {
+        assistant.content = mockAssistantContent;
+        callbacks.onToken(mockAssistantContent, { ...assistant });
+      }
       assistant.isStreaming = false;
       callbacks.onDone({ promptTokens: 1, completionTokens: 1, totalTokens: 2 });
-      return [user, { ...assistant, content: 'ok', isStreaming: false }];
+      return [user, { ...assistant, content: mockAssistantContent, isStreaming: false }];
     }
   },
 }));
+
+vi.mock('../api.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../api.js')>();
+  return {
+    ...actual,
+    detectLocalBackend: async () => 'vllm' as const,
+    fetchAvailableModels: async () => mockDetectedModels,
+  };
+});
 
 function writeJsonl(filePath: string, entries: Array<{ timestamp: string; message: any }>) {
   writeFileSync(filePath, entries.map((entry) => JSON.stringify(entry)).join('\n') + '\n', 'utf-8');
@@ -184,5 +197,118 @@ describe('SquirlRuntime agents', () => {
     expect(await runtime.stopAgent('codex')).toBe(true);
     expect(runtime.listAgents()).toEqual([]);
     expect(await runtime.stopAgent('codex')).toBe(false);
+  });
+});
+
+describe('SquirlRuntime context window', () => {
+  const localModel = {
+    id: 'llama-local',
+    label: 'llama-local',
+    provider: 'local' as const,
+    baseUrl: 'http://gateway/v1',
+    backend: 'vllm' as const,
+  };
+
+  beforeEach(() => {
+    testCounter++;
+    testHome = join(tmpdir(), `squirl-web-ctxwin-${process.pid}-${testCounter}`);
+    mkdirSync(join(testHome, '.squirl'), { recursive: true });
+    mockDetectedModels = [];
+  });
+
+  afterEach(() => {
+    rmSync(testHome, { recursive: true, force: true });
+    mockDetectedModels = [];
+  });
+
+  function writeConfig(config: Record<string, unknown>) {
+    writeFileSync(join(testHome, '.squirl', 'config.json'), JSON.stringify(config) + '\n', 'utf-8');
+  }
+
+  function readSavedConfig(): any {
+    return JSON.parse(readFileSync(join(testHome, '.squirl', 'config.json'), 'utf-8'));
+  }
+
+  it('shows the curated window for a known cloud model', async () => {
+    writeConfig({ defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6' });
+    const runtime = await loadRuntime();
+    expect(runtime.getStatus().contextWindow).toBe(200_000);
+  });
+
+  it('reports null when a local model window is unknown so the UI can show "?"', async () => {
+    writeConfig({ defaultProvider: 'local', defaultModel: localModel.id, localBaseUrl: localModel.baseUrl, localBackend: 'vllm' });
+    mockDetectedModels = [{ id: localModel.id }]; // gateway advertises no window
+    const runtime = await loadRuntime();
+    await runtime.selectModel(localModel);
+    expect(runtime.getStatus().contextWindow).toBeNull();
+  });
+
+  it('persists a discovered local window so it survives a restart', async () => {
+    writeConfig({ defaultProvider: 'local', defaultModel: localModel.id, localBaseUrl: localModel.baseUrl, localBackend: 'vllm' });
+    mockDetectedModels = [{ id: localModel.id, contextWindow: 32_768 }];
+    const runtime = await loadRuntime();
+    await runtime.selectModel(localModel);
+
+    expect(runtime.getStatus().contextWindow).toBe(32_768);
+    expect(readSavedConfig().modelContextWindows?.[localModel.id]).toBe(32_768);
+
+    // Restart with the gateway no longer advertising a window: the persisted value is used.
+    mockDetectedModels = [{ id: localModel.id }];
+    const restarted = await loadRuntime();
+    expect(restarted.getStatus().contextWindow).toBe(32_768);
+  });
+
+  it('keeps an explicitly selected local model across a state poll (no config-churn reset)', async () => {
+    // Default provider is hosted, but the user picks a local model in the Models panel. Persisting
+    // its window must not let the 1.5s /api/state poll revert the selection to the hosted default.
+    writeConfig({ defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6' });
+    mockDetectedModels = [{ id: localModel.id, contextWindow: 32_768 }];
+    const runtime = await loadRuntime();
+    await runtime.selectModel(localModel);
+    expect(runtime.getStatus().selectedModel.provider).toBe('local');
+
+    // Simulate two periodic polls (each calls getState → refreshConfigFromDisk).
+    runtime.getState();
+    runtime.getState();
+
+    expect(runtime.getStatus().selectedModel.id).toBe(localModel.id);
+    expect(runtime.getStatus().selectedModel.provider).toBe('local');
+    expect(runtime.getStatus().contextWindow).toBe(32_768);
+  });
+});
+
+describe('SquirlRuntime empty responses', () => {
+  beforeEach(() => {
+    testCounter++;
+    testHome = join(tmpdir(), `squirl-web-empty-${process.pid}-${testCounter}`);
+    historyDir = join(testHome, '.squirl', 'history');
+    mkdirSync(historyDir, { recursive: true });
+    writeFileSync(join(testHome, '.squirl', 'config.json'), JSON.stringify({ defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6' }) + '\n', 'utf-8');
+    writeJsonl(join(historyDir, 'current.jsonl'), []);
+  });
+
+  afterEach(() => {
+    rmSync(testHome, { recursive: true, force: true });
+    mockAssistantContent = 'ok';
+  });
+
+  it('surfaces a toast when the model returns an empty reply', async () => {
+    mockAssistantContent = '';
+    const runtime = await loadRuntime();
+    const events: any[] = [];
+
+    await runtime.chat('hello', (event) => { events.push(event); });
+
+    expect(events).toContainEqual({ type: 'toast', level: 'error', message: 'The model returned an empty response.' });
+  });
+
+  it('does not toast when the model returns content', async () => {
+    mockAssistantContent = 'ok';
+    const runtime = await loadRuntime();
+    const events: any[] = [];
+
+    await runtime.chat('hello', (event) => { events.push(event); });
+
+    expect(events.some((e) => e.type === 'toast')).toBe(false);
   });
 });
