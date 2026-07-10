@@ -275,6 +275,23 @@ describe('SquirlRuntime context window', () => {
     expect(runtime.getStatus().selectedModel.provider).toBe('local');
     expect(runtime.getStatus().contextWindow).toBe(32_768);
   });
+
+  it('exposes a context breakdown that grows when a file is attached', async () => {
+    writeConfig({ defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6' });
+    const runtime = await loadRuntime();
+
+    const before = runtime.getStatus().contextBreakdown;
+    expect(before.system).toBeGreaterThan(0); // the system prompt always contributes
+    expect(before.files).toBe(0);
+
+    runtime.addContextFile('src/foo.ts');
+    const after = runtime.getStatus().contextBreakdown;
+    expect(after.files).toBeGreaterThan(0);
+    expect(after.system).toBe(before.system);
+    // tokenCount is the breakdown sum plus a per-message overhead.
+    const { system, files, messages } = after;
+    expect(runtime.getStatus().tokenCount).toBe(system + files + messages);
+  });
 });
 
 describe('SquirlRuntime empty responses', () => {

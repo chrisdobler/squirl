@@ -211,12 +211,16 @@ export class SquirlRuntime extends EventEmitter {
 
   getStatus(): RuntimeStatus {
     const contextWindow = resolveContextWindow(this.selectedModel, this.config) ?? null;
+    const contextBreakdown = this.contextBreakdown();
+    // +4 per message of role/metadata overhead (matches the TUI status bar).
+    const tokenCount = contextBreakdown.system + contextBreakdown.files + contextBreakdown.messages + this.messages.length * 4;
     return {
       selectedModel: this.selectedModel,
       modelDisplay: this.modelDisplay(),
       workingDir: this.workingDir,
-      tokenCount: this.tokenCount(),
+      tokenCount,
       contextWindow,
+      contextBreakdown,
       isStreaming: this.isStreaming,
       toolStatus: this.toolStatus,
       tokensPerSecond: this.tokensPerSecond,
@@ -951,7 +955,9 @@ export class SquirlRuntime extends EventEmitter {
     return this.selectedModel.id;
   }
 
-  private tokenCount(): number {
+  /** Per-bucket context token estimate (system prompt / attached files / conversation), feeding both the
+   *  status-bar count and the context-budget disc grid. Mirrors the TUI ContextPicker's tokenBuckets. */
+  private contextBreakdown(): { system: number; files: number; messages: number } {
     const config = getModelConfig(this.selectedModel.id);
     const systemPrompt = buildSystemPrompt(
       {
@@ -965,10 +971,11 @@ export class SquirlRuntime extends EventEmitter {
       config.systemPromptStyle,
     );
     const sysContent = typeof systemPrompt.content === 'string' ? systemPrompt.content : '';
-    let total = estimateTokens(sysContent);
-    for (const content of this.orchestrator.getContextFiles().values()) total += estimateTokens(content);
-    for (const message of this.messages) total += estimateTokens(message.content) + 4;
-    return total;
+    let files = 0;
+    for (const content of this.orchestrator.getContextFiles().values()) files += estimateTokens(content);
+    let messages = 0;
+    for (const message of this.messages) messages += estimateTokens(message.content);
+    return { system: estimateTokens(sysContent), files, messages };
   }
 
   workspaceInfo(path = '.'): { path: string; isDirectory: boolean; size: number } {

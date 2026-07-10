@@ -761,3 +761,112 @@ nav button.active,
   border-radius: 4px;
   padding: 1px 5px;
 }
+
+/* ---- Context-budget takeover (recreates the TUI /context disc grid) ---- */
+.contextView {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.contextViewHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  height: 62px;
+  padding: 0 18px;
+  border-bottom: 1px solid #24313a;
+  color: #dce8ee;
+  font-size: 14px;
+}
+
+.contextViewBody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px 22px;
+}
+
+.contextDiscGrid {
+  display: grid;
+  grid-template-columns: repeat(10, 16px);
+  gap: 5px;
+  width: max-content;
+}
+
+.disc {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  box-sizing: border-box;
+}
+
+.disc.system { background: #60a5fa; }
+.disc.files { background: #facc15; }
+.disc.messages { background: #4ade80; }
+.disc.available { background: #222d36; border: 1px solid #33414c; }
+
+.contextLegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin: 18px 0 24px;
+  color: #b8c4cd;
+  font-size: 13px;
+}
+
+.contextLegend .legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.contextFiles {
+  margin-bottom: 22px;
+}
+
+.contextFilesHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.contextFilesHead h3,
+.contextSearch label {
+  color: #dce8ee;
+}
+
+.contextSearch label {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.contextSearch input {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+}
+
+.contextViewFooter {
+  display: flex;
+  align-items: center;
+  height: 56px;
+  padding: 0 18px;
+  border-top: 1px solid #24313a;
+  font-size: 13px;
+}
+
+.contextViewFooter kbd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  background: #1c2730;
+  border: 1px solid #2e3b45;
+  border-radius: 4px;
+  padding: 1px 5px;
+}

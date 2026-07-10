@@ -15,6 +15,8 @@ export interface RuntimeStatus {
   tokenCount: number;
   /** Resolved model context window, or null when it's genuinely unknown (UI shows "?"). */
   contextWindow: number | null;
+  /** Per-bucket context token estimate, for the context-budget disc grid. */
+  contextBreakdown: { system: number; files: number; messages: number };
   isStreaming: boolean;
   toolStatus: string;
   tokensPerSecond: number;

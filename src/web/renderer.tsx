@@ -7,6 +7,7 @@ import type { AppState, ChatEvent, ContextFileSummary, RuntimeStatus, ToolApprov
 import type { Participant, ParticipantColor } from '../agents/types.js';
 import { SQUIRL_PARTICIPANT, USER_PARTICIPANT, buildRegistry, resolveParticipant, roomMembers } from '../agents/participants.js';
 import { EvalDashboard } from './EvalDashboard.js';
+import { ContextView } from './ContextView.js';
 import { EvalRunView } from './EvalRunView.js';
 import './styles.css';
 
@@ -55,6 +56,7 @@ function defaultStatus(): RuntimeStatus {
     workingDir: '',
     tokenCount: 0,
     contextWindow: null,
+    contextBreakdown: { system: 0, files: 0, messages: 0 },
     isStreaming: false,
     toolStatus: '',
     tokensPerSecond: 0,
@@ -309,51 +311,6 @@ function ModelPanel({ current, onSelect, onDetect }: {
   );
 }
 
-function ContextPanel({ files, onAdd, onRemove, onClear }: {
-  files: ContextFileSummary[];
-  onAdd: (path: string) => Promise<void>;
-  onRemove: (path: string) => Promise<void>;
-  onClear: () => Promise<void>;
-}) {
-  const [query, setQuery] = useState('');
-  const [workspaceFiles, setWorkspaceFiles] = useState<string[]>([]);
-
-  useEffect(() => {
-    const timeout = setTimeout(() => {
-      void api<{ files: string[] }>(`/api/files?q=${encodeURIComponent(query)}`).then((result) => setWorkspaceFiles(result.files));
-    }, 150);
-    return () => clearTimeout(timeout);
-  }, [query]);
-
-  return (
-    <section className="panel">
-      <header>
-        <h2>Context</h2>
-        <button onClick={() => void onClear()}>Clear</button>
-      </header>
-      <label>
-        Add file
-        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search workspace files" />
-      </label>
-      <div className="fileList">
-        {workspaceFiles.slice(0, 20).map((path) => (
-          <button key={path} className="rowButton" onClick={() => void onAdd(path)}>
-            <span>{path}</span>
-          </button>
-        ))}
-      </div>
-      <div className="divider" />
-      <h3>Attached</h3>
-      {files.length === 0 ? <p className="muted">No files in context</p> : files.map((file) => (
-        <button key={file.path} className="rowButton selected" onClick={() => void onRemove(file.path)}>
-          <span>{file.path}</span>
-          <strong>{formatTokens(file.tokens)}</strong>
-        </button>
-      ))}
-    </section>
-  );
-}
-
 function ImportPanel({ onImport, onRecall }: {
   onImport: (path: string) => Promise<void>;
   onRecall: (query: string) => Promise<void>;
@@ -493,6 +450,8 @@ function App() {
   const [evalRunning, setEvalRunning] = useState(false);
   const [evalProgress, setEvalProgress] = useState<string | undefined>(undefined);
   const [evalError, setEvalError] = useState<string | undefined>(undefined);
+  // Context-budget chat-pane takeover (recreates the TUI /context view)
+  const [contextViewActive, setContextViewActive] = useState(false);
   // Layer 3 chat-pane takeover
   const [evalRunActive, setEvalRunActive] = useState(false);
   const [evalRunTitle, setEvalRunTitle] = useState('');
@@ -720,13 +679,17 @@ function App() {
     }
   };
 
-  // Escape returns to the regular chat from the eval takeover (the run continues server-side).
+  // Escape returns to the regular chat from a takeover (an eval run continues server-side).
   useEffect(() => {
-    if (!evalRunActive) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setEvalRunActive(false); };
+    if (!evalRunActive && !contextViewActive) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      setEvalRunActive(false);
+      setContextViewActive(false);
+    };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [evalRunActive]);
+  }, [evalRunActive, contextViewActive]);
 
   const activePanelView = useMemo(() => {
     if (!state) return null;
@@ -766,12 +729,8 @@ function App() {
         setRewindCandidates(result.candidates);
       }} />;
     }
-    return <ContextPanel
-      files={state.contextFiles}
-      onAdd={async (path) => setState(await api<AppState>('/api/context/add', { method: 'POST', body: JSON.stringify({ path }) }))}
-      onRemove={async (path) => setState(await api<AppState>('/api/context/remove', { method: 'POST', body: JSON.stringify({ path }) }))}
-      onClear={async () => setState(await api<AppState>('/api/context/clear', { method: 'POST' }))}
-    />;
+    // 'context' is rendered as a chat-pane takeover (see ContextView), not in the right rail.
+    return null;
   }, [activePanel, state, status.selectedModel, approval, evalHistory, evalRunning, evalProgress, evalError]);
 
   return (
@@ -785,11 +744,22 @@ function App() {
           </div>
         </div>
         <nav>
-          {(['context', 'models', 'memory', 'rewind', 'eval', 'settings'] as const).map((panel) => (
-            <button key={panel} className={activePanel === panel ? 'active' : ''} onClick={() => setActivePanel(panel)}>
-              {panel}
-            </button>
-          ))}
+          {(['context', 'models', 'memory', 'rewind', 'eval', 'settings'] as const).map((panel) => {
+            const isContext = panel === 'context';
+            const active = isContext ? contextViewActive : (!contextViewActive && activePanel === panel);
+            return (
+              <button
+                key={panel}
+                className={active ? 'active' : ''}
+                onClick={() => {
+                  if (isContext) { setContextViewActive((v) => !v); }
+                  else { setActivePanel(panel); setContextViewActive(false); }
+                }}
+              >
+                {panel}
+              </button>
+            );
+          })}
         </nav>
         {state?.health && state.health.entries.length > 0 && (
           <div className="healthLights">
@@ -809,7 +779,7 @@ function App() {
         </div>
       </aside>
 
-      <section className={evalRunActive ? 'chatPane chatPaneTakeover' : 'chatPane'}>
+      <section className={evalRunActive || contextViewActive ? 'chatPane chatPaneTakeover' : 'chatPane'}>
         {evalRunActive ? (
           <EvalRunView
             title={evalRunTitle}
@@ -818,6 +788,17 @@ function App() {
             error={evalError}
             summary={evalRunSummary}
             onClose={() => setEvalRunActive(false)}
+          />
+        ) : contextViewActive ? (
+          <ContextView
+            breakdown={status.contextBreakdown}
+            window={status.contextWindow}
+            files={state?.contextFiles ?? []}
+            onAdd={async (path) => setState(await api<AppState>('/api/context/add', { method: 'POST', body: JSON.stringify({ path }) }))}
+            onRemove={async (path) => setState(await api<AppState>('/api/context/remove', { method: 'POST', body: JSON.stringify({ path }) }))}
+            onClear={async () => setState(await api<AppState>('/api/context/clear', { method: 'POST' }))}
+            onSearch={async (q) => (await api<{ files: string[] }>(`/api/files?q=${encodeURIComponent(q)}`)).files}
+            onClose={() => setContextViewActive(false)}
           />
         ) : (
         <>

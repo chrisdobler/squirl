@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import { execSync } from 'child_process';
 import { estimateTokens } from '../context/token-estimator.js';
+import { computeContextDiscs, type DiscKind } from '../context/context-discs.js';
 import { buildSystemPrompt } from '../context/system-prompt.js';
 import { getModelConfig } from '../model-config.js';
 import { platform } from 'os';
@@ -178,23 +179,18 @@ export const ContextPicker: React.FC<ContextPickerProps> = ({
   const gridWidth = 10;
   const rows = 10;
   const totalDiscs = gridWidth * rows;
-  const tokensPerDisc = contextWindow / totalDiscs;
 
-  const systemDiscs = Math.max(systemTokens > 0 ? 1 : 0, Math.round(systemTokens / tokensPerDisc));
-  const filesDiscs = Math.max(filesTokens > 0 ? 1 : 0, Math.round(filesTokens / tokensPerDisc));
-  const messagesDiscs = Math.max(messagesTokens > 0 ? 1 : 0, Math.round(messagesTokens / tokensPerDisc));
-  const usedDiscs = systemDiscs + filesDiscs + messagesDiscs;
-  const availableDiscs = Math.max(0, totalDiscs - usedDiscs);
-
-  const discChars: Array<{ char: string; color: string }> = [];
-  for (let i = 0; i < systemDiscs; i++) discChars.push({ char: '■', color: 'blue' });
-  for (let i = 0; i < filesDiscs; i++) discChars.push({ char: '■', color: 'yellow' });
-  for (let i = 0; i < messagesDiscs; i++) discChars.push({ char: '■', color: 'green' });
-  for (let i = 0; i < availableDiscs; i++) discChars.push({ char: '□', color: 'gray' });
-
-  // Trim or pad to totalDiscs
-  while (discChars.length > totalDiscs) discChars.pop();
-  while (discChars.length < totalDiscs) discChars.push({ char: '□', color: 'gray' });
+  const DISC_STYLE: Record<DiscKind, { char: string; color: string }> = {
+    system: { char: '■', color: 'blue' },
+    files: { char: '■', color: 'yellow' },
+    messages: { char: '■', color: 'green' },
+    available: { char: '□', color: 'gray' },
+  };
+  const discChars = computeContextDiscs(
+    { system: systemTokens, files: filesTokens, messages: messagesTokens },
+    contextWindow,
+    totalDiscs,
+  ).map((kind) => DISC_STYLE[kind]);
 
   const gridRows: React.ReactNode[] = [];
   for (let r = 0; r < rows; r++) {
