@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import type { HistoryEntry, EvalRunRequest } from './types.js';
+import type { UiStateV1 } from './ui-state.js';
 
 // A metric is a 0..1 line on the trend chart. `get` returns null when the entry lacks the metric.
 interface MetricLine {
@@ -83,9 +84,11 @@ export interface EvalDashboardProps {
   onRefresh: () => void;
   onRun: (req: EvalRunRequest) => void;
   onToggleMonitor: (enabled: boolean) => void;
+  initialState: UiStateV1['eval'];
+  onStateChange: (state: UiStateV1['eval']) => void;
 }
 
-export function EvalDashboard({ history, running, progress, error, monitorEnabled, onRefresh, onRun, onToggleMonitor }: EvalDashboardProps) {
+export function EvalDashboard({ history, running, progress, error, monitorEnabled, onRefresh, onRun, onToggleMonitor, initialState, onStateChange }: EvalDashboardProps) {
   // Group into comparable series; default to the series of the most recent run.
   const series = useMemo(() => {
     const groups = new Map<string, HistoryEntry[]>();
@@ -98,7 +101,7 @@ export function EvalDashboard({ history, running, progress, error, monitorEnable
 
   const seriesKeys = [...series.keys()];
   const defaultKey = history.length ? seriesKeyOf(history[history.length - 1]!) : '';
-  const [selectedKey, setSelectedKey] = useState<string>(defaultKey);
+  const [selectedKey, setSelectedKey] = useState<string>(initialState.selectedKey || defaultKey);
   const activeKey = series.has(selectedKey) ? selectedKey : defaultKey;
   const entries = useMemo(() => {
     const list = (series.get(activeKey) ?? []).slice();
@@ -106,16 +109,20 @@ export function EvalDashboard({ history, running, progress, error, monitorEnable
     return list;
   }, [series, activeKey]);
 
-  const [hidden, setHidden] = useState<Set<string>>(new Set());
+  const [hidden, setHidden] = useState<Set<string>>(new Set(initialState.hiddenMetrics));
   const toggle = (key: string) => setHidden((prev) => {
     const next = new Set(prev);
     next.has(key) ? next.delete(key) : next.add(key);
     return next;
   });
 
-  const [layer, setLayer] = useState<1 | 2 | 3>(1);
-  const [mode, setMode] = useState<'frozen' | 'live'>('frozen');
-  const [label, setLabel] = useState('');
+  const [layer, setLayer] = useState<1 | 2 | 3>(initialState.layer);
+  const [mode, setMode] = useState<'frozen' | 'live'>(initialState.mode);
+  const [label, setLabel] = useState(initialState.label);
+
+  React.useEffect(() => {
+    onStateChange({ selectedKey: history.length ? activeKey : selectedKey, hiddenMetrics: [...hidden], layer, mode, label });
+  }, [activeKey, selectedKey, hidden, layer, mode, label, history.length, onStateChange]);
 
   const presentLines = METRIC_LINES.filter((m) => entries.some((e) => m.get(e) !== null));
 

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { DiscKind } from '../context/context-discs.js';
 import type { ContextFileSummary, ContextSnapshot, ContextSnapshotDisc, ContextSnapshotSection } from './types.js';
+import type { UiStateV1 } from './ui-state.js';
 
 export interface ContextViewProps {
   breakdown: { system: number; files: number; messages: number };
@@ -12,6 +13,8 @@ export interface ContextViewProps {
   onSearch: (query: string) => Promise<string[]>;
   onLoadSnapshot: () => Promise<ContextSnapshot | null>;
   onClose: () => void;
+  initialState: UiStateV1['context'];
+  onStateChange: (state: UiStateV1['context']) => void;
 }
 
 function fmt(n: number): string {
@@ -45,10 +48,10 @@ function MetadataContent({ section, active }: { section: ContextSnapshotSection;
   return <>{metadata.slice(0, start)}<mark>{metadata.slice(start, end)}</mark>{metadata.slice(end)}</>;
 }
 
-export function ContextView({ breakdown, window, files, onAdd, onRemove, onClear, onSearch, onLoadSnapshot, onClose }: ContextViewProps) {
-  const [query, setQuery] = useState('');
+export function ContextView({ breakdown, window, files, onAdd, onRemove, onClear, onSearch, onLoadSnapshot, onClose, initialState, onStateChange }: ContextViewProps) {
+  const [query, setQuery] = useState(initialState.query);
   const [results, setResults] = useState<string[]>([]);
-  const [mode, setMode] = useState<'explorer' | 'files'>('explorer');
+  const [mode, setMode] = useState<'explorer' | 'files'>(initialState.mode);
   const [snapshot, setSnapshot] = useState<ContextSnapshot | null>(null);
   const [snapshotLoaded, setSnapshotLoaded] = useState(false);
   const [activeDisc, setActiveDisc] = useState<ContextSnapshotDisc | null>(null);
@@ -65,6 +68,15 @@ export function ContextView({ breakdown, window, files, onAdd, onRemove, onClear
     });
     return () => { cancelled = true; };
   }, [onLoadSnapshot]);
+
+  useEffect(() => {
+    if (!snapshot || initialState.activeDiscIndex == null) return;
+    setActiveDisc(snapshot.discs.find((disc) => disc.index === initialState.activeDiscIndex) ?? null);
+  }, [snapshot, initialState.activeDiscIndex]);
+
+  useEffect(() => {
+    onStateChange({ mode, query, activeDiscIndex: activeDisc?.index ?? null });
+  }, [mode, query, activeDisc?.index, onStateChange]);
 
   useEffect(() => {
     let cancelled = false;

@@ -7,6 +7,8 @@ import { SquirlRuntime } from './runtime.js';
 import type { ChatEvent, EvalEvent, EvalRunRequest } from './types.js';
 import type { AgentKind } from '../agents/types.js';
 import type { EffortLevel } from '../types.js';
+import type { UiStatePatch } from './ui-state.js';
+import { UiStateStore } from './ui-state-store.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
@@ -25,6 +27,7 @@ export interface SquirlServerOptions {
   host?: string;
   workingDir?: string;
   staticDir?: string;
+  uiStatePath?: string;
 }
 
 function readBody(req: IncomingMessage): Promise<unknown> {
@@ -52,7 +55,7 @@ function sendJson(res: ServerResponse, status: number, data: unknown): void {
     'Content-Type': 'application/json; charset=utf-8',
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Access-Control-Allow-Methods': 'GET,POST,PATCH,OPTIONS',
   });
   res.end(JSON.stringify(data));
 }
@@ -72,7 +75,7 @@ function createEventWriter<T = ChatEvent>(res: ServerResponse): (event: T) => vo
     Connection: 'keep-alive',
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Access-Control-Allow-Methods': 'GET,POST,PATCH,OPTIONS',
   });
   return (event) => {
     res.write(`${JSON.stringify(event)}\n`);
@@ -103,6 +106,7 @@ function serveStatic(res: ServerResponse, staticDir: string, pathname: string): 
 
 export function createSquirlServer(options: SquirlServerOptions = {}) {
   const runtime = new SquirlRuntime(options.workingDir ?? process.cwd());
+  const uiState = new UiStateStore(options.uiStatePath);
   const staticDir = options.staticDir ?? resolve(__dirname, '../../dist-web');
 
   const server = createServer(async (req, res) => {
@@ -113,7 +117,7 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
         res.writeHead(204, {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Headers': 'Content-Type',
-          'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+          'Access-Control-Allow-Methods': 'GET,POST,PATCH,OPTIONS',
         });
         res.end();
         return;
@@ -121,6 +125,17 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
 
       if (url.pathname === '/api/state' && req.method === 'GET') {
         sendJson(res, 200, runtime.getState());
+        return;
+      }
+
+      if (url.pathname === '/api/ui-state' && req.method === 'GET') {
+        sendJson(res, 200, uiState.load());
+        return;
+      }
+
+      if (url.pathname === '/api/ui-state' && req.method === 'PATCH') {
+        const body = await readBody(req);
+        sendJson(res, 200, uiState.patch(body as UiStatePatch));
         return;
       }
 

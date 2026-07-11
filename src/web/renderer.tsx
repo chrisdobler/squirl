@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { SquirlConfig } from '../config.js';
 import type { SelectedModel } from '../components/ModelPicker.js';
@@ -16,6 +16,7 @@ import { parseMemoryLookup } from './memory-lookup.js';
 import { restoredChatScrollTop, type ChatViewportSnapshot } from './chat-viewport.js';
 import { groupMessageTurns } from '../tool-activity.js';
 import { ToolActivityView } from './ToolActivityView.js';
+import { defaultUiState, type UiStatePatch, type UiStateV1 } from './ui-state.js';
 import './styles.css';
 
 const PARTICIPANT_CSS_COLOR: Record<ParticipantColor, string> = {
@@ -272,13 +273,15 @@ function SettingsPanel({
   );
 }
 
-function ModelPanel({ current, onSelect, onDetect }: {
+function ModelPanel({ current, onSelect, onDetect, initialState, onStateChange }: {
   current: SelectedModel;
   onSelect: (model: SelectedModel) => Promise<void>;
   onDetect: (url: string) => Promise<void>;
+  initialState: UiStateV1['model']; onStateChange: (state: UiStateV1['model']) => void;
 }) {
-  const [localUrl, setLocalUrl] = useState(current.provider === 'local' ? current.baseUrl ?? 'http://localhost:8000/v1' : 'http://localhost:8000/v1');
-  const [manualModel, setManualModel] = useState('');
+  const [localUrl, setLocalUrl] = useState(initialState.localUrl || (current.provider === 'local' ? current.baseUrl ?? 'http://localhost:8000/v1' : 'http://localhost:8000/v1'));
+  const [manualModel, setManualModel] = useState(initialState.manualModel);
+  useEffect(() => onStateChange({ localUrl, manualModel }), [localUrl, manualModel, onStateChange]);
 
   return (
     <section className="panel">
@@ -326,12 +329,14 @@ function ModelPanel({ current, onSelect, onDetect }: {
   );
 }
 
-function ImportPanel({ onImport, onRecall }: {
+function ImportPanel({ onImport, onRecall, initialState, onStateChange }: {
   onImport: (path: string) => Promise<void>;
   onRecall: (query: string) => Promise<void>;
+  initialState: UiStateV1['memory']; onStateChange: (state: UiStateV1['memory']) => void;
 }) {
-  const [path, setPath] = useState('');
-  const [query, setQuery] = useState('');
+  const [path, setPath] = useState(initialState.importPath);
+  const [query, setQuery] = useState(initialState.recallQuery);
+  useEffect(() => onStateChange({ importPath: path, recallQuery: query }), [path, query, onStateChange]);
 
   const pickPath = async () => {
     const selected = await window.squirlDesktop?.selectPath({ directories: true });
@@ -449,20 +454,22 @@ function DirectoryPicker({ initialPath, workspacePath, onChoose, onClose }: {
   </div>;
 }
 
-function AgentPanel({ participants, defaultCwd, onAdd, onStop }: {
+function AgentPanel({ participants, defaultCwd, onAdd, onStop, initialState, onStateChange }: {
   participants: Participant[];
   defaultCwd: string;
   onAdd: (kind: AgentKind, options: { id?: string; model?: string; effort?: EffortLevel; cwd?: string }) => Promise<void>;
   onStop: (id: string) => Promise<void>;
+  initialState: UiStateV1['agent']; onStateChange: (state: UiStateV1['agent']) => void;
 }) {
-  const [kind, setKind] = useState<AgentKind>('claude-code');
-  const [id, setId] = useState('');
-  const [model, setModel] = useState('');
-  const [effort, setEffort] = useState<EffortLevel | ''>('');
-  const [cwd, setCwd] = useState(defaultCwd);
+  const [kind, setKind] = useState<AgentKind>(initialState.kind);
+  const [id, setId] = useState(initialState.id);
+  const [model, setModel] = useState(initialState.model);
+  const [effort, setEffort] = useState<EffortLevel | ''>(initialState.effort);
+  const [cwd, setCwd] = useState(initialState.cwd || defaultCwd);
   const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const agents = participants.filter((participant) => participant.kind === 'claude-code' || participant.kind === 'codex');
+  useEffect(() => onStateChange({ kind, id, model, effort, cwd }), [kind, id, model, effort, cwd, onStateChange]);
 
   const add = async () => {
     setAdding(true);
@@ -656,11 +663,8 @@ function RoomRosterDropdown({ participants, onClose, onRename }: {
 }
 
 function App() {
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    const saved = window.localStorage.getItem('squirl-theme');
-    if (saved === 'light' || saved === 'dark') return saved;
-    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-  });
+  const [uiState, setUiState] = useState<UiStateV1 | null>(null);
+  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
   const [state, setState] = useState<AppState | null>(null);
   const [input, setInput] = useState('');
   const [activeSurface, setActiveSurface] = useState<CommandSurface | null>(null);
@@ -693,10 +697,24 @@ function App() {
   const stickToBottomRef = useRef(true);
   const didInitialScrollRef = useRef(false);
   const profilePromptedRef = useRef(false);
+  const uiStateRef = useRef<UiStateV1 | null>(null);
   const [isAtLatest, setIsAtLatest] = useState(true);
   const chatVisible = !activeSurface && !evalRunActive;
   const finishActiveSurface = () => setActiveSurface(null);
   const finishEvalRun = () => setEvalRunActive(false);
+  const updateUiState = useCallback((patch: UiStatePatch) => {
+    setUiState((current) => current ? {
+      ...current, ...patch,
+      chat: { ...current.chat, ...patch.chat }, context: { ...current.context, ...patch.context },
+      eval: { ...current.eval, ...patch.eval }, memory: { ...current.memory, ...patch.memory },
+      model: { ...current.model, ...patch.model }, agent: { ...current.agent, ...patch.agent },
+    } : current);
+  }, []);
+  const updateContextState = useCallback((next: UiStateV1['context']) => updateUiState({ context: next }), [updateUiState]);
+  const updateEvalState = useCallback((next: UiStateV1['eval']) => updateUiState({ eval: next }), [updateUiState]);
+  const updateMemoryState = useCallback((next: UiStateV1['memory']) => updateUiState({ memory: next }), [updateUiState]);
+  const updateModelState = useCallback((next: UiStateV1['model']) => updateUiState({ model: next }), [updateUiState]);
+  const updateAgentState = useCallback((next: UiStateV1['agent']) => updateUiState({ agent: next }), [updateUiState]);
 
   async function startRewindMode() {
     if (status.isStreaming) {
@@ -744,16 +762,36 @@ function App() {
   };
 
   useEffect(() => {
-    if (!state || state.config.userProfile?.onboardingComplete || profilePromptedRef.current) return;
+    if (!state || !uiState || state.config.userProfile?.onboardingComplete || profilePromptedRef.current) return;
     profilePromptedRef.current = true;
     openCommandSurface('settings');
-  }, [state]);
+  }, [state, uiState]);
 
   useEffect(() => {
-    window.localStorage.setItem('squirl-theme', theme);
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
   }, [theme]);
+
+  useEffect(() => {
+    if (!uiState) return;
+    const next = { ...uiState, activeSurface, theme, chat: { ...uiState.chat, draft: input, recipientId, showThinking } };
+    uiStateRef.current = next;
+    const timeout = window.setTimeout(() => {
+      void api<UiStateV1>('/api/ui-state', { method: 'PATCH', body: JSON.stringify(next) }).catch(() => undefined);
+    }, 250);
+    return () => window.clearTimeout(timeout);
+  }, [uiState, activeSurface, theme, input, recipientId, showThinking]);
+
+  useEffect(() => {
+    const flush = () => {
+      if (!uiStateRef.current) return;
+      void fetch(`${API_BASE}/api/ui-state`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(uiStateRef.current), keepalive: true });
+    };
+    const visibility = () => { if (document.visibilityState === 'hidden') flush(); };
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', visibility);
+    return () => { window.removeEventListener('pagehide', flush); document.removeEventListener('visibilitychange', visibility); };
+  }, []);
 
   const status = state?.status ?? defaultStatus();
   const messages = state?.messages ?? [];
@@ -770,7 +808,17 @@ function App() {
     setState(await api<AppState>('/api/state'));
   };
 
-  useEffect(() => { void loadState(); }, []);
+  useEffect(() => {
+    void Promise.all([loadState(), api<UiStateV1>('/api/ui-state')]).then(([, restored]) => {
+      setUiState(restored);
+      setTheme(restored.theme);
+      setInput(restored.chat.draft);
+      setActiveSurface(restored.activeSurface);
+      setRecipientId(restored.chat.recipientId);
+      setShowThinking(restored.chat.showThinking);
+      savedChatScrollRef.current = restored.chat.viewport;
+    }).catch(() => setUiState(defaultUiState()));
+  }, []);
   useEffect(() => {
     if (status.isStreaming) return;
     const interval = window.setInterval(() => {
@@ -847,6 +895,12 @@ function App() {
     const atLatest = distanceFromBottom < 32;
     stickToBottomRef.current = atLatest;
     setIsAtLatest(atLatest);
+    const listRect = list.getBoundingClientRect();
+    const anchor = Array.from(list.querySelectorAll<HTMLElement>('.message[id^="message-"]')).find((element) => element.getBoundingClientRect().bottom > listRect.top);
+    updateUiState({ chat: { viewport: {
+      scrollTop: list.scrollTop, atLatest,
+      ...(anchor ? { anchorMessageId: anchor.id.slice('message-'.length), anchorOffset: anchor.getBoundingClientRect().top - listRect.top } : {}),
+    } } });
   };
 
   const pushToast = (message: string) => {
@@ -1066,12 +1120,16 @@ function App() {
           ...state.config,
           eval: { ...state.config.eval, monitor: { ...state.config.eval?.monitor, enabled } },
         })}
+        initialState={uiState?.eval ?? defaultUiState().eval}
+        onStateChange={updateEvalState}
       />;
     }
     if (activeSurface === 'settings') return <SettingsWizard state={state} onSave={saveConfig} onClose={closeActiveSurface} onSaved={finishActiveSurface} onDetectLocal={detectLocal} />;
-    if (activeSurface === 'model') return <ModelPanel current={status.selectedModel} onSelect={selectModel} onDetect={detectLocal} />;
+    if (activeSurface === 'model') return <ModelPanel current={status.selectedModel} onSelect={selectModel} onDetect={detectLocal} initialState={uiState?.model ?? defaultUiState().model} onStateChange={updateModelState} />;
     if (activeSurface === 'memory') {
       return <ImportPanel
+        initialState={uiState?.memory ?? defaultUiState().memory}
+        onStateChange={updateMemoryState}
         onImport={async (path) => {
           const result = await api<{ count: number }>('/api/import', { method: 'POST', body: JSON.stringify({ source: 'chatgpt', path }) });
           pushToast(`Imported ${result.count} turns.`);
@@ -1084,12 +1142,12 @@ function App() {
       />;
     }
     // 'context' is rendered as a chat-pane takeover (see ContextView), not in the right rail.
-    if (activeSurface === 'agent') return <AgentPanel participants={participants} defaultCwd={state.status.workingDir} onAdd={addAgent} onStop={stopAgent}/>;
+    if (activeSurface === 'agent') return <AgentPanel participants={participants} defaultCwd={state.status.workingDir} onAdd={addAgent} onStop={stopAgent} initialState={uiState?.agent ?? defaultUiState().agent} onStateChange={updateAgentState}/>;
     if (activeSurface === 'room') return <div className="roomSurface"><h3>Participants</h3>{roomMembers(participants).map((p) => <div className="rosterRow" key={p.id}><span className="rosterDot" style={{ background: PARTICIPANT_CSS_COLOR[p.color] }}/><strong>{p.label}</strong><code>{p.kind === 'user' || p.kind === 'local-llm' ? 'local' : `@${p.id}`}</code><span>{p.status ?? 'ready'}</span></div>)}</div>;
     if (activeSurface === 'system') return <pre className="systemPromptView">{systemPrompt}</pre>;
     if (activeSurface === 'help') return <div className="helpGrid">{state.commands.map((command) => <button key={command.name} onClick={() => { const surface = resolveCommandSurface(command); if (surface) openCommandSurface(surface); }}><code>{command.usage}</code><span>{command.description}</span></button>)}</div>;
     return null;
-  }, [activeSurface, state, status.selectedModel, approval, evalHistory, evalRunning, evalProgress, evalError, participants, systemPrompt, recipientId]);
+  }, [activeSurface, state, status.selectedModel, approval, evalHistory, evalRunning, evalProgress, evalError, participants, systemPrompt, recipientId, uiState, updateEvalState, updateMemoryState, updateModelState, updateAgentState]);
 
   const paletteMatches = useMemo(() => {
     const needle = input.slice(1).toLowerCase();
@@ -1163,6 +1221,8 @@ function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [rewindCandidates, rewindConfirming, selectedRewindCandidate]);
 
+  if (!state || !uiState) return <main className="appShell" data-theme={theme}><div className="emptyState"><h2>Loading Squirl…</h2></div></main>;
+
   return (
     <main className="appShell" data-theme={theme}>
       <aside className="leftRail">
@@ -1222,6 +1282,8 @@ function App() {
             onSearch={async (q) => (await api<{ files: string[] }>(`/api/files?q=${encodeURIComponent(q)}`)).files}
             onLoadSnapshot={async () => (await api<{ snapshot: import('./types.js').ContextSnapshot | null }>('/api/context/snapshot')).snapshot}
             onClose={closeActiveSurface}
+            initialState={uiState?.context ?? defaultUiState().context}
+            onStateChange={updateContextState}
           />
         ) : activeSurface ? (
           <SurfaceFrame title={activeSurface} onClose={closeActiveSurface}>
