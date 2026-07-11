@@ -8,6 +8,16 @@ import { getModelConfig } from '../model-config.js';
 import { platform } from 'os';
 import type { Orchestrator } from '../orchestrator.js';
 import type { Message } from '../types.js';
+import type { ContextSnapshotDisc } from '../context/context-snapshot.js';
+
+function ExplorerLine({ text, start, active }: { text: string; start: number; active: ContextSnapshotDisc | undefined }) {
+  if (!active || active.start == null || active.end == null || active.end <= start || active.start >= start + text.length) {
+    return <Text wrap="truncate-end">{text || ' '}</Text>;
+  }
+  const from = Math.max(0, active.start - start);
+  const to = Math.min(text.length, active.end - start);
+  return <Text wrap="truncate-end">{text.slice(0, from)}<Text backgroundColor="yellow" color="black">{text.slice(from, to) || ' '}</Text>{text.slice(to)}</Text>;
+}
 
 interface ContextPickerProps {
   orchestrator: Orchestrator;
@@ -38,10 +48,25 @@ export const ContextPicker: React.FC<ContextPickerProps> = ({
   const [query, setQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [section, setSection] = useState<'context' | 'search'>('context');
+  const [mode, setMode] = useState<'explorer' | 'files'>('explorer');
+  const [selectedDisc, setSelectedDisc] = useState(0);
+  const [documentScroll, setDocumentScroll] = useState(0);
 
   // Get context files from orchestrator
   const contextFiles = orchestrator.getContextFiles();
   const contextEntries = useMemo(() => Array.from(contextFiles.entries()), [contextFiles]);
+  const snapshot = orchestrator.getContextSnapshot(messages, { id: modelId, label: modelId, provider: 'local', contextWindow });
+  const documentLines = snapshot?.renderedDocument.split('\n') ?? [];
+  const documentLineStarts = useMemo(() => {
+    let offset = 0;
+    return documentLines.map((line) => {
+      const start = offset;
+      offset += line.length + 1;
+      return start;
+    });
+  }, [snapshot?.renderedDocument]);
+  const documentRows = Math.max(5, (stdout.rows ?? 30) - 22);
+  const usedDiscCount = snapshot?.discs.filter((disc) => disc.start != null).length ?? 0;
 
   // Git-tracked files
   const gitFiles = useMemo(() => {
@@ -103,6 +128,28 @@ export const ContextPicker: React.FC<ContextPickerProps> = ({
   useInput((input, key) => {
     if (key.escape) {
       onClose();
+      return;
+    }
+
+    if (input === 'e') {
+      setMode((current) => current === 'explorer' ? 'files' : 'explorer');
+      return;
+    }
+
+    if (mode === 'explorer') {
+      if (key.leftArrow) setSelectedDisc((current) => Math.max(0, current - 1));
+      else if (key.rightArrow) setSelectedDisc((current) => Math.min(Math.max(0, usedDiscCount - 1), current + 1));
+      else if (key.upArrow) setSelectedDisc((current) => Math.max(0, current - 10));
+      else if (key.downArrow) setSelectedDisc((current) => Math.min(Math.max(0, usedDiscCount - 1), current + 10));
+      else if (key.return && snapshot?.discs[selectedDisc]?.start != null) {
+        const offset = snapshot.discs[selectedDisc]!.start!;
+        const targetLine = snapshot.renderedDocument.slice(0, offset).split('\n').length - 1;
+        setDocumentScroll(Math.max(0, targetLine - 1));
+      } else if (key.pageUp || input === 'k') {
+        setDocumentScroll((current) => Math.max(0, current - documentRows));
+      } else if (key.pageDown || input === 'j') {
+        setDocumentScroll((current) => Math.min(Math.max(0, documentLines.length - documentRows), current + documentRows));
+      }
       return;
     }
 
@@ -186,11 +233,14 @@ export const ContextPicker: React.FC<ContextPickerProps> = ({
     messages: { char: '■', color: 'green' },
     available: { char: '□', color: 'gray' },
   };
-  const discChars = computeContextDiscs(
-    { system: systemTokens, files: filesTokens, messages: messagesTokens },
-    contextWindow,
-    totalDiscs,
-  ).map((kind) => DISC_STYLE[kind]);
+  const discKinds = snapshot
+    ? snapshot.discs.map((disc) => disc.kind)
+    : computeContextDiscs(
+      { system: systemTokens, files: filesTokens, messages: messagesTokens },
+      contextWindow,
+      totalDiscs,
+    );
+  const discChars = discKinds.map((kind) => DISC_STYLE[kind]);
 
   const gridRows: React.ReactNode[] = [];
   for (let r = 0; r < rows; r++) {
@@ -201,7 +251,7 @@ export const ContextPicker: React.FC<ContextPickerProps> = ({
       <Box key={`grid-row-${r}`} marginBottom={r < rows - 1 ? 1 : 0}>
         <Text>
           {rowDiscs.map((d, i) => (
-            <Text key={i} color={d.color}>{d.char}{'  '}</Text>
+            <Text key={i} color={d.color} inverse={mode === 'explorer' && start + i === selectedDisc && start + i < usedDiscCount}>{d.char}{'  '}</Text>
           ))}
         </Text>
       </Box>,
@@ -230,6 +280,36 @@ export const ContextPicker: React.FC<ContextPickerProps> = ({
         <Text><Text color="gray">□</Text> available {formatTokenCount(available)}</Text>
       </Box>
 
+      {mode === 'explorer' ? (
+        <Box flexDirection="column" flexGrow={1}>
+          {!snapshot ? (
+            <Box flexDirection="column" paddingY={1}>
+              <Text bold>No context has been sent yet</Text>
+              <Text dimColor>Send a message to capture the exact request supplied to the model.</Text>
+            </Box>
+          ) : (
+            <>
+              <Text dimColor>{snapshot.origin === 'exact' ? 'Exact request' : 'Preview'}  {snapshot.modelId}  ~{formatTokenCount(snapshot.approximateTokens)} tokens  {snapshot.capturedAt}</Text>
+              {snapshot.discs[selectedDisc]?.start != null && (
+                <Text color="cyan">
+                  selected {snapshot.discs[selectedDisc]!.kind}  ~tokens {snapshot.discs[selectedDisc]!.tokenStart}-{snapshot.discs[selectedDisc]!.tokenEnd}
+                </Text>
+              )}
+              <Box flexDirection="column" borderStyle="single" paddingX={1} height={documentRows + 2}>
+                {documentLines.slice(documentScroll, documentScroll + documentRows).map((line, index) => (
+                  <ExplorerLine
+                    key={`${documentScroll}-${index}`}
+                    text={line}
+                    start={documentLineStarts[documentScroll + index] ?? 0}
+                    active={snapshot.discs[selectedDisc]}
+                  />
+                ))}
+              </Box>
+            </>
+          )}
+          <Text dimColor>e files  arrows select dot  enter jump  j/k or pgup/pgdn scroll  esc close</Text>
+        </Box>
+      ) : <>
       {/* Current context */}
       <Box flexDirection="column" paddingBottom={1}>
         <Text bold>Current context:</Text>
@@ -277,9 +357,10 @@ export const ContextPicker: React.FC<ContextPickerProps> = ({
       {/* Help */}
       <Box paddingTop={1}>
         <Text dimColor>
-          tab switch section  ↑↓ navigate  enter add  backspace remove/delete char  esc close
+          e explorer  tab switch section  ↑↓ navigate  enter add  backspace remove/delete char  esc close
         </Text>
       </Box>
+      </>}
     </Box>
   );
 };

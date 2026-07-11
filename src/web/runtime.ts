@@ -1,12 +1,13 @@
 import { EventEmitter } from 'node:events';
 import { homedir, platform } from 'node:os';
 import { existsSync, readdirSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { execSync } from 'node:child_process';
 
 import { Orchestrator } from '../orchestrator.js';
 import { getModelConfig, resolveContextWindow } from '../model-config.js';
 import { buildSystemPrompt } from '../context/system-prompt.js';
+import type { ContextSnapshot } from '../context/context-snapshot.js';
 import { estimateTokens } from '../context/token-estimator.js';
 import { loadConfig, saveConfig, applyConfigToEnv, rememberContextWindow, type SquirlConfig } from '../config.js';
 import { appendMessage, loadHistory, appendImportMessage, getAllHistoryFiles, readEntries, rewindHistoryAfter } from '../history.js';
@@ -30,8 +31,9 @@ import { backfillFromHistory } from '../search/backfill.js';
 import { GroupChatCoordinator } from '../agents/coordinator.js';
 import { LocalSpawnTransport } from '../agents/transport/local-spawn.js';
 import { buildAgentDescriptor } from '../agents/factory.js';
-import { parseMentions } from '../agents/mentions.js';
 import { SQUIRL_PARTICIPANT } from '../agents/participants.js';
+import { materializeProfile, nextAvailableAgentId, profileFromDescriptor, removeAgentProfile, upsertAgentProfile, validateAgentHandle } from '../agents/profiles.js';
+import { parseDelegationIntent, type DelegationAgent } from '../agents/delegation.js';
 import type { AgentEvent, AgentKind, Participant } from '../agents/types.js';
 import type { AddAgentResult, AgentSummary } from '../commands/registry.js';
 import type { SelectedModel } from '../components/ModelPicker.js';
@@ -39,6 +41,7 @@ import type { Message, AssistantMessage } from '../types.js';
 import type { QueryPipelineStatus } from '../pipeline-status.js';
 import type { VectorStore } from '../search/types.js';
 import type { AppState, ChatEvent, ContextFileSummary, ImportRequest, ImportResult, ModelDetectionResult, RuntimeStatus, ToolApprovalRequest } from './types.js';
+import { boundedToolOutput } from '../tool-activity.js';
 
 interface PendingApproval {
   request: ToolApprovalRequest;
@@ -164,6 +167,7 @@ export class SquirlRuntime extends EventEmitter {
   private streamTokens = 0;
   private embedderDisplay = '';
   private pendingApprovals = new Map<string, PendingApproval>();
+  private pendingTools = new Map<string, { messageId: string; input: unknown }>();
   private historySignature = '';
   private configSignature = '';
   private coordinator: GroupChatCoordinator;
@@ -187,8 +191,12 @@ export class SquirlRuntime extends EventEmitter {
       config: { autoHandoff: this.config.agents?.autoHandoff, maxHops: this.config.agents?.maxHops },
       transport: new LocalSpawnTransport(),
       localTurn: (input, emit, signal) => this.runLocalTurn(input, emit, signal),
+      facilitateTurn: (participantId, output, signal) => typeof this.orchestrator.assessFacilitation === 'function'
+        ? this.orchestrator.assessFacilitation(participantId, output, this.messages, this.selectedModel, signal)
+        : Promise.resolve(null),
     });
     this.coordinator.onEvent((event) => this.handleAgentEvent(event));
+    this.syncIdentityContext();
     void this.initializeIndex().then(() => this.refreshHealth());
     void this.hydrateSelectedLocalModel();
     void this.startDefaultAgents();
@@ -203,7 +211,9 @@ export class SquirlRuntime extends EventEmitter {
       messages: this.messages,
       status: this.getStatus(),
       contextFiles: this.getContextFiles(),
-      commands: getCommands().map(({ name, description }) => ({ name, description })),
+      commands: getCommands().map(({ name, description, usage, aliases, surface, argumentTemplate }) => ({
+        name, description, usage, aliases, surface, argumentTemplate,
+      })),
       participants: this.coordinator.listParticipants(),
       health: this.healthReport,
     };
@@ -233,10 +243,24 @@ export class SquirlRuntime extends EventEmitter {
     };
   }
 
+  systemPrompt(): string {
+    const assembled = typeof this.orchestrator.getLastPromptStack === 'function' ? this.orchestrator.getLastPromptStack() : '';
+    if (assembled) return assembled;
+    const config = getModelConfig(this.selectedModel.id);
+    const message = buildSystemPrompt({
+      workingDir: this.workingDir, date: new Date().toISOString().slice(0, 10),
+      modelId: this.selectedModel.id, platform: platform(), shell: process.env.SHELL ?? 'unknown',
+      supportsTools: config.supportsTools, displayName: this.config.userProfile?.displayName,
+      participants: this.coordinator.listParticipants().map(({ id, label, status, specialty }) => ({ id, label, status, specialty })),
+    }, config.systemPromptStyle);
+    return `=== BASE INSTRUCTIONS ===\n${typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)}`;
+  }
+
   async updateConfig(next: SquirlConfig): Promise<AppState> {
     this.config = next;
     applyConfigToEnv(next);
     saveConfig(next);
+    this.syncIdentityContext();
     this.selectedModel = defaultModelFromConfig(next);
     await this.initializeIndex();
     await this.hydrateSelectedLocalModel();
@@ -284,12 +308,32 @@ export class SquirlRuntime extends EventEmitter {
       .slice(0, 200);
   }
 
+  listDirectories(path = this.workingDir): { path: string; parent: string | null; directories: Array<{ name: string; path: string }> } {
+    const target = resolve(this.workingDir, resolveUserPath(path));
+    if (!existsSync(target)) throw new Error(`Directory does not exist: ${target}`);
+    if (!statSync(target).isDirectory()) throw new Error(`Not a directory: ${target}`);
+    const directories = readdirSync(target, { withFileTypes: true })
+      .filter((entry) => {
+        if (entry.name.startsWith('.')) return false;
+        try { return entry.isDirectory() || statSync(join(target, entry.name)).isDirectory(); }
+        catch { return false; }
+      })
+      .map((entry) => ({ name: entry.name, path: join(target, entry.name) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    const parent = dirname(target);
+    return { path: target, parent: parent === target ? null : parent, directories };
+  }
+
   getContextFiles(): ContextFileSummary[] {
     return Array.from(this.orchestrator.getContextFiles().entries()).map(([path, content]) => ({
       path,
       chars: content.length,
       tokens: estimateTokens(content),
     }));
+  }
+
+  getContextSnapshot(): ContextSnapshot | null {
+    return this.orchestrator.getContextSnapshot(this.messages, this.selectedModel);
   }
 
   addContextFile(path: string): AppState {
@@ -400,7 +444,7 @@ export class SquirlRuntime extends EventEmitter {
     }));
   }
 
-  async chat(input: string, emit: (event: ChatEvent) => void): Promise<void> {
+  async chat(input: string, recipientId: string, emit: (event: ChatEvent) => void): Promise<void> {
     const value = input.trim();
     if (!value) return;
     if (this.isStreaming) throw new Error('A message is already streaming.');
@@ -423,8 +467,10 @@ export class SquirlRuntime extends EventEmitter {
         commandInput: value,
         requestRewind: (request) => { void this.rewind(request).then((state) => emit({ type: 'state', state })).catch((err) => emit({ type: 'error', message: err instanceof Error ? err.message : String(err) })); },
         openRewindPicker: () => emit({ type: 'toast', level: 'info', message: 'Open the Rewind panel to choose a visual target.' }),
+        openCommandSurface: (surface) => emit({ type: 'open-command', surface }),
         addAgent: (kind, opts) => this.addAgent(kind, opts),
         stopAgent: (id) => this.stopAgent(id),
+        renameAgent: (id, name) => this.renameAgent(id, name),
         listAgents: () => this.listAgents(),
       });
       emit({ type: 'state', state: this.getState() });
@@ -432,6 +478,18 @@ export class SquirlRuntime extends EventEmitter {
     }
 
     await this.refreshSharedStateAsync();
+    const delegationAgents = new Map<string, DelegationAgent>();
+    for (const profile of this.config.agents?.defaults ?? []) {
+      if (!profile.id) continue;
+      delegationAgents.set(profile.id, { id: profile.id, label: profile.label, kind: profile.kind, connected: this.coordinator.hasAgent(profile.id) });
+    }
+    for (const participant of this.coordinator.listParticipants()) {
+      if (participant.kind !== 'claude-code' && participant.kind !== 'codex') continue;
+      delegationAgents.set(participant.id, { id: participant.id, label: participant.label, kind: participant.kind, connected: this.coordinator.hasAgent(participant.id) });
+    }
+    const delegation = recipientId === SQUIRL_PARTICIPANT.id
+      ? parseDelegationIntent(value, [...delegationAgents.values()])
+      : null;
     this.isStreaming = true;
     this.tokensPerSecond = 0;
     this.streamStart = Date.now();
@@ -440,20 +498,56 @@ export class SquirlRuntime extends EventEmitter {
     emit({ type: 'status', status: this.getStatus() });
 
     try {
-      // Group-chat routing: if the input @mentions a connected agent, route through the coordinator.
-      const agentIds = this.coordinator.listParticipants()
-        .filter((p) => p.kind !== 'user' && p.kind !== 'local-llm')
-        .map((p) => p.id);
-      const mention = agentIds.length ? parseMentions(value, [SQUIRL_PARTICIPANT.id, ...agentIds]) : null;
-      if (mention && mention.targets.some((id) => agentIds.includes(id))) {
-        const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: value };
+      if (delegation) {
+        const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: value, participantId: SQUIRL_PARTICIPANT.id };
+        this.messages = [...this.messages, userMsg];
+        appendMessage(userMsg);
+        this.historySignature = historySignature();
+        emit({ type: 'message', message: userMsg });
+        for (const id of delegation.unavailableTargetIds) {
+          emit({ type: 'toast', level: 'error', message: `Agent @${id} is not connected. Open Agents and connect it before delegating work.` });
+        }
+        this.activeEmit = emit;
+        try {
+          for (const targetId of delegation.targetIds) {
+            if (this.abortController.signal.aborted) break;
+            const participant = this.coordinator.listParticipants().find((item) => item.id === targetId);
+            if (!participant) continue;
+            const handoff = await this.orchestrator.prepareHandoff(
+              { id: participant.id, label: participant.label, specialty: participant.specialty },
+              delegation.originalRequest,
+              delegation.task,
+              this.messages,
+              this.selectedModel,
+              this.abortController.signal,
+              (stage) => { this.pipelineStatus = { stage }; emit({ type: 'status', status: this.getStatus() }); },
+            );
+            const messageId = crypto.randomUUID();
+            this.handleAgentEvent({ type: 'message-start', participantId: SQUIRL_PARTICIPANT.id, messageId, responseMeta: { model: this.selectedModel.id } });
+            this.handleAgentEvent({ type: 'token', participantId: SQUIRL_PARTICIPANT.id, messageId, token: handoff });
+            this.handleAgentEvent({ type: 'message-end', participantId: SQUIRL_PARTICIPANT.id, messageId, content: handoff });
+            try {
+              await this.coordinator.dispatchTo(targetId, handoff, this.abortController.signal);
+            } catch (error) {
+              emit({ type: 'toast', level: 'error', message: `Could not delegate to @${targetId}: ${error instanceof Error ? error.message : String(error)}` });
+            }
+          }
+        } finally {
+          this.activeEmit = null;
+        }
+        return;
+      }
+
+      if (recipientId !== SQUIRL_PARTICIPANT.id) {
+        if (!this.coordinator.hasAgent(recipientId)) throw new Error(`No such agent: ${recipientId}`);
+        const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: value, participantId: recipientId };
         this.messages = [...this.messages, userMsg];
         appendMessage(userMsg);
         this.historySignature = historySignature();
         emit({ type: 'message', message: userMsg });
         this.activeEmit = emit;
         try {
-          await this.coordinator.dispatch(value, this.abortController.signal);
+          await this.coordinator.dispatchTo(recipientId, value, this.abortController.signal);
         } finally {
           this.activeEmit = null;
         }
@@ -467,6 +561,8 @@ export class SquirlRuntime extends EventEmitter {
         this.selectedModel,
         {
           onNewMessage: (message) => {
+            if (message.role === 'user') message = { ...message, participantId: SQUIRL_PARTICIPANT.id };
+            if (message.role === 'assistant') message = { ...message, responseMeta: { model: this.selectedModel.id } };
             this.messages = [...this.messages, message];
             if (message.role !== 'assistant') {
               appendMessage(message);
@@ -480,8 +576,9 @@ export class SquirlRuntime extends EventEmitter {
             if (elapsed > 0.5) this.tokensPerSecond = Math.round(this.streamTokens / elapsed);
             const last = this.messages[this.messages.length - 1];
             if (last?.role === 'assistant' && last.isStreaming && last.id === assistant.id) {
-              this.messages = [...this.messages.slice(0, -1), assistant];
-              emit({ type: 'assistant-update', message: assistant });
+              const updated = { ...assistant, responseMeta: last.responseMeta };
+              this.messages = [...this.messages.slice(0, -1), updated];
+              emit({ type: 'assistant-update', message: updated });
             }
             emit({ type: 'status', status: this.getStatus() });
           },
@@ -532,10 +629,10 @@ export class SquirlRuntime extends EventEmitter {
             this.toolStatus = 'Recalling...';
             emit({ type: 'status', status: this.getStatus() });
           },
-          onMemoryEnd: (inlineDisplay) => {
+          onMemoryEnd: (inlineDisplay, queries) => {
             this.toolStatus = '';
             if (inlineDisplay) {
-              const message: Message = { id: crypto.randomUUID(), role: 'tool', toolCallId: 'memory', toolName: '/memory', content: inlineDisplay };
+              const message: Message = { id: crypto.randomUUID(), role: 'tool', toolCallId: 'memory', toolName: '/memory', content: inlineDisplay, memoryLookup: { queries: queries ?? [] } };
               this.messages = [...this.messages, message];
               emit({ type: 'message', message });
             }
@@ -567,13 +664,21 @@ export class SquirlRuntime extends EventEmitter {
     return this.coordinator.listParticipants().find((p) => p.id === id)?.label ?? id;
   }
 
+  private syncIdentityContext(): void {
+    if (typeof this.orchestrator.setIdentityContext !== 'function') return;
+    this.orchestrator.setIdentityContext({
+      displayName: this.config.userProfile?.displayName,
+      participants: this.coordinator.listParticipants().map(({ id, label, status, specialty }) => ({ id, label, status, specialty })),
+    });
+  }
+
   /** Map the coordinator's AgentEvents onto the existing ChatEvent stream + this.messages. */
   private handleAgentEvent(event: AgentEvent): void {
     const emit = this.activeEmit;
     const pid = event.participantId === SQUIRL_PARTICIPANT.id ? undefined : event.participantId;
     switch (event.type) {
       case 'message-start': {
-        const message: Message = { id: event.messageId, role: 'assistant', content: '', isStreaming: true, participantId: pid };
+        const message: Message = { id: event.messageId, role: 'assistant', content: '', isStreaming: true, participantId: pid, responseMeta: event.responseMeta };
         this.messages = [...this.messages, message];
         emit?.({ type: 'message', message });
         break;
@@ -584,7 +689,8 @@ export class SquirlRuntime extends EventEmitter {
         break;
       }
       case 'message-end': {
-        const finalized: AssistantMessage = { id: event.messageId, role: 'assistant', content: event.content, isStreaming: false, participantId: pid };
+        const current = this.messages.find((message) => message.id === event.messageId);
+        const finalized: AssistantMessage = { id: event.messageId, role: 'assistant', content: event.content, isStreaming: false, participantId: pid, responseMeta: current?.role === 'assistant' ? current.responseMeta : undefined };
         this.messages = this.messages.map((m) => (m.id === event.messageId ? finalized : m));
         appendMessage(finalized);
         this.historySignature = historySignature();
@@ -593,26 +699,45 @@ export class SquirlRuntime extends EventEmitter {
       }
       case 'tool-start': {
         this.toolStatus = `${this.participantLabel(event.participantId)}: ${event.toolName}`;
+        const key = event.toolId || `${event.participantId}:${event.toolName}`;
+        const messageId = crypto.randomUUID();
+        this.pendingTools.set(key, { messageId, input: event.input });
+        const message: Message = {
+          id: messageId, role: 'tool', toolCallId: event.toolId || key,
+          toolName: `${this.participantLabel(event.participantId)}:${event.toolName}`,
+          content: '', toolInput: event.input, toolStatus: 'running', participantId: event.participantId,
+        };
+        this.messages = [...this.messages, message];
+        emit?.({ type: 'message', message });
         emit?.({ type: 'status', status: this.getStatus() });
         break;
       }
       case 'tool-end': {
         this.toolStatus = '';
-        const trimmed = event.result.length > 600 ? `${event.result.slice(0, 600)}…` : event.result;
+        const key = event.toolId || `${event.participantId}:${event.toolName}`;
+        const pending = this.pendingTools.get(key);
+        this.pendingTools.delete(key);
+        const bounded = boundedToolOutput(event.result);
         const message: Message = {
-          id: crypto.randomUUID(), role: 'tool',
+          id: pending?.messageId ?? crypto.randomUUID(), role: 'tool',
           toolCallId: event.toolId || crypto.randomUUID(),
           toolName: `${this.participantLabel(event.participantId)}:${event.toolName}`,
-          content: trimmed || (event.ok ? '(ok)' : '(failed)'),
+          content: bounded.content || (event.ok ? '(ok)' : '(failed)'),
+          toolInput: pending?.input,
+          toolStatus: event.ok ? 'success' : 'error',
+          outputTruncated: bounded.truncated || undefined,
           participantId: event.participantId,
         };
-        this.messages = [...this.messages, message];
+        this.messages = pending
+          ? this.messages.map((current) => current.id === pending.messageId ? message : current)
+          : [...this.messages, message];
         appendMessage(message);
-        emit?.({ type: 'message', message });
+        emit?.(pending ? { type: 'assistant-final', message } : { type: 'message', message });
         emit?.({ type: 'status', status: this.getStatus() });
         break;
       }
       case 'session-status': {
+        this.syncIdentityContext();
         emit?.({ type: 'agent-status', participantId: event.participantId, status: event.status });
         break;
       }
@@ -631,7 +756,7 @@ export class SquirlRuntime extends EventEmitter {
     let lastContent = '';
     return this.orchestrator.chat(input, this.messages, this.selectedModel, {
       onNewMessage: (msg) => {
-        if (msg.role === 'assistant') { assistantId = msg.id; emit({ type: 'message-start', participantId: SQUIRL_PARTICIPANT.id, messageId: msg.id }); }
+        if (msg.role === 'assistant') { assistantId = msg.id; emit({ type: 'message-start', participantId: SQUIRL_PARTICIPANT.id, messageId: msg.id, responseMeta: { model: this.selectedModel.id } }); }
         else if (msg.role === 'tool') { emit({ type: 'tool-end', participantId: SQUIRL_PARTICIPANT.id, toolId: msg.toolCallId, toolName: msg.toolName, result: msg.content, ok: true }); }
       },
       onToken: (token, assistant) => { assistantId = assistant.id; lastContent = assistant.content; emit({ type: 'token', participantId: SQUIRL_PARTICIPANT.id, messageId: assistant.id, token }); },
@@ -646,15 +771,27 @@ export class SquirlRuntime extends EventEmitter {
     }, signal).then(() => undefined);
   }
 
-  async addAgent(kind: AgentKind, opts?: { id?: string; model?: string }): Promise<AddAgentResult> {
+  async addAgent(kind: AgentKind, opts?: { id?: string; model?: string; effort?: import('../types.js').EffortLevel; cwd?: string }): Promise<AddAgentResult> {
     try {
+      const existingIds = this.listAgents().map((agent) => agent.id);
+      const id = opts?.id
+        ? validateAgentHandle(opts.id, existingIds)
+        : nextAvailableAgentId(kind, existingIds);
+      const requestedCwd = resolveUserPath(opts?.cwd ?? this.workingDir);
+      const cwd = resolve(this.workingDir, requestedCwd);
+      if (opts?.cwd !== undefined) {
+        if (!existsSync(cwd)) throw new Error(`Working directory does not exist: ${cwd}`);
+        if (!statSync(cwd).isDirectory()) throw new Error(`Working directory is not a directory: ${cwd}`);
+      }
       const descriptor = buildAgentDescriptor({
-        kind, cwd: this.workingDir, id: opts?.id, model: opts?.model,
+        kind, cwd, id, label: id, model: opts?.model, effort: opts?.effort,
         bin: kind === 'claude-code' ? this.config.agents?.claudeBin : this.config.agents?.codexBin,
         permissionMode: this.config.agents?.defaultClaudePermissionMode,
         sandbox: this.config.agents?.defaultCodexSandbox,
       });
       const participant = await this.coordinator.addAgent(descriptor);
+      this.config = upsertAgentProfile(this.config, profileFromDescriptor(descriptor));
+      this.persistConfig();
       return { ok: true, id: participant.id, label: participant.label };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -664,7 +801,25 @@ export class SquirlRuntime extends EventEmitter {
   async stopAgent(id: string): Promise<boolean> {
     if (!this.coordinator.hasAgent(id)) return false;
     await this.coordinator.removeAgent(id);
+    this.config = removeAgentProfile(this.config, id);
+    this.persistConfig();
     return true;
+  }
+
+  async renameAgent(id: string, name: string): Promise<AddAgentResult> {
+    try {
+      const nextId = validateAgentHandle(name, this.listAgents().map((agent) => agent.id), id);
+      const oldDescriptor = this.coordinator.getDescriptor(id);
+      if (!oldDescriptor) throw new Error(`No agent "@${id}".`);
+      const oldProfile = this.config.agents?.defaults?.find((profile) => profile.id?.toLowerCase() === id.toLowerCase());
+      const participant = await this.coordinator.renameAgent(id, nextId, nextId);
+      this.config = removeAgentProfile(this.config, id);
+      this.config = upsertAgentProfile(this.config, profileFromDescriptor({ ...oldDescriptor, id: nextId, label: nextId }, oldProfile?.profileId));
+      this.persistConfig();
+      return { ok: true, id: participant.id, label: participant.label };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   listAgents(): AgentSummary[] {
@@ -676,7 +831,30 @@ export class SquirlRuntime extends EventEmitter {
   private async startDefaultAgents(): Promise<void> {
     const defaults = this.config.agents?.defaults;
     if (!defaults?.length) return;
-    for (const d of defaults) await this.addAgent(d.kind, { id: d.id, model: d.model });
+    const migrated = [];
+    for (const raw of defaults) {
+      try {
+        const profile = materializeProfile(raw, this.workingDir);
+        migrated.push(profile);
+        if (!profile.reconnect) continue;
+        const descriptor = buildAgentDescriptor({
+            kind: profile.kind, cwd: profile.cwd, id: profile.id, label: profile.label, specialty: profile.specialty,
+          model: profile.model, effort: profile.effort, bin: profile.bin ?? (profile.kind === 'claude-code' ? this.config.agents?.claudeBin : this.config.agents?.codexBin),
+          permissionMode: profile.permissionMode ?? this.config.agents?.defaultClaudePermissionMode,
+          sandbox: profile.sandbox ?? this.config.agents?.defaultCodexSandbox,
+        });
+        await this.coordinator.addAgent(descriptor);
+      } catch (err) {
+        this.emit('toast', { level: 'error', message: `Could not reconnect agent: ${err instanceof Error ? err.message : String(err)}` });
+      }
+    }
+    this.config = { ...this.config, agents: { ...this.config.agents, defaults: migrated } };
+    this.persistConfig();
+  }
+
+  private persistConfig(): void {
+    saveConfig(this.config);
+    this.configSignature = JSON.stringify(this.config);
   }
 
   async recall(query: string): Promise<Message> {
@@ -967,6 +1145,8 @@ export class SquirlRuntime extends EventEmitter {
         platform: platform(),
         shell: process.env.SHELL ?? 'unknown',
         supportsTools: config.supportsTools,
+        displayName: this.config.userProfile?.displayName,
+        participants: this.coordinator.listParticipants().map(({ id, label, status, specialty }) => ({ id, label, status, specialty })),
       },
       config.systemPromptStyle,
     );

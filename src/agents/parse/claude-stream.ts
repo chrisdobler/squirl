@@ -37,6 +37,7 @@ export function createClaudeParser(opts: ParserOptions): StreamParser {
   const { participantId, newMessageId } = opts;
 
   let currentClaudeMsgId = '';
+  let currentModel = '';
   const deltaTextByMsgId = new Map<string, string>();
   const toolNameById = new Map<string, string>();
 
@@ -48,7 +49,7 @@ export function createClaudeParser(opts: ParserOptions): StreamParser {
     if (messageId == null) {
       messageId = newMessageId();
       messageText = '';
-      out.push({ type: 'message-start', participantId, messageId });
+      out.push({ type: 'message-start', participantId, messageId, ...(currentModel ? { responseMeta: { model: currentModel } } : {}) });
     }
     return messageId;
   }
@@ -71,8 +72,9 @@ export function createClaudeParser(opts: ParserOptions): StreamParser {
   function handleStreamEvent(event: Record<string, unknown>, out: AgentEvent[]): void {
     const t = event.type;
     if (t === 'message_start') {
-      const msg = (event.message ?? {}) as { id?: string };
+      const msg = (event.message ?? {}) as { id?: string; model?: string };
       if (msg.id) currentClaudeMsgId = msg.id;
+      if (msg.model) currentModel = msg.model;
       return;
     }
     if (t === 'content_block_delta') {
@@ -86,8 +88,9 @@ export function createClaudeParser(opts: ParserOptions): StreamParser {
   }
 
   function handleAssistant(obj: Record<string, unknown>, out: AgentEvent[]): void {
-    const message = (obj.message ?? {}) as { id?: string; content?: ContentBlock[] };
+    const message = (obj.message ?? {}) as { id?: string; model?: string; content?: ContentBlock[] };
     if (message.id) currentClaudeMsgId = message.id;
+    if (message.model) currentModel = message.model;
     const blocks = Array.isArray(message.content) ? message.content : [];
     for (const block of blocks) {
       if (block.type === 'text') {
@@ -157,6 +160,7 @@ export function createClaudeParser(opts: ParserOptions): StreamParser {
       switch (obj.type) {
         case 'system':
           if (obj.subtype === 'init') {
+            currentModel = typeof obj.model === 'string' ? obj.model : currentModel;
             out.push({
               type: 'session-status',
               participantId,

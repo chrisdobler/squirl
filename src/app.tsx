@@ -5,6 +5,7 @@ import { Header } from './components/Header.js';
 import { MessageList } from './components/MessageList.js';
 import { RoomRoster } from './components/RoomRoster.js';
 import { InputArea } from './components/InputArea.js';
+import { RecipientPicker } from './components/RecipientPicker.js';
 import { StatusBar } from './components/StatusBar.js';
 import { ModelPicker } from './components/ModelPicker.js';
 import { ContextPicker } from './components/ContextPicker.js';
@@ -35,15 +36,17 @@ import type { VectorStore } from './search/types.js';
 import { MemoryPipeline } from './search/memory-pipeline.js';
 import { OpenAIMetaLLM, AnthropicMetaLLM } from './search/meta-llm.js';
 import type { MetaLLM } from './search/meta-extract.js';
-import type { Message, AssistantMessage } from './types.js';
+import type { Message, AssistantMessage, ResponseMeta } from './types.js';
 import type { QueryPipelineStatus } from './pipeline-status.js';
 import { applyScrollDelta, nextAutoscrollEnabled, nextStreamingScrollOffset } from './scroll-behavior.js';
 import { GroupChatCoordinator } from './agents/coordinator.js';
 import { LocalSpawnTransport } from './agents/transport/local-spawn.js';
 import { buildAgentDescriptor } from './agents/factory.js';
-import { parseMentions } from './agents/mentions.js';
 import { SQUIRL_PARTICIPANT, USER_PARTICIPANT } from './agents/participants.js';
+import { materializeProfile, nextAvailableAgentId, profileFromDescriptor, removeAgentProfile, upsertAgentProfile, validateAgentHandle } from './agents/profiles.js';
+import { parseDelegationIntent, type DelegationAgent, type DelegationIntent } from './agents/delegation.js';
 import type { AgentEvent, AgentKind, Participant } from './agents/types.js';
+import { boundedToolOutput } from './tool-activity.js';
 
 function defaultModelFromConfig(config?: SquirlConfig): SelectedModel {
   const provider = config?.defaultProvider ?? 'anthropic';
@@ -149,6 +152,8 @@ export const App: React.FC<AppProps> = ({
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isImportPromptOpen, setIsImportPromptOpen] = useState(false);
   const [isRoomRosterOpen, setIsRoomRosterOpen] = useState(false);
+  const [isRecipientPickerOpen, setIsRecipientPickerOpen] = useState(false);
+  const [selectedRecipientId, setSelectedRecipientId] = useState(SQUIRL_PARTICIPANT.id);
   const [isRewindPickerOpen, setIsRewindPickerOpen] = useState(false);
   const [rewindPickerIndex, setRewindPickerIndex] = useState(0);
   const [pendingApproval, setPendingApproval] = useState<{ command: string; resolve: (approved: boolean) => void } | null>(null);
@@ -157,6 +162,9 @@ export const App: React.FC<AppProps> = ({
   const [toolStatus, setToolStatus] = useState('');
   const [pipelineStatus, setPipelineStatus] = useState<QueryPipelineStatus | null>(null);
   const [showThinking, setShowThinking] = useState(false);
+  const [isToolMode, setIsToolMode] = useState(false);
+  const [selectedToolIndex, setSelectedToolIndex] = useState(0);
+  const [expandedToolIds, setExpandedToolIds] = useState<Set<string>>(() => new Set());
   const [tokensPerSecond, setTokensPerSecond] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
   const streamStartRef = useRef(0);
@@ -170,6 +178,8 @@ export const App: React.FC<AppProps> = ({
   const embedderRef = useRef<ReturnType<typeof createEmbedder> | null>(null);
   const vectorStoreRef = useRef<VectorStore | null>(null);
   const [selectedModel, setSelectedModel] = useState<SelectedModel>(() => defaultModelFromConfig(config));
+  const selectedModelRef = useRef(selectedModel);
+  selectedModelRef.current = selectedModel;
   const historyIndexRef = useRef(-1);
   const savedInputRef = useRef('');
   const [commandIndex, setCommandIndex] = useState(0);
@@ -188,6 +198,8 @@ export const App: React.FC<AppProps> = ({
   const prevMaxScrollRef = useRef(0);
   const streamAutoscrollRef = useRef(false);
   const rewindCandidates = buildRewindCandidates(messages);
+  const toolMessages = messages.filter((message): message is Extract<Message, { role: 'tool' }> => message.role === 'tool');
+  const selectedTool = toolMessages[Math.min(selectedToolIndex, Math.max(0, toolMessages.length - 1))];
 
   // ---- Multi-agent group chat ----
   const [participants, setParticipants] = useState<Participant[]>([USER_PARTICIPANT, SQUIRL_PARTICIPANT]);
@@ -196,18 +208,35 @@ export const App: React.FC<AppProps> = ({
   const participantsRef = useRef<Participant[]>(participants);
   participantsRef.current = participants;
   const agentContentRef = useRef<Map<string, string>>(new Map());
+  const agentResponseMetaRef = useRef<Map<string, ResponseMeta | undefined>>(new Map());
+  const pendingToolsRef = useRef<Map<string, { messageId: string; input: unknown }>>(new Map());
   const agentFlushRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleAgentEventRef = useRef<(event: AgentEvent) => void>(() => {});
   const runLocalTurnRef = useRef<(input: string, emit: (e: AgentEvent) => void, signal: AbortSignal) => Promise<void>>(async () => {});
   const coordinatorRef = useRef<GroupChatCoordinator | null>(null);
+  const configRef = useRef<SquirlConfig>(config ?? {});
   if (!coordinatorRef.current) {
     coordinatorRef.current = new GroupChatCoordinator({
       config: { autoHandoff: config?.agents?.autoHandoff, maxHops: config?.agents?.maxHops },
       transport: new LocalSpawnTransport(),
       localTurn: (input, emit, signal) => runLocalTurnRef.current(input, emit, signal),
+      facilitateTurn: (participantId, output, signal) => orchestratorRef.current.assessFacilitation(
+        participantId, output, messagesRef.current, selectedModelRef.current, signal,
+      ),
     });
     coordinatorRef.current.onEvent((event) => handleAgentEventRef.current(event));
   }
+
+  useEffect(() => {
+    if (!participants.some((participant) => participant.id === selectedRecipientId)) setSelectedRecipientId(SQUIRL_PARTICIPANT.id);
+  }, [participants, selectedRecipientId]);
+
+  useEffect(() => {
+    orchestratorRef.current.setIdentityContext({
+      displayName: configRef.current.userProfile?.displayName,
+      participants: participants.map(({ id, label, status, specialty }) => ({ id, label, status, specialty })),
+    });
+  }, [participants]);
 
   const handleMaxScroll = useCallback((max: number) => {
     const prev = prevMaxScrollRef.current;
@@ -300,7 +329,12 @@ export const App: React.FC<AppProps> = ({
     if (isStreaming) return;
     const cfg = getModelConfig(selectedModel.id);
     const sysMsg = buildSystemPrompt(
-      { workingDir, date: new Date().toISOString().slice(0, 10), modelId: selectedModel.id, platform: platform(), shell: process.env.SHELL ?? 'unknown', supportsTools: cfg.supportsTools },
+      {
+        workingDir, date: new Date().toISOString().slice(0, 10), modelId: selectedModel.id,
+        platform: platform(), shell: process.env.SHELL ?? 'unknown', supportsTools: cfg.supportsTools,
+        displayName: configRef.current.userProfile?.displayName,
+        participants: participantsRef.current.map(({ id, label, status, specialty }) => ({ id, label, status, specialty })),
+      },
       cfg.systemPromptStyle,
     );
     const sysContent = typeof sysMsg.content === 'string' ? sysMsg.content : '';
@@ -413,12 +447,31 @@ export const App: React.FC<AppProps> = ({
   }, []);
 
   useInput((input, key) => {
-    if (isModelMenuOpen || isContextMenuOpen || isCommandPaletteOpen || isImportPromptOpen || isRewindPickerOpen || isRoomRosterOpen || pendingRewind) return;
+    if (isModelMenuOpen || isContextMenuOpen || isCommandPaletteOpen || isImportPromptOpen || isRewindPickerOpen || isRoomRosterOpen || isRecipientPickerOpen || pendingRewind) return;
     if (key.ctrl && input === 'c') { exit(); return; }
+    if (isToolMode) {
+      if (key.escape || (key.ctrl && input === 't')) { setIsToolMode(false); return; }
+      if (key.upArrow) { setSelectedToolIndex((index) => Math.max(0, index - 1)); return; }
+      if (key.downArrow) { setSelectedToolIndex((index) => Math.min(Math.max(0, toolMessages.length - 1), index + 1)); return; }
+      if (key.return && selectedTool) {
+        setExpandedToolIds((previous) => {
+          const next = new Set(previous);
+          if (next.has(selectedTool.id)) next.delete(selectedTool.id); else next.add(selectedTool.id);
+          return next;
+        });
+        return;
+      }
+      return;
+    }
     if (key.ctrl && input === 'p') { if (!isStreaming) setIsCommandPaletteOpen(true); return; }
     if (key.ctrl && input === 'r') { setIsRoomRosterOpen(true); return; }
     if (key.ctrl && input === 'v') { setShowThinking((v) => !v); return; }
     if (key.ctrl && input === 's') { setMouseMode((v) => !v); return; }
+    if (key.ctrl && input === 't') {
+      if (toolMessages.length > 0) { setSelectedToolIndex(toolMessages.length - 1); setIsToolMode(true); }
+      return;
+    }
+    if (key.tab && !inputValue.startsWith('/')) { setIsRecipientPickerOpen(true); return; }
     // Shift+Up/Down to scroll message history
     if (key.shift && key.upArrow) { applyManualScroll(3); return; }
     if (key.shift && key.downArrow) { applyManualScroll(-3); return; }
@@ -628,7 +681,8 @@ export const App: React.FC<AppProps> = ({
     switch (event.type) {
       case 'message-start': {
         agentContentRef.current.set(event.messageId, '');
-        setMessages((prev) => [...prev, { id: event.messageId, role: 'assistant', content: '', isStreaming: true, participantId: pid }]);
+        agentResponseMetaRef.current.set(event.messageId, event.responseMeta);
+        setMessages((prev) => [...prev, { id: event.messageId, role: 'assistant', content: '', isStreaming: true, participantId: pid, responseMeta: event.responseMeta }]);
         break;
       }
       case 'token': {
@@ -638,26 +692,43 @@ export const App: React.FC<AppProps> = ({
       }
       case 'message-end': {
         agentContentRef.current.delete(event.messageId);
-        const finalized: AssistantMessage = { id: event.messageId, role: 'assistant', content: event.content, isStreaming: false, participantId: pid };
+        const finalized: AssistantMessage = { id: event.messageId, role: 'assistant', content: event.content, isStreaming: false, participantId: pid, responseMeta: agentResponseMetaRef.current.get(event.messageId) };
+        agentResponseMetaRef.current.delete(event.messageId);
         setMessages((prev) => prev.map((m) => (m.id === event.messageId ? finalized : m)));
         appendMessage(finalized);
         break;
       }
       case 'tool-start': {
         setToolStatus(`${participantLabel(event.participantId)}: ${event.toolName}`);
+        const key = event.toolId || `${event.participantId}:${event.toolName}`;
+        const messageId = crypto.randomUUID();
+        pendingToolsRef.current.set(key, { messageId, input: event.input });
+        setMessages((prev) => [...prev, {
+          id: messageId, role: 'tool', toolCallId: event.toolId || key,
+          toolName: `${participantLabel(event.participantId)}:${event.toolName}`,
+          content: '', toolInput: event.input, toolStatus: 'running', participantId: event.participantId,
+        }]);
         break;
       }
       case 'tool-end': {
         setToolStatus('');
-        const trimmed = event.result.length > 600 ? `${event.result.slice(0, 600)}…` : event.result;
+        const key = event.toolId || `${event.participantId}:${event.toolName}`;
+        const pending = pendingToolsRef.current.get(key);
+        pendingToolsRef.current.delete(key);
+        const bounded = boundedToolOutput(event.result);
         const toolMsg: Message = {
-          id: crypto.randomUUID(), role: 'tool',
+          id: pending?.messageId ?? crypto.randomUUID(), role: 'tool',
           toolCallId: event.toolId || crypto.randomUUID(),
           toolName: `${participantLabel(event.participantId)}:${event.toolName}`,
-          content: trimmed || (event.ok ? '(ok)' : '(failed)'),
+          content: bounded.content || (event.ok ? '(ok)' : '(failed)'),
+          toolInput: pending?.input,
+          toolStatus: event.ok ? 'success' : 'error',
+          outputTruncated: bounded.truncated || undefined,
           participantId: event.participantId,
         };
-        setMessages((prev) => [...prev, toolMsg]);
+        setMessages((prev) => pending
+          ? prev.map((message) => message.id === pending.messageId ? toolMsg : message)
+          : [...prev, toolMsg]);
         appendMessage(toolMsg);
         break;
       }
@@ -680,7 +751,7 @@ export const App: React.FC<AppProps> = ({
     let lastContent = '';
     return orchestratorRef.current.chat(input, messagesRef.current, selectedModel, {
       onNewMessage: (msg) => {
-        if (msg.role === 'assistant') { assistantId = msg.id; emit({ type: 'message-start', participantId: SQUIRL_PARTICIPANT.id, messageId: msg.id }); }
+        if (msg.role === 'assistant') { assistantId = msg.id; emit({ type: 'message-start', participantId: SQUIRL_PARTICIPANT.id, messageId: msg.id, responseMeta: { model: selectedModel.id } }); }
         else if (msg.role === 'tool') { emit({ type: 'tool-end', participantId: SQUIRL_PARTICIPANT.id, toolId: msg.toolCallId, toolName: msg.toolName, result: msg.content, ok: true }); }
       },
       onToken: (token, assistant) => { assistantId = assistant.id; lastContent = assistant.content; emit({ type: 'token', participantId: SQUIRL_PARTICIPANT.id, messageId: assistant.id, token }); },
@@ -692,35 +763,59 @@ export const App: React.FC<AppProps> = ({
   }, [selectedModel]);
   runLocalTurnRef.current = runLocalTurn;
 
-  const addAgentCmd = useCallback(async (kind: AgentKind, opts?: { id?: string; model?: string }) => {
+  const addAgentCmd = useCallback(async (kind: AgentKind, opts?: { id?: string; model?: string; effort?: import('./types.js').EffortLevel }) => {
     try {
+      const existingIds = coordinatorRef.current!.listParticipants().map((participant) => participant.id);
+      const id = opts?.id ? validateAgentHandle(opts.id, existingIds) : nextAvailableAgentId(kind, existingIds);
       const descriptor = buildAgentDescriptor({
-        kind, cwd: workingDir, id: opts?.id, model: opts?.model,
-        bin: kind === 'claude-code' ? config?.agents?.claudeBin : config?.agents?.codexBin,
-        permissionMode: config?.agents?.defaultClaudePermissionMode,
-        sandbox: config?.agents?.defaultCodexSandbox,
+        kind, cwd: workingDir, id, label: id, model: opts?.model, effort: opts?.effort,
+        bin: kind === 'claude-code' ? configRef.current.agents?.claudeBin : configRef.current.agents?.codexBin,
+        permissionMode: configRef.current.agents?.defaultClaudePermissionMode,
+        sandbox: configRef.current.agents?.defaultCodexSandbox,
       });
       const participant = await coordinatorRef.current!.addAgent(descriptor);
       setParticipants(coordinatorRef.current!.listParticipants());
+      configRef.current = upsertAgentProfile(configRef.current, profileFromDescriptor(descriptor));
+      saveConfig(configRef.current);
       return { ok: true as const, id: participant.id, label: participant.label };
     } catch (err) {
       return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
     }
-  }, [workingDir, config]);
+  }, [workingDir]);
 
   const stopAgentCmd = useCallback(async (id: string) => {
     if (!coordinatorRef.current!.hasAgent(id)) return false;
     await coordinatorRef.current!.removeAgent(id);
     setParticipants(coordinatorRef.current!.listParticipants());
+    configRef.current = removeAgentProfile(configRef.current, id);
+    saveConfig(configRef.current);
     return true;
   }, []);
+
+  const renameAgentCmd = useCallback(async (id: string, name: string) => {
+    try {
+      const nextId = validateAgentHandle(name, coordinatorRef.current!.listParticipants().map((participant) => participant.id), id);
+      const descriptor = coordinatorRef.current!.getDescriptor(id);
+      if (!descriptor) throw new Error(`No agent "@${id}".`);
+      const profile = configRef.current.agents?.defaults?.find((item) => item.id?.toLowerCase() === id.toLowerCase());
+      const participant = await coordinatorRef.current!.renameAgent(id, nextId, nextId);
+      configRef.current = removeAgentProfile(configRef.current, id);
+      configRef.current = upsertAgentProfile(configRef.current, profileFromDescriptor({ ...descriptor, id: nextId, label: nextId }, profile?.profileId));
+      saveConfig(configRef.current);
+      setParticipants(coordinatorRef.current!.listParticipants());
+      if (selectedRecipientId === id) setSelectedRecipientId(nextId);
+      return { ok: true as const, id: participant.id, label: participant.label };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    }
+  }, [selectedRecipientId]);
 
   const listAgentsCmd = useCallback(() => coordinatorRef.current!.listParticipants()
     .filter((p) => p.kind !== 'user' && p.kind !== 'local-llm')
     .map((p) => ({ id: p.id, label: p.label, status: p.status ?? '?', mode: p.mode ?? '' })), []);
 
   const runAgentDispatch = useCallback((value: string) => {
-    const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: value };
+    const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: value, participantId: selectedRecipientId };
     setMessages((prev) => [...prev, userMsg]);
     appendMessage(userMsg);
     setInputValue('');
@@ -731,7 +826,7 @@ export const App: React.FC<AppProps> = ({
     setIsStreaming(true);
     const abortController = new AbortController();
     abortRef.current = abortController;
-    coordinatorRef.current!.dispatch(value, abortController.signal)
+    coordinatorRef.current!.dispatchTo(selectedRecipientId, value, abortController.signal)
       .catch((err) => addToast(err instanceof Error ? err.message : String(err)))
       .finally(() => {
         setIsStreaming(false);
@@ -739,14 +834,78 @@ export const App: React.FC<AppProps> = ({
         setToolStatus('');
         abortRef.current = null;
       });
+  }, [addToast, selectedRecipientId]);
+
+  const runDelegatedDispatch = useCallback((value: string, delegation: DelegationIntent) => {
+    const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: value, participantId: SQUIRL_PARTICIPANT.id };
+    const handoffHistory = [...messagesRef.current, userMsg];
+    setMessages((prev) => [...prev, userMsg]);
+    appendMessage(userMsg);
+    setInputValue('');
+    historyIndexRef.current = -1;
+    savedInputRef.current = '';
+    streamAutoscrollRef.current = true;
+    setScrollOffset(0);
+    setIsStreaming(true);
+    const abortController = new AbortController();
+    abortRef.current = abortController;
+    for (const id of delegation.unavailableTargetIds) addToast(`Agent @${id} is not connected. Open Agents and connect it before delegating work.`);
+    void (async () => {
+      for (const targetId of delegation.targetIds) {
+        if (abortController.signal.aborted) break;
+        const participant = coordinatorRef.current!.listParticipants().find((item) => item.id === targetId);
+        if (!participant) continue;
+        const handoff = await orchestratorRef.current.prepareHandoff(
+          { id: participant.id, label: participant.label, specialty: participant.specialty },
+          delegation.originalRequest,
+          delegation.task,
+          handoffHistory,
+          selectedModelRef.current,
+          abortController.signal,
+          (stage) => setPipelineStatus({ stage }),
+        );
+        const messageId = crypto.randomUUID();
+        handleAgentEventRef.current({ type: 'message-start', participantId: SQUIRL_PARTICIPANT.id, messageId, responseMeta: { model: selectedModelRef.current.id } });
+        handleAgentEventRef.current({ type: 'token', participantId: SQUIRL_PARTICIPANT.id, messageId, token: handoff });
+        handleAgentEventRef.current({ type: 'message-end', participantId: SQUIRL_PARTICIPANT.id, messageId, content: handoff });
+        try {
+          await coordinatorRef.current!.dispatchTo(targetId, handoff, abortController.signal);
+        } catch (error) {
+          addToast(`Could not delegate to @${targetId}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    })().finally(() => {
+      setIsStreaming(false);
+      streamAutoscrollRef.current = false;
+      setToolStatus('');
+      setPipelineStatus(null);
+      abortRef.current = null;
+    });
   }, [addToast]);
 
   // Auto-start agents configured to launch on startup.
   useEffect(() => {
-    const defaults = config?.agents?.defaults;
+    const defaults = configRef.current.agents?.defaults;
     if (!defaults?.length) return;
     (async () => {
-      for (const d of defaults) await addAgentCmd(d.kind, { id: d.id, model: d.model });
+      const migrated = [];
+      for (const raw of defaults) {
+        try {
+          const profile = materializeProfile(raw, workingDir);
+          migrated.push(profile);
+          if (!profile.reconnect) continue;
+          const descriptor = buildAgentDescriptor({
+            kind: profile.kind, cwd: profile.cwd, id: profile.id, label: profile.label, specialty: profile.specialty,
+            model: profile.model, effort: profile.effort, bin: profile.bin ?? (profile.kind === 'claude-code' ? configRef.current.agents?.claudeBin : configRef.current.agents?.codexBin),
+            permissionMode: profile.permissionMode ?? configRef.current.agents?.defaultClaudePermissionMode,
+            sandbox: profile.sandbox ?? configRef.current.agents?.defaultCodexSandbox,
+          });
+          await coordinatorRef.current!.addAgent(descriptor);
+        } catch (err) { addToast(`Could not reconnect agent: ${err instanceof Error ? err.message : String(err)}`); }
+      }
+      configRef.current = { ...configRef.current, agents: { ...configRef.current.agents, defaults: migrated } };
+      saveConfig(configRef.current);
+      setParticipants(coordinatorRef.current!.listParticipants());
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -772,6 +931,7 @@ export const App: React.FC<AppProps> = ({
         modelId: selectedModel.id,
         setMessages,
         openContextPicker: () => setIsContextMenuOpen(true),
+        openModelPicker: () => setIsModelMenuOpen(true),
         openSetup: onSetup,
         embedder: embedderRef.current ?? undefined,
         vectorStore: vectorStoreRef.current ?? undefined,
@@ -783,21 +943,36 @@ export const App: React.FC<AppProps> = ({
         openRoomRoster: () => setIsRoomRosterOpen(true),
         addAgent: addAgentCmd,
         stopAgent: stopAgentCmd,
+        renameAgent: renameAgentCmd,
         listAgents: listAgentsCmd,
+        displayName: configRef.current.userProfile?.displayName,
+        participants,
       });
       return;
     }
 
     if (isStreaming) return;
 
-    // Group-chat routing: if the input @mentions a connected agent, route through the coordinator.
-    const agentIds = listAgentsCmd().map((a) => a.id);
-    if (agentIds.length > 0) {
-      const mention = parseMentions(value.trim(), [SQUIRL_PARTICIPANT.id, ...agentIds]);
-      if (mention.targets.some((id) => agentIds.includes(id))) {
-        runAgentDispatch(value.trim());
+    if (selectedRecipientId === SQUIRL_PARTICIPANT.id) {
+      const delegationAgents = new Map<string, DelegationAgent>();
+      for (const profile of configRef.current.agents?.defaults ?? []) {
+        if (!profile.id) continue;
+        delegationAgents.set(profile.id, { id: profile.id, label: profile.label, kind: profile.kind, connected: coordinatorRef.current!.hasAgent(profile.id) });
+      }
+      for (const participant of coordinatorRef.current!.listParticipants()) {
+        if (participant.kind !== 'claude-code' && participant.kind !== 'codex') continue;
+        delegationAgents.set(participant.id, { id: participant.id, label: participant.label, kind: participant.kind, connected: coordinatorRef.current!.hasAgent(participant.id) });
+      }
+      const delegation = parseDelegationIntent(value.trim(), [...delegationAgents.values()]);
+      if (delegation) {
+        runDelegatedDispatch(value.trim(), delegation);
         return;
       }
+    }
+
+    if (selectedRecipientId !== SQUIRL_PARTICIPANT.id) {
+      runAgentDispatch(value.trim());
+      return;
     }
 
     setInputValue('');
@@ -821,7 +996,9 @@ export const App: React.FC<AppProps> = ({
       selectedModel,
       {
         onNewMessage: (msg) => {
+          if (msg.role === 'user') msg = { ...msg, participantId: SQUIRL_PARTICIPANT.id };
           if (msg.role === 'assistant') {
+            msg = { ...msg, responseMeta: { model: selectedModel.id } };
             latestAssistantRef.current = msg;
           }
           setMessages(prev => [...prev, msg]);
@@ -907,7 +1084,7 @@ export const App: React.FC<AppProps> = ({
         onMemoryStart: () => {
           setToolStatus('Recalling...');
         },
-        onMemoryEnd: (inlineDisplay) => {
+        onMemoryEnd: (inlineDisplay, queries) => {
           setToolStatus('');
           if (inlineDisplay) {
             setMessages(prev => [...prev, {
@@ -916,6 +1093,7 @@ export const App: React.FC<AppProps> = ({
               toolCallId: 'memory',
               toolName: '/memory',
               content: inlineDisplay,
+              memoryLookup: { queries: queries ?? [] },
             }]);
           }
         },
@@ -956,6 +1134,13 @@ export const App: React.FC<AppProps> = ({
       <Header participants={participants} />
       {isRoomRosterOpen ? (
         <RoomRoster participants={participants} onClose={() => setIsRoomRosterOpen(false)} />
+      ) : isRecipientPickerOpen ? (
+        <RecipientPicker
+          participants={participants}
+          selectedId={selectedRecipientId}
+          onSelect={(id) => { setSelectedRecipientId(id); setIsRecipientPickerOpen(false); }}
+          onClose={() => setIsRecipientPickerOpen(false)}
+        />
       ) : isContextMenuOpen ? (
         <ContextPicker
           orchestrator={orchestratorRef.current}
@@ -986,6 +1171,9 @@ export const App: React.FC<AppProps> = ({
             rewindTargetMessageId={isRewindPickerOpen ? selectedRewindCandidate?.message.id ?? null : null}
             rewindCandidateIds={isRewindPickerOpen ? rewindCandidateIds : undefined}
             onScrollOffsetRequest={isRewindPickerOpen ? setScrollOffset : undefined}
+            expandedToolIds={expandedToolIds}
+            selectedToolId={selectedTool?.id ?? null}
+            isToolMode={isToolMode}
           />
           {isCommandPaletteOpen && (
             <CommandPalette
@@ -1020,10 +1208,11 @@ export const App: React.FC<AppProps> = ({
           value={inputValue}
           onChange={handleInputChange}
           onSubmit={handleSubmit}
-          focus={!isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen && !isRewindPickerOpen && !isRoomRosterOpen}
+          focus={!isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen && !isRewindPickerOpen && !isRoomRosterOpen && !isRecipientPickerOpen}
+          recipientId={selectedRecipientId}
         />
       )}
-      <StatusBar tokenCount={tokenCount} contextWindow={contextWindow} isStreaming={isStreaming} toolStatus={toolStatus} tokensPerSecond={tokensPerSecond} modelName={modelDisplay} workingDir={workingDir} commandQuery={commandQuery} commandIndex={commandIndex} statusEmitter={statusEmitterRef.current} indexEnabled={config?.index?.enabled ?? false} storeName={config?.index?.store ? `${config.index.store}${config.index.chromaUrl ? ` (${config.index.chromaUrl.replace(/^https?:\/\//, '')})` : ''}` : ''} embedderName={embedderDisplay} mouseMode={mouseMode} pipelineStatus={pipelineStatus} />
+      <StatusBar tokenCount={tokenCount} contextWindow={contextWindow} isStreaming={isStreaming} toolStatus={isToolMode ? 'tool activity: ↑/↓ select · enter toggle · esc close' : toolStatus} tokensPerSecond={tokensPerSecond} modelName={modelDisplay} workingDir={workingDir} commandQuery={commandQuery} commandIndex={commandIndex} statusEmitter={statusEmitterRef.current} indexEnabled={config?.index?.enabled ?? false} storeName={config?.index?.store ? `${config.index.store}${config.index.chromaUrl ? ` (${config.index.chromaUrl.replace(/^https?:\/\//, '')})` : ''}` : ''} embedderName={embedderDisplay} mouseMode={mouseMode} pipelineStatus={pipelineStatus} />
     </Box>
   );
 };

@@ -7,9 +7,10 @@ interface InputAreaProps {
   onChange: (val: string) => void;
   onSubmit: (val: string) => void;
   focus?: boolean;
+  recipientId?: string;
 }
 
-export const InputArea: React.FC<InputAreaProps> = React.memo(({ value, onChange, onSubmit, focus = true }) => (
+export const InputArea: React.FC<InputAreaProps> = React.memo(({ value, onChange, onSubmit, focus = true, recipientId = 'squirl' }) => (
   <Box
     borderStyle="single"
     borderTop={true}
@@ -18,7 +19,7 @@ export const InputArea: React.FC<InputAreaProps> = React.memo(({ value, onChange
     borderRight={false}
     paddingX={1}
   >
-    <Text color="green" bold>{'🐿️  ❯  '}</Text>
+    <Text color="green" bold>{`[@${recipientId} ▾] ❯ `}</Text>
     <ChatInput
       value={value}
       onChange={onChange}

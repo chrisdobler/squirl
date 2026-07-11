@@ -2,7 +2,8 @@ import React, { useEffect, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import type { Message } from '../types.js';
 import type { Participant, ParticipantColor } from '../agents/types.js';
-import { SQUIRL_PARTICIPANT, USER_PARTICIPANT, buildRegistry, resolveParticipant } from '../agents/participants.js';
+import { SQUIRL_PARTICIPANT, USER_PARTICIPANT, addressedParticipantLabel, buildRegistry, resolveParticipant } from '../agents/participants.js';
+import { toolActivitySummary } from '../tool-activity.js';
 
 interface MessageListProps {
   messages: Message[];
@@ -15,6 +16,9 @@ interface MessageListProps {
   isRewindMode?: boolean;
   onScrollOffsetRequest?: (offset: number) => void;
   participants?: Participant[];
+  expandedToolIds?: Set<string>;
+  selectedToolId?: string | null;
+  isToolMode?: boolean;
 }
 
 export interface ScrollbarLayout {
@@ -31,6 +35,7 @@ export interface ViewportLine {
   color?: ParticipantColor | 'yellow';
   dim?: boolean;
   bold?: boolean;
+  suffix?: string;
 }
 
 export interface ViewportLayout<T> {
@@ -172,6 +177,9 @@ export function buildMessageLines({
   rewindCandidateIds,
   rewindTargetMessageId,
   participants,
+  expandedToolIds = new Set(),
+  selectedToolId = null,
+  isToolMode = false,
 }: {
   messages: Message[];
   showThinking: boolean;
@@ -180,6 +188,9 @@ export function buildMessageLines({
   rewindCandidateIds: Set<string>;
   rewindTargetMessageId: string | null;
   participants?: Participant[];
+  expandedToolIds?: Set<string>;
+  selectedToolId?: string | null;
+  isToolMode?: boolean;
 }): ViewportLine[] {
   const rows: ViewportLine[] = [];
   const registry = buildRegistry(participants ?? [USER_PARTICIPANT, SQUIRL_PARTICIPANT]);
@@ -188,6 +199,7 @@ export function buildMessageLines({
     rows.push({ key: `${line.messageId ?? 'blank'}:${index}:${rows.length}`, ...line });
   };
 
+  let activeParticipant: string | null = null;
   for (const msg of messages) {
     const isRewindCandidate = rewindCandidateIds.has(msg.id);
     const isRewindTarget = rewindTargetMessageId === msg.id;
@@ -195,7 +207,9 @@ export function buildMessageLines({
     const base = { messageId: msg.id, dim: muted };
 
     if (msg.role === 'user') {
+      activeParticipant = null;
       const prefix = isRewindMode ? (isRewindCandidate ? '○ ' : '  ') : '❯ ';
+      const recipient = addressedParticipantLabel(msg, registry);
       const contentLines = msg.content.split('\n');
       if (isRewindTarget) {
         add({ ...base, text: '↩ rewind target', color: 'cyan', bold: true }, 0);
@@ -203,7 +217,7 @@ export function buildMessageLines({
       contentLines.forEach((line, index) => {
         add({
           ...base,
-          text: `${index === 0 ? prefix : '  '}${line}`,
+          text: `${index === 0 ? `${prefix}${recipient} ` : '  '}${line}`,
           color: muted ? undefined : 'cyan',
           bold: !muted && !isRewindCandidate,
         }, index + 1);
@@ -217,7 +231,14 @@ export function buildMessageLines({
       const hasThinking = thinkContent.length > 0 || thinkingInProgress;
       const participant = resolveParticipant(msg, registry);
       const isLocal = participant.kind === 'local-llm';
-      add({ ...base, text: participant.label, color: muted || isLocal ? undefined : participant.color, dim: muted || isLocal, bold: !muted && !isLocal }, 0);
+      const responseMeta = msg.responseMeta
+        ? `${msg.responseMeta.model}${msg.responseMeta.effort ? ` · ${msg.responseMeta.effort}` : ''}`
+        : undefined;
+      const participantKey = msg.participantId ?? 'squirl';
+      if (activeParticipant !== participantKey) {
+        add({ ...base, text: participant.label, suffix: responseMeta, color: muted || isLocal ? undefined : participant.color, dim: muted || isLocal, bold: !muted && !isLocal }, 0);
+      }
+      activeParticipant = participantKey;
 
       if (hasThinking) {
         if (showThinking) {
@@ -244,11 +265,20 @@ export function buildMessageLines({
       continue;
     }
 
-    add({ ...base, text: `tool: ${msg.toolName}`, color: muted ? undefined : 'yellow', bold: !muted }, 0);
-    msg.content.split('\n').forEach((line, index) => {
-      add({ ...base, text: `  ${line}`, dim: true }, index + 1);
-    });
-    add({ text: ' ', messageId: msg.id }, 100);
+    activeParticipant = msg.participantId ?? 'squirl';
+    const expanded = expandedToolIds.has(msg.id);
+    const selected = isToolMode && selectedToolId === msg.id;
+    const state = msg.toolStatus === 'running' ? '●' : msg.toolStatus === 'error' ? '✕' : '✓';
+    const cursor = selected ? '›' : ' ';
+    add({ ...base, text: `${cursor} ${expanded ? '▼' : '▶'} ${state} ${toolActivitySummary(msg)}`, color: msg.toolStatus === 'error' ? 'yellow' : undefined, bold: selected }, 0);
+    if (expanded && msg.toolStatus !== 'running') {
+      if (msg.toolInput !== undefined) {
+        add({ ...base, text: '    Input', dim: true }, 1);
+        JSON.stringify(msg.toolInput, null, 2).split('\n').forEach((line, index) => add({ ...base, text: `      ${line}`, dim: true }, index + 2));
+      }
+      add({ ...base, text: `    Output${msg.outputTruncated ? ' (truncated)' : ''}`, dim: true }, 50);
+      (msg.content || '(no output)').split('\n').forEach((line, index) => add({ ...base, text: `      ${line}`, dim: true }, index + 51));
+    }
   }
 
   return rows;
@@ -266,6 +296,9 @@ export const MessageList: React.FC<MessageListProps & { dimmed?: boolean }> = ({
   isRewindMode = false,
   onScrollOffsetRequest,
   participants,
+  expandedToolIds = new Set(),
+  selectedToolId = null,
+  isToolMode = false,
 }) => {
   const boxHeight = Math.max(1, height);
   const availableRows = viewportRowsForHeight(boxHeight);
@@ -277,7 +310,10 @@ export const MessageList: React.FC<MessageListProps & { dimmed?: boolean }> = ({
     rewindCandidateIds,
     rewindTargetMessageId,
     participants,
-  }), [messages, showThinking, dimmed, isRewindMode, rewindCandidateIds, rewindTargetMessageId, participants]);
+    expandedToolIds,
+    selectedToolId,
+    isToolMode,
+  }), [messages, showThinking, dimmed, isRewindMode, rewindCandidateIds, rewindTargetMessageId, participants, expandedToolIds, selectedToolId, isToolMode]);
   const viewport = computeViewportLayout<ViewportLine>(
     rows,
     availableRows,
@@ -323,7 +359,7 @@ export const MessageList: React.FC<MessageListProps & { dimmed?: boolean }> = ({
             bold={line.bold}
             wrap="truncate-end"
           >
-            {line.text}
+            {line.text}{line.suffix && <Text dimColor bold={false}>{`  ${line.suffix}`}</Text>}
           </Text>
         ))}
       </Box>

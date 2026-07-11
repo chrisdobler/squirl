@@ -9,6 +9,7 @@ let testCounter = 0;
 let capturedHistory: any[] = [];
 let mockDetectedModels: Array<{ id: string; contextWindow?: number }> = [];
 let mockAssistantContent = 'ok';
+let preparedHandoffs: Array<{ target: any; originalRequest: string; task: string }> = [];
 
 // Use timestamps relative to "now" so fixture entries stay inside history.ts's 24h
 // rollover window regardless of the calendar date the suite runs on (otherwise rollover
@@ -41,10 +42,17 @@ vi.mock('../orchestrator.js', () => ({
     private contextFiles = new Map<string, string>();
     constructor(readonly workingDir: string) {}
     setMemoryPipeline() {}
+    setIdentityContext() {}
     getContextFiles() { return new Map(this.contextFiles); }
+    getContextSnapshot() { return null; }
     addContextFile(path: string) { this.contextFiles.set(path, 'content'); }
     removeContextFile(path: string) { this.contextFiles.delete(path); }
     clearContextFiles() { this.contextFiles.clear(); }
+    async prepareHandoff(target: any, originalRequest: string, task: string) {
+      preparedHandoffs.push({ target, originalRequest, task });
+      return `Handoff to @${target.id}\n\nGoal: ${task}`;
+    }
+    async assessFacilitation() { return null; }
     async chat(input: string, conversationHistory: any[], _model: any, callbacks: any) {
       capturedHistory = conversationHistory;
       const user = { id: 'web-user', role: 'user', content: input };
@@ -82,6 +90,7 @@ function entry(id: string, role: 'user' | 'assistant', content: string, timestam
 async function loadRuntime() {
   vi.resetModules();
   capturedHistory = [];
+  preparedHandoffs = [];
   const { SquirlRuntime } = await import('./runtime.js');
   return new SquirlRuntime('/tmp/squirl-web-runtime-test');
 }
@@ -116,6 +125,15 @@ describe('SquirlRuntime shared history', () => {
     expect(runtime.getState().messages.map((message) => message.content)).toContain('terminal message');
   });
 
+  it('routes visual slash commands to typed web command surfaces', async () => {
+    writeJsonl(join(historyDir, 'current.jsonl'), []);
+    const runtime = await loadRuntime();
+    const events: any[] = [];
+    await runtime.chat('/settings', 'squirl', (event) => events.push(event));
+    expect(events).toContainEqual({ type: 'open-command', surface: 'settings' });
+    expect(runtime.getState().commands.find((command) => command.name === 'settings')).toMatchObject({ usage: '/settings', surface: 'settings' });
+  });
+
   it('uses the latest disk history as context for web chat', async () => {
     writeJsonl(join(historyDir, 'current.jsonl'), [
       entry('u1', 'user', 'initial', TS_EARLY),
@@ -127,7 +145,7 @@ describe('SquirlRuntime shared history', () => {
       entry('a1', 'assistant', 'terminal reply', TS_LATE),
     ]);
 
-    await runtime.chat('web message', () => {});
+    await runtime.chat('web message', 'squirl', () => {});
 
     expect(capturedHistory.map((message) => message.content)).toEqual(['initial', 'terminal reply']);
   });
@@ -136,7 +154,7 @@ describe('SquirlRuntime shared history', () => {
     writeJsonl(join(historyDir, 'current.jsonl'), []);
     const runtime = await loadRuntime();
 
-    await runtime.chat('web message', () => {});
+    await runtime.chat('web message', 'squirl', () => {});
 
     const entries = readFileSync(join(historyDir, 'current.jsonl'), 'utf-8')
       .trim()
@@ -153,11 +171,11 @@ describe('SquirlRuntime shared history', () => {
     const runtime = await loadRuntime();
     const events: any[] = [];
 
-    await runtime.chat('web message', (event) => { events.push(event); });
+    await runtime.chat('web message', 'squirl', (event) => { events.push(event); });
 
     expect(events).toContainEqual({
       type: 'assistant-update',
-      message: { id: 'web-assistant', role: 'assistant', content: 'ok', isStreaming: true },
+      message: { id: 'web-assistant', role: 'assistant', content: 'ok', isStreaming: true, responseMeta: { model: 'claude-sonnet-4-6' } },
     });
   });
 });
@@ -197,6 +215,85 @@ describe('SquirlRuntime agents', () => {
     expect(await runtime.stopAgent('codex')).toBe(true);
     expect(runtime.listAgents()).toEqual([]);
     expect(await runtime.stopAgent('codex')).toBe(false);
+  });
+
+  it('launches and persists an agent in the requested working directory', async () => {
+    const projectDir = join(testHome, 'Projects', 'demo');
+    mkdirSync(projectDir, { recursive: true });
+    const runtime = await loadRuntime();
+
+    const result = await runtime.addAgent('codex', { cwd: projectDir });
+
+    expect(result).toEqual({ ok: true, id: 'codex', label: 'codex' });
+    expect(runtime.getState().participants.find((participant) => participant.id === 'codex')?.cwd).toBe(projectDir);
+    const saved = JSON.parse(readFileSync(join(testHome, '.squirl', 'config.json'), 'utf-8'));
+    expect(saved.agents.defaults[0].cwd).toBe(projectDir);
+  });
+
+  it('rejects an agent working directory that does not exist', async () => {
+    const runtime = await loadRuntime();
+    const missingDir = join(testHome, 'missing-project');
+
+    const result = await runtime.addAgent('codex', { cwd: missingDir });
+
+    expect(result).toEqual({ ok: false, error: `Working directory does not exist: ${missingDir}` });
+    expect(runtime.listAgents()).toEqual([]);
+  });
+
+  it('lists navigable project directories for the folder picker', async () => {
+    const projectDir = join(testHome, 'Projects');
+    mkdirSync(join(projectDir, 'alpha'), { recursive: true });
+    mkdirSync(join(projectDir, 'beta'), { recursive: true });
+    mkdirSync(join(projectDir, '.hidden'), { recursive: true });
+    const runtime = await loadRuntime();
+
+    expect(runtime.listDirectories(projectDir)).toEqual({
+      path: projectDir,
+      parent: testHome,
+      directories: [
+        { name: 'alpha', path: join(projectDir, 'alpha') },
+        { name: 'beta', path: join(projectDir, 'beta') },
+      ],
+    });
+  });
+
+  it('persists and renames agent profiles', async () => {
+    const runtime = await loadRuntime();
+    await runtime.addAgent('codex');
+    const renamed = await runtime.renameAgent('codex', 'Review Builder');
+    expect(renamed).toEqual({ ok: true, id: 'review-builder', label: 'review-builder' });
+    expect(runtime.listAgents().map((agent) => agent.id)).toEqual(['review-builder']);
+    const saved = JSON.parse(readFileSync(join(testHome, '.squirl', 'config.json'), 'utf-8'));
+    expect(saved.agents.defaults[0]).toMatchObject({ kind: 'codex', id: 'review-builder', reconnect: true });
+  });
+
+  it('migrates and reconnects saved profiles on startup', async () => {
+    writeFileSync(join(testHome, '.squirl', 'config.json'), JSON.stringify({
+      defaultProvider: 'anthropic',
+      defaultModel: 'claude-sonnet-4-6',
+      agents: { defaults: [{ kind: 'codex', id: 'codex-builder' }] },
+    }) + '\n', 'utf-8');
+    const runtime = await loadRuntime();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(runtime.listAgents().map((agent) => agent.id)).toEqual(['codex-builder']);
+    const saved = JSON.parse(readFileSync(join(testHome, '.squirl', 'config.json'), 'utf-8'));
+    expect(saved.agents.defaults[0]).toMatchObject({ id: 'codex-builder', label: 'codex-builder', reconnect: true });
+    expect(saved.agents.defaults[0].profileId).toBeTruthy();
+  });
+
+  it('recognizes explicit delegation to a saved but disconnected agent', async () => {
+    writeFileSync(join(testHome, '.squirl', 'config.json'), JSON.stringify({
+      defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6',
+      agents: { defaults: [{ kind: 'claude-code', id: 'cc', label: 'cc', reconnect: false }] },
+    }) + '\n', 'utf-8');
+    const runtime = await loadRuntime();
+    const events: any[] = [];
+    await runtime.chat('tell cc to make a plan for agent directories', 'squirl', (event) => events.push(event));
+    expect(events).toContainEqual(expect.objectContaining({ type: 'toast', message: expect.stringContaining('@cc is not connected') }));
+    expect(capturedHistory).toEqual([]);
+    expect(runtime.getState().messages.filter((message) => message.role === 'user').map((message) => message.content)).toEqual([
+      'tell cc to make a plan for agent directories',
+    ]);
   });
 });
 
@@ -314,7 +411,7 @@ describe('SquirlRuntime empty responses', () => {
     const runtime = await loadRuntime();
     const events: any[] = [];
 
-    await runtime.chat('hello', (event) => { events.push(event); });
+    await runtime.chat('hello', 'squirl', (event) => { events.push(event); });
 
     expect(events).toContainEqual({ type: 'toast', level: 'error', message: 'The model returned an empty response.' });
   });
@@ -324,8 +421,9 @@ describe('SquirlRuntime empty responses', () => {
     const runtime = await loadRuntime();
     const events: any[] = [];
 
-    await runtime.chat('hello', (event) => { events.push(event); });
+    await runtime.chat('hello', 'squirl', (event) => { events.push(event); });
 
     expect(events.some((e) => e.type === 'toast')).toBe(false);
+    expect(events.find((e) => e.type === 'assistant-final')?.message.responseMeta).toEqual({ model: 'claude-sonnet-4-6' });
   });
 });

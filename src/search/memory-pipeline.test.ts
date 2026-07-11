@@ -52,6 +52,7 @@ describe('MemoryPipeline', () => {
     expect(result.results.find((r) => r.id === 'r2')!.score).toBe(0.2);
     expect(result.systemMessage).toContain('relevant excerpts');
     expect(result.inlineDisplay).toContain('recalled 3 memories');
+    expect(result.queries).toEqual(['query1', 'query2']);
   });
 
   it('emits pipeline status in memory query order', async () => {
@@ -94,5 +95,6 @@ describe('MemoryPipeline', () => {
     expect(result.results).toEqual([]);
     expect(result.systemMessage).toBe('');
     expect(result.inlineDisplay).toBe('');
+    expect(result.queries).toEqual([]);
   });
 });

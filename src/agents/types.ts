@@ -7,6 +7,8 @@
 //   - Codex runs ONE process per turn, continued via `codex exec resume <id>`.
 // Both present a uniform `send(text)` + event stream.
 
+import type { EffortLevel, ResponseMeta } from '../types.js';
+
 export type AgentKind = 'claude-code' | 'codex';
 export type TransportKind = 'local' | 'ssh';
 
@@ -22,15 +24,18 @@ export type CodexSandbox = 'read-only' | 'workspace-write' | 'danger-full-access
 /** Colors used to visually distinguish participants in both UIs. */
 export type ParticipantColor = 'cyan' | 'green' | 'yellow' | 'magenta' | 'blue' | 'gray';
 
-/** How a participant is configured. `id` doubles as the @mention handle. */
+/** How a participant is configured. `id` is its unique room handle. */
 export interface AgentDescriptor {
   id: string;
   kind: AgentKind;
   label: string;
+  /** Human-readable role used by Squirl when coordinating the room. */
+  specialty?: string;
   transport: TransportKind;
   cwd: string;
   bin?: string;
   model?: string;
+  effort?: EffortLevel;
   /** Claude only. Defaults to 'default' (asks before edits/commands). */
   permissionMode?: ClaudePermissionMode;
   /** Claude only. Skip hooks/plugins/auto-memory. NOTE: breaks OAuth auth — opt-in for API-key users. */
@@ -48,10 +53,13 @@ export interface Participant {
   id: string;
   kind: 'user' | 'local-llm' | AgentKind;
   label: string;
+  specialty?: string;
   color: ParticipantColor;
   status?: AgentStatus;
   /** Short descriptor of the agent's permission/sandbox posture, for display. */
   mode?: string;
+  /** Working directory used when launching a remote CLI agent. */
+  cwd?: string;
 }
 
 export interface AgentUsage {
@@ -71,7 +79,7 @@ export interface AgentUsage {
  */
 export type AgentEvent =
   | { type: 'session-status'; participantId: string; status: AgentStatus; sessionId?: string; model?: string; detail?: string }
-  | { type: 'message-start'; participantId: string; messageId: string }
+  | { type: 'message-start'; participantId: string; messageId: string; responseMeta?: ResponseMeta }
   | { type: 'token'; participantId: string; messageId: string; token: string }
   | { type: 'message-end'; participantId: string; messageId: string; content: string }
   | { type: 'tool-start'; participantId: string; toolId: string; toolName: string; input: unknown }

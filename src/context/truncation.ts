@@ -44,23 +44,13 @@ export function truncateToFit(
     used += cost;
   }
 
-  const systemParts: string[] = [];
-  for (const msg of systemMessages) {
-    const text = typeof msg.content === 'string' ? msg.content : '';
-    if (text) systemParts.push(text);
-  }
-  if (includedFileContext) {
-    const text = typeof includedFileContext.content === 'string' ? includedFileContext.content : '';
-    if (text) systemParts.push(text);
-  }
+  // Preserve message roles. Project data, files, and recalled memory intentionally use
+  // user priority so their contents cannot be promoted into behavioral instructions.
+  const result: ChatCompletionMessageParam[] = [...systemMessages];
+  if (includedFileContext) result.push(includedFileContext);
   if (droppedMessageCount > 0) {
-    systemParts.push(`[${droppedMessageCount} earlier message(s) were omitted to fit the context window]`);
-  }
-
-  const result: ChatCompletionMessageParam[] = [];
-  if (systemParts.length > 0) {
     const role = systemMessages[0]?.role === 'developer' ? 'developer' as const : 'system' as const;
-    result.push({ role, content: systemParts.join('\n\n') });
+    result.push({ role, content: `[${droppedMessageCount} earlier message(s) were omitted to fit the context window]` });
   }
   result.push(...included);
 

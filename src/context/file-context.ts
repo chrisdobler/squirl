@@ -1,9 +1,11 @@
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
-export function parseFileRefs(input: string): { cleanedInput: string; filePaths: string[] } {
+export function parseFileRefs(input: string, protectedHandles: string[] = []): { cleanedInput: string; filePaths: string[] } {
   const filePaths: string[] = [];
-  const cleanedInput = input.replace(/@([\w./\-]+)/g, (_match, path: string) => {
+  const protectedSet = new Set(protectedHandles.map((handle) => handle.toLowerCase()));
+  const cleanedInput = input.replace(/@([\w./\-]+)/g, (match, path: string) => {
+    if (protectedSet.has(path.toLowerCase())) return match;
     filePaths.push(path);
     return path; // keep the filename in the message but strip the @
   });

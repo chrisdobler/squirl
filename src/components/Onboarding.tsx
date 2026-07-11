@@ -4,7 +4,7 @@ import TextInput from 'ink-text-input';
 import { fetchAvailableModels, detectLocalBackend, type DetectedModel, type LocalBackend } from '../api.js';
 import type { SquirlConfig } from '../config.js';
 
-type Step = 'welcome' | 'provider' | 'anthropic-key' | 'openai-key' | 'local-url' | 'local-detect' | 'local-pick' | 'local-model' | 'import-chatgpt' | 'index-setup' | 'index-store' | 'index-chroma-url' | 'index-embedder' | 'index-embedder-url' | 'index-embedder-detect' | 'index-embedder-pick' | 'done';
+type Step = 'welcome' | 'profile' | 'provider' | 'anthropic-key' | 'openai-key' | 'local-url' | 'local-detect' | 'local-pick' | 'local-model' | 'import-chatgpt' | 'index-setup' | 'index-store' | 'index-chroma-url' | 'index-embedder' | 'index-embedder-url' | 'index-embedder-detect' | 'index-embedder-pick' | 'done';
 type Provider = 'anthropic' | 'openai' | 'local';
 
 const PROVIDERS: { id: Provider; label: string; description: string }[] = [
@@ -23,7 +23,9 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, initialConfi
   const width = Math.min(stdout.columns ?? 80, 64);
 
   const initProvider = (initialConfig?.defaultProvider ?? 'anthropic') as Provider;
-  const [step, setStep] = useState<Step>(initialConfig ? 'provider' : 'welcome');
+  const profileCompletionOnly = !!initialConfig && !initialConfig.userProfile?.onboardingComplete;
+  const [step, setStep] = useState<Step>(initialConfig ? 'profile' : 'welcome');
+  const [displayName, setDisplayName] = useState(initialConfig?.userProfile?.displayName ?? '');
   const [providerIdx, setProviderIdx] = useState(Math.max(0, PROVIDERS.findIndex(p => p.id === initProvider)));
   const [selectedProvider, setSelectedProvider] = useState<Provider>(initProvider);
   const [anthropicKey, setAnthropicKey] = useState(initialConfig?.anthropicApiKey ?? '');
@@ -97,7 +99,7 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, initialConfi
 
   useInput((input, key) => {
     if (step === 'welcome') {
-      if (key.return) setStep('provider');
+      if (key.return) setStep('profile');
       return;
     }
 
@@ -190,6 +192,16 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, initialConfi
     }
   };
 
+  const handleProfileSubmit = (val: string) => {
+    const name = val.trim();
+    setDisplayName(name);
+    if (profileCompletionOnly) {
+      onComplete({ ...initialConfig!, userProfile: { ...(name ? { displayName: name } : {}), onboardingComplete: true } });
+      return;
+    }
+    setStep('provider');
+  };
+
   const handleOpenaiKeySubmit = (val: string) => {
     setOpenaiKey(val);
     if (selectedProvider === 'openai') {
@@ -245,7 +257,11 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, initialConfi
   };
 
   const finalize = () => {
-    const config: SquirlConfig = { defaultProvider: selectedProvider };
+    const config: SquirlConfig = {
+      ...initialConfig,
+      defaultProvider: selectedProvider,
+      userProfile: { ...(displayName.trim() ? { displayName: displayName.trim() } : {}), onboardingComplete: true },
+    };
 
     if (anthropicKey) config.anthropicApiKey = anthropicKey;
     if (openaiKey) config.openaiApiKey = openaiKey;
@@ -310,6 +326,18 @@ export const Onboarding: React.FC<OnboardingProps> = ({ onComplete, initialConfi
             ))}
             <Text> </Text>
             <Text dimColor>↑↓ navigate  enter select</Text>
+          </>
+        )}
+
+        {step === 'profile' && (
+          <>
+            <Text bold>What should Squirl call you?</Text>
+            <Text dimColor>This is optional and is never inferred from your computer or accounts.</Text>
+            <Box paddingTop={1}>
+              <Text color="green">Name: </Text>
+              <TextInput value={displayName} onChange={setDisplayName} onSubmit={handleProfileSubmit} focus={true} />
+            </Box>
+            <Text dimColor>Enter a preferred name, or press enter to skip.</Text>
           </>
         )}
 

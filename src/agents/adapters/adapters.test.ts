@@ -49,6 +49,14 @@ describe('ClaudeCodeAdapter', () => {
     expect(agent.status).toBe('busy');
   });
 
+  it('passes configured model and effort to Claude', async () => {
+    const transport = new FakeTransport();
+    const agent = new ClaudeCodeAdapter({ ...claudeDescriptor, model: 'fable', effort: 'medium' }, transport);
+    await agent.start();
+    expect(transport.lastSpawn.spec.args.join(' ')).toContain('--model fable');
+    expect(transport.lastSpawn.spec.args.join(' ')).toContain('--effort medium');
+  });
+
   it('emits parsed events as the process streams, and returns to ready at turn end', async () => {
     const transport = new FakeTransport();
     const agent = new ClaudeCodeAdapter(claudeDescriptor, transport);
@@ -70,6 +78,15 @@ describe('ClaudeCodeAdapter', () => {
 });
 
 describe('CodexAdapter', () => {
+  it('passes configured model and reasoning effort to Codex', async () => {
+    const transport = new FakeTransport();
+    const agent = new CodexAdapter({ ...codexDescriptor, model: 'gpt-5', effort: 'high' }, transport);
+    await agent.start();
+    await agent.send('work');
+    expect(transport.lastSpawn.spec.args.join(' ')).toContain('--model gpt-5');
+    expect(transport.lastSpawn.spec.args).toContain('model_reasoning_effort="high"');
+  });
+
   it('runs `codex exec` for the first turn (prompt via stdin, read-only sandbox)', async () => {
     const transport = new FakeTransport();
     const agent = new CodexAdapter(codexDescriptor, transport);

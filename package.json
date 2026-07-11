@@ -10,14 +10,15 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
-    "dev:web": "tsx src/web/dev.ts",
+    "dev:cli": "tsx --watch src/index.ts",
+    "dev:web": "tsx src/web/dev-split.ts",
     "dev:web:split": "tsx src/web/dev-split.ts",
     "dev:web:api": "tsx watch src/web/dev-api.ts",
     "build:web": "vite build",
     "start:web": "node dist/web/server.js",
     "dev:electron": "pnpm build && pnpm build:web && electron dist/electron/main.js",
     "start:electron": "electron dist/electron/main.js",
-    "start": "node dist/index.js",
+    "start:cli": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "eval": "tsx src/search/eval/runner.ts run --mode frozen --layer 1 --embedder local --embedder-model BAAI/bge-large-en-v1.5",
@@ -35,7 +36,10 @@
     "ink-text-input": "6.0.0",
     "openai": "^6.34.0",
     "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "react-dom": "18.3.1",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

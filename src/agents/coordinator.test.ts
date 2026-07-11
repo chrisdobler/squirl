@@ -17,7 +17,7 @@ class FakeSession implements AgentSession {
     this.listeners.add(handler);
     return () => this.listeners.delete(handler);
   }
-  private emit(event: AgentEvent): void { for (const h of [...this.listeners]) h(event); }
+  emit(event: AgentEvent): void { for (const h of [...this.listeners]) h(event); }
 
   send(text: string): Promise<void> {
     this.sent.push(text);
@@ -62,6 +62,23 @@ function makeHarness(opts: { autoHandoff?: boolean; maxHops?: number; replies?: 
   return { coordinator, built, localInputs, events };
 }
 
+function makeFacilitatorHarness(intervention: string | null) {
+  const built = new Map<string, FakeSession>();
+  const events: AgentEvent[] = [];
+  let assessments = 0;
+  const coordinator = new GroupChatCoordinator({
+    localTurn: async () => {},
+    facilitateTurn: async () => { assessments++; return intervention; },
+    createSession: (descriptor) => {
+      const session = new FakeSession(descriptor, () => 'specialist result');
+      built.set(descriptor.id, session);
+      return session;
+    },
+  });
+  coordinator.onEvent((event) => events.push(event));
+  return { coordinator, built, events, assessments: () => assessments };
+}
+
 function descriptor(id: string, kind: AgentDescriptor['kind'] = 'claude-code'): AgentDescriptor {
   return { id, kind, label: id, transport: 'local', cwd: '/repo' };
 }
@@ -75,21 +92,31 @@ describe('GroupChatCoordinator', () => {
     expect(h.built.get('cc')!.sent).toEqual([]);
   });
 
-  it('routes an @mention to the agent (and not the local LLM)', async () => {
+  it('routes explicitly to the selected agent without changing the message text', async () => {
     const h = makeHarness();
     await h.coordinator.addAgent(descriptor('cc'));
-    await h.coordinator.dispatch('@cc implement the adapter', new AbortController().signal);
-    expect(h.built.get('cc')!.sent).toEqual(['implement the adapter']);
+    await h.coordinator.dispatchTo('cc', '@codex implement the adapter', new AbortController().signal);
+    expect(h.built.get('cc')!.sent).toEqual(['@codex implement the adapter']);
     expect(h.localInputs).toEqual([]);
     // The agent's tokens were forwarded to coordinator subscribers.
     expect(h.events.some((e) => e.type === 'token' && e.participantId === 'cc')).toBe(true);
+  });
+
+  it('snapshots the resolved model and configured effort on response start', async () => {
+    const h = makeHarness();
+    await h.coordinator.addAgent({ ...descriptor('cc'), model: 'fable', effort: 'medium' });
+    h.built.get('cc')!.emit({ type: 'session-status', participantId: 'cc', status: 'ready', model: 'claude-fable-5' });
+    await h.coordinator.dispatchTo('cc', 'hello', new AbortController().signal);
+    expect(h.events.find((event) => event.type === 'message-start')).toMatchObject({
+      responseMeta: { model: 'claude-fable-5', effort: 'medium' },
+    });
   });
 
   it('does NOT hand off when autoHandoff is disabled', async () => {
     const h = makeHarness({ autoHandoff: false, replies: { cc: () => 'done, @codex please run tests' } });
     await h.coordinator.addAgent(descriptor('cc'));
     await h.coordinator.addAgent(descriptor('codex', 'codex'));
-    await h.coordinator.dispatch('@cc build it', new AbortController().signal);
+    await h.coordinator.dispatchTo('cc', 'build it', new AbortController().signal);
     expect(h.built.get('cc')!.sent).toEqual(['build it']);
     expect(h.built.get('codex')!.sent).toEqual([]);
   });
@@ -102,7 +129,7 @@ describe('GroupChatCoordinator', () => {
     });
     await h.coordinator.addAgent(descriptor('cc'));
     await h.coordinator.addAgent(descriptor('codex', 'codex'));
-    await h.coordinator.dispatch('@cc build it', new AbortController().signal);
+    await h.coordinator.dispatchTo('cc', 'build it', new AbortController().signal);
     // cc -> codex is one hop; codex -> cc would be a second hop and is blocked by maxHops=1.
     expect(h.built.get('cc')!.sent).toEqual(['build it']);
     expect(h.built.get('codex')!.sent).toEqual(['ok @codex run the tests']);
@@ -111,7 +138,7 @@ describe('GroupChatCoordinator', () => {
   it('ignores self-mentions to avoid loops', async () => {
     const h = makeHarness({ autoHandoff: true, maxHops: 5, replies: { cc: () => 'let me continue @cc' } });
     await h.coordinator.addAgent(descriptor('cc'));
-    await h.coordinator.dispatch('@cc go', new AbortController().signal);
+    await h.coordinator.dispatchTo('cc', 'go', new AbortController().signal);
     expect(h.built.get('cc')!.sent).toEqual(['go']);
   });
 
@@ -120,7 +147,7 @@ describe('GroupChatCoordinator', () => {
     await h.coordinator.addAgent(descriptor('cc'));
     const controller = new AbortController();
     controller.abort();
-    await h.coordinator.dispatch('@cc go', controller.signal);
+    await h.coordinator.dispatchTo('cc', 'go', controller.signal);
     expect(h.built.get('cc')!.sent).toEqual([]);
     expect(h.localInputs).toEqual([]);
   });
@@ -130,5 +157,36 @@ describe('GroupChatCoordinator', () => {
     await h.coordinator.addAgent(descriptor('cc'));
     const ids = h.coordinator.listParticipants().map((p) => p.id);
     expect(ids).toEqual(['user', 'squirl', 'cc']);
+    expect(h.coordinator.listParticipants().find((p) => p.id === 'cc')?.status).toBe('ready');
+    expect(h.events).toContainEqual({ type: 'session-status', participantId: 'cc', status: 'ready' });
+  });
+
+  it('restarts a session under a renamed identity', async () => {
+    const h = makeHarness();
+    await h.coordinator.addAgent(descriptor('cc'));
+    const participant = await h.coordinator.renameAgent('cc', 'claude-builder', 'claude-builder');
+    expect(participant.id).toBe('claude-builder');
+    expect(h.coordinator.hasAgent('cc')).toBe(false);
+    expect(h.coordinator.hasAgent('claude-builder')).toBe(true);
+    await h.coordinator.dispatchTo('claude-builder', 'build it', new AbortController().signal);
+    expect(h.built.get('claude-builder')!.sent).toEqual(['build it']);
+  });
+
+  it('stays silent when the facilitator assessment returns no intervention', async () => {
+    const h = makeFacilitatorHarness(null);
+    await h.coordinator.addAgent(descriptor('cc'));
+    await h.coordinator.dispatchTo('cc', 'work', new AbortController().signal);
+    expect(h.assessments()).toBe(1);
+    expect(h.events.filter((event) => event.type === 'message-start' && event.participantId === 'squirl')).toHaveLength(0);
+  });
+
+  it('emits one non-recursive Squirl intervention after a specialist turn', async () => {
+    const h = makeFacilitatorHarness('There is a missing decision. Should I prepare the handoff?');
+    await h.coordinator.addAgent(descriptor('cc'));
+    await h.coordinator.dispatchTo('cc', 'work', new AbortController().signal);
+    expect(h.assessments()).toBe(1);
+    expect(h.events).toContainEqual(expect.objectContaining({
+      type: 'message-end', participantId: 'squirl', content: 'There is a missing decision. Should I prepare the handoff?',
+    }));
   });
 });

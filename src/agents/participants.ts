@@ -24,14 +24,25 @@ export function participantFromDescriptor(descriptor: AgentDescriptor, colorInde
     id: descriptor.id,
     kind: descriptor.kind,
     label: descriptor.label,
+    specialty: descriptor.specialty,
     color: pickAgentColor(colorIndex),
     status: 'starting',
     mode: describeAgentMode(descriptor),
+    cwd: descriptor.cwd,
   };
 }
 
 export function buildRegistry(participants: Participant[]): Map<string, Participant> {
   return new Map(participants.map((p) => [p.id, p]));
+}
+
+/** Display the participant a user message was addressed to. Legacy messages target Squirl. */
+export function addressedParticipantLabel(
+  message: { role: string; participantId?: string },
+  _registry: Map<string, Participant>,
+): string {
+  const recipientId = message.participantId ?? SQUIRL_PARTICIPANT.id;
+  return `@${recipientId}`;
 }
 
 /** The participants that occupy "the room" — squirl's local LLM and any remote agents (not the user). */

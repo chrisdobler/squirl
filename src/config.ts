@@ -3,7 +3,27 @@ import { homedir } from 'os';
 import { join } from 'path';
 
 import type { LocalBackend } from './api.js';
-import type { ClaudePermissionMode, CodexSandbox } from './agents/types.js';
+import type { AgentKind, ClaudePermissionMode, CodexSandbox } from './agents/types.js';
+import type { EffortLevel } from './types.js';
+
+export interface AgentProfile {
+  /** Stable profile identity; unlike id, this does not change when the agent is renamed. */
+  profileId?: string;
+  kind: AgentKind;
+  /** @handle used for routing. */
+  id?: string;
+  label?: string;
+  /** Human-readable role used by Squirl when coordinating the room. */
+  specialty?: string;
+  model?: string;
+  effort?: EffortLevel;
+  bin?: string;
+  cwd?: string;
+  permissionMode?: ClaudePermissionMode;
+  sandbox?: CodexSandbox;
+  /** Auto-connect this profile when Squirl starts. Defaults to true for compatibility. */
+  reconnect?: boolean;
+}
 
 export interface AgentsConfig {
   /** When true, an agent's @mention of another participant auto-routes the turn. Default false. */
@@ -19,10 +39,16 @@ export interface AgentsConfig {
   /** Default Codex sandbox for new agents. Default 'read-only'. */
   defaultCodexSandbox?: CodexSandbox;
   /** Agents to auto-start when squirl launches. */
-  defaults?: Array<{ kind: 'claude-code' | 'codex'; id?: string; model?: string }>;
+  defaults?: AgentProfile[];
 }
 
 export interface SquirlConfig {
+  userProfile?: {
+    /** The form of address the user explicitly supplied. Never inferred from the machine. */
+    displayName?: string;
+    /** Records that the optional profile question was answered or skipped. */
+    onboardingComplete?: boolean;
+  };
   anthropicApiKey?: string;
   openaiApiKey?: string;
   defaultProvider?: 'anthropic' | 'openai' | 'local';

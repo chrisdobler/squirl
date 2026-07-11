@@ -19,6 +19,7 @@ export interface MemoryResult {
   results: SearchResult[];
   systemMessage: string;
   inlineDisplay: string;
+  queries: string[];
 }
 
 const PER_QUERY_K = 8;
@@ -36,7 +37,7 @@ export class MemoryPipeline {
     userMessage: string,
     onStatus?: (stage: QueryPipelineStage) => void,
   ): Promise<MemoryResult> {
-    const empty: MemoryResult = { results: [], systemMessage: '', inlineDisplay: '' };
+    const empty: MemoryResult = { results: [], systemMessage: '', inlineDisplay: '', queries: [] };
 
     onStatus?.('memory-query');
     const queries = await extractSearchQueries(conversation, userMessage, this.llm);
@@ -66,6 +67,7 @@ export class MemoryPipeline {
       results: topK,
       systemMessage: formatMemorySystemMessage(topK),
       inlineDisplay: formatMemoryInline(topK),
+      queries,
     };
   }
 }

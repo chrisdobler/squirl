@@ -4,7 +4,9 @@ import type { Message } from '../types.js';
 import type { QueryPipelineStatus } from '../pipeline-status.js';
 import type { LocalBackend } from '../api.js';
 import type { Participant } from '../agents/types.js';
+import type { CommandDescriptor, CommandSurface } from '../commands/registry.js';
 import type { HealthReport, HealthEntry, HealthState } from './health.js';
+export type { ContextSnapshot, ContextSnapshotSection, ContextSnapshotDisc } from '../context/context-snapshot.js';
 
 export type { HealthReport, HealthEntry, HealthState };
 
@@ -37,13 +39,14 @@ export interface AppState {
   messages: Message[];
   status: RuntimeStatus;
   contextFiles: ContextFileSummary[];
-  commands: Array<{ name: string; description: string }>;
+  commands: CommandDescriptor[];
   participants: Participant[];
   health: HealthReport;
 }
 
 export interface ChatRequest {
   message: string;
+  recipientId: string;
 }
 
 export type ChatEvent =
@@ -55,6 +58,7 @@ export type ChatEvent =
   | { type: 'status'; status: RuntimeStatus }
   | { type: 'agent-status'; participantId: string; status: string }
   | { type: 'tool-approval'; request: ToolApprovalRequest }
+  | { type: 'open-command'; surface: CommandSurface }
   | { type: 'toast'; level: 'info' | 'error'; message: string }
   | { type: 'done' }
   | { type: 'error'; message: string };

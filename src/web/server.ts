@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 
 import { SquirlRuntime } from './runtime.js';
 import type { ChatEvent, EvalEvent, EvalRunRequest } from './types.js';
+import type { AgentKind } from '../agents/types.js';
+import type { EffortLevel } from '../types.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
@@ -122,6 +124,11 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
         return;
       }
 
+      if (url.pathname === '/api/system' && req.method === 'GET') {
+        sendJson(res, 200, { content: runtime.systemPrompt() });
+        return;
+      }
+
       if (url.pathname === '/api/config' && req.method === 'POST') {
         const body = await readBody(req);
         sendJson(res, 200, await runtime.updateConfig(body as never));
@@ -151,6 +158,11 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
         return;
       }
 
+      if (url.pathname === '/api/directories' && req.method === 'GET') {
+        sendJson(res, 200, runtime.listDirectories(url.searchParams.get('path') ?? runtime.getState().status.workingDir));
+        return;
+      }
+
       if (url.pathname === '/api/context/add' && req.method === 'POST') {
         const body = await readBody(req) as { path?: string };
         if (!body.path) throw new Error('Missing path');
@@ -167,6 +179,11 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
 
       if (url.pathname === '/api/context/clear' && req.method === 'POST') {
         sendJson(res, 200, runtime.clearContextFiles());
+        return;
+      }
+
+      if (url.pathname === '/api/context/snapshot' && req.method === 'GET') {
+        sendJson(res, 200, { snapshot: runtime.getContextSnapshot() });
         return;
       }
 
@@ -206,11 +223,37 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
         return;
       }
 
+      if (url.pathname === '/api/agents/rename' && req.method === 'POST') {
+        const body = await readBody(req) as { id?: string; name?: string };
+        if (!body.id || !body.name) throw new Error('Missing agent id or name');
+        const result = await runtime.renameAgent(body.id, body.name);
+        if (!result.ok) throw new Error(result.error);
+        sendJson(res, 200, { state: runtime.getState(), agent: result });
+        return;
+      }
+
+      if (url.pathname === '/api/agents/add' && req.method === 'POST') {
+        const body = await readBody(req) as { kind?: AgentKind; id?: string; model?: string; effort?: EffortLevel; cwd?: string };
+        if (body.kind !== 'claude-code' && body.kind !== 'codex') throw new Error('Agent kind must be claude-code or codex');
+        const result = await runtime.addAgent(body.kind, { id: body.id, model: body.model, effort: body.effort, cwd: body.cwd });
+        if (!result.ok) throw new Error(result.error);
+        sendJson(res, 200, { state: runtime.getState(), agent: result });
+        return;
+      }
+
+      if (url.pathname === '/api/agents/stop' && req.method === 'POST') {
+        const body = await readBody(req) as { id?: string };
+        if (!body.id) throw new Error('Missing agent id');
+        if (!await runtime.stopAgent(body.id)) throw new Error(`No agent @${body.id}`);
+        sendJson(res, 200, { state: runtime.getState() });
+        return;
+      }
+
       if (url.pathname === '/api/chat' && req.method === 'POST') {
-        const body = await readBody(req) as { message?: string };
+        const body = await readBody(req) as { message?: string; recipientId?: string };
         const write = createEventWriter(res);
         try {
-          await runtime.chat(body.message ?? '', write);
+          await runtime.chat(body.message ?? '', body.recipientId ?? 'squirl', write);
         } catch (err) {
           write({ type: 'error', message: err instanceof Error ? err.message : String(err) });
           write({ type: 'done' });

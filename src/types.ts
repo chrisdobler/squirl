@@ -1,5 +1,12 @@
 export type MessageRole = 'user' | 'assistant' | 'tool';
 
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+export interface ResponseMeta {
+  model: string;
+  effort?: EffortLevel;
+}
+
 export interface ToolCall {
   id: string;
   name: string;
@@ -22,6 +29,8 @@ export interface AssistantMessage {
   toolCalls?: ToolCall[];
   /** Authoring participant. Undefined = squirl's local LLM; otherwise a remote agent id. */
   participantId?: string;
+  /** Model settings snapshotted when this response began. */
+  responseMeta?: ResponseMeta;
 }
 
 export interface ToolMessage {
@@ -30,6 +39,14 @@ export interface ToolMessage {
   toolCallId: string;
   toolName: string;
   content: string;
+  /** Structured input captured when the tool started. Optional for legacy history. */
+  toolInput?: unknown;
+  /** Completion state. Undefined means a legacy completed tool result. */
+  toolStatus?: 'running' | 'success' | 'error';
+  /** True when the persisted output was shortened to the activity output limit. */
+  outputTruncated?: boolean;
+  /** Query text embedded for an automatic semantic-memory lookup. */
+  memoryLookup?: { queries: string[] };
   /** Owning participant for tool activity surfaced from a remote agent. */
   participantId?: string;
 }

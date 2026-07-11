@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { matchCommand, type CommandContext } from './registry.js';
+import { getCommands, matchCommand, type CommandContext } from './registry.js';
 import type { RewindRequest } from '../rewind.js';
 import type { Message } from '../types.js';
 
@@ -117,5 +117,35 @@ describe('/rewind command', () => {
 
     expect(context.outputs[0]!.content).toContain('nothing would be removed');
     expect(context.rewinds).toEqual([]);
+  });
+});
+
+describe('/agent command', () => {
+  it('renames an agent through the shared command callback', async () => {
+    const context = ctx([], '/agent rename cc Claude Builder');
+    context.addAgent = vi.fn();
+    context.stopAgent = vi.fn();
+    context.listAgents = vi.fn(() => []);
+    context.renameAgent = vi.fn(async (_id: string, _name: string) => ({ ok: true as const, id: 'claude-builder', label: 'claude-builder' }));
+    await matchCommand('/agent rename cc Claude Builder')!.execute(context);
+    expect(context.renameAgent).toHaveBeenCalledWith('cc', 'Claude Builder');
+    expect(context.outputs[0]!.content).toContain('@claude-builder');
+  });
+});
+
+describe('modal command descriptors', () => {
+  it('exposes direct web commands with usage and surfaces', () => {
+    for (const name of ['settings', 'model', 'memory', 'eval']) {
+      expect(getCommands().find((command) => command.name === name)).toMatchObject({ name, usage: `/${name}`, surface: name });
+    }
+  });
+
+  it('keeps /setup as a settings alias and opens the shared surface', () => {
+    const open = vi.fn();
+    const context = ctx([], '/setup');
+    context.openCommandSurface = open;
+    matchCommand('/setup')!.execute(context);
+    expect(open).toHaveBeenCalledWith('settings');
+    expect(matchCommand('/models')?.name).toBe('model');
   });
 });

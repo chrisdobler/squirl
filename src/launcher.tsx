@@ -18,7 +18,7 @@ const Root: React.FC = () => {
     }
     return null;
   });
-  const [showSetup, setShowSetup] = useState(false);
+  const [showSetup, setShowSetup] = useState(() => !!config && !config.userProfile?.onboardingComplete);
 
   if (!config || showSetup) {
     return (

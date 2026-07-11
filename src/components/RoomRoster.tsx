@@ -58,7 +58,7 @@ export const RoomRoster: React.FC<RoomRosterProps> = ({ participants, onClose })
         })}
 
         <Box paddingTop={1}>
-          <Text dimColor>esc/enter close · /agent add &lt;claude-code|codex&gt; to invite · @id to address</Text>
+          <Text dimColor>esc/enter close · /agent add to invite · /agent rename to rename · tab to choose recipient</Text>
         </Box>
       </Box>
     </Box>

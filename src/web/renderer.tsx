@@ -2,17 +2,32 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 're
 import { createRoot } from 'react-dom/client';
 import type { SquirlConfig } from '../config.js';
 import type { SelectedModel } from '../components/ModelPicker.js';
-import type { Message } from '../types.js';
+import type { EffortLevel, Message } from '../types.js';
 import type { AppState, ChatEvent, ContextFileSummary, RuntimeStatus, ToolApprovalRequest, EvalEvent, EvalRunRequest, HistoryEntry, JudgeSummary } from './types.js';
-import type { Participant, ParticipantColor } from '../agents/types.js';
-import { SQUIRL_PARTICIPANT, USER_PARTICIPANT, buildRegistry, resolveParticipant, roomMembers } from '../agents/participants.js';
+import type { AgentKind, Participant, ParticipantColor } from '../agents/types.js';
+import type { CommandDescriptor, CommandSurface } from '../commands/registry.js';
+import { SQUIRL_PARTICIPANT, USER_PARTICIPANT, addressedParticipantLabel, buildRegistry, resolveParticipant, roomMembers } from '../agents/participants.js';
 import { EvalDashboard } from './EvalDashboard.js';
 import { ContextView } from './ContextView.js';
 import { EvalRunView } from './EvalRunView.js';
+import { MarkdownContent } from './MarkdownContent.js';
+import { commandSelectionValue, filterCommandPalette, moveCommandSelection, resolveCommandSurface, shouldShowCommandPalette } from './command-palette.js';
+import { parseMemoryLookup } from './memory-lookup.js';
+import { restoredChatScrollTop, type ChatViewportSnapshot } from './chat-viewport.js';
+import { groupMessageTurns } from '../tool-activity.js';
+import { ToolActivityView } from './ToolActivityView.js';
 import './styles.css';
 
 const PARTICIPANT_CSS_COLOR: Record<ParticipantColor, string> = {
   cyan: '#22d3ee', green: '#4ade80', yellow: '#facc15', magenta: '#e879f9', blue: '#60a5fa', gray: '#9ca3af',
+};
+
+const AGENT_STATUS_COLOR: Record<NonNullable<Participant['status']>, string> = {
+  starting: '#facc15',
+  ready: '#4ade80',
+  busy: '#60a5fa',
+  stopped: '#94a3b8',
+  error: '#f87171',
 };
 
 const API_BASE = import.meta.env.VITE_SQUIRL_API_BASE || window.location.origin;
@@ -213,7 +228,7 @@ function SettingsPanel({
       <div className="divider" />
 
       <h3>Remote agents</h3>
-      <p className="hint">Add agents from chat with <code>/agent add claude-code</code> or <code>/agent add codex</code>, then address them with <code>@cc</code> / <code>@codex</code>.</p>
+      <p className="hint">Use the Agents command surface to add Claude Code or Codex CLI, choose its model and effort, and connect it to the room.</p>
 
       <label className="check">
         <input type="checkbox" checked={draft.agents?.autoHandoff ?? false} onChange={(event) => updateAgents({ autoHandoff: event.target.checked })} />
@@ -345,30 +360,220 @@ function ImportPanel({ onImport, onRecall }: {
   );
 }
 
-function RewindPanel({ onRewind }: { onRewind: () => Promise<void> }) {
-  return (
-    <section className="panel rewindPanel">
-      <header><h2>Rewind</h2></header>
-      <p className="muted">Open the visual rewind picker and choose a retained turn. Imported archives stay immutable.</p>
-      <button className="danger" onClick={() => void onRewind()}>Open rewind picker</button>
+function SurfaceFrame({ title, onClose, children, actions }: { title: string; onClose: () => void; children: React.ReactNode; actions?: React.ReactNode }) {
+  return <div className="commandSurface">
+    <header className="commandSurfaceHeader"><div><span className="commandKicker">command</span><h2>/{title}</h2></div><div className="surfaceActions">{actions}<button onClick={onClose}>Close <kbd>Esc</kbd></button></div></header>
+    <div className="commandSurfaceBody">{children}</div>
+  </div>;
+}
+
+const SETTINGS_STEPS = ['profile', 'provider', 'model', 'credentials', 'memory', 'review'] as const;
+function SettingsWizard({ state, onSave, onClose, onSaved, onDetectLocal }: { state: AppState; onSave: (config: SquirlConfig) => Promise<void>; onClose: () => void; onSaved: () => void; onDetectLocal: (url: string) => Promise<void> }) {
+  const [draft, setDraft] = useState<SquirlConfig>(state.config);
+  const profileCompletionOnly = !state.config.userProfile?.onboardingComplete;
+  const [step, setStep] = useState(0);
+  const [advanced, setAdvanced] = useState(false);
+  const [saving, setSaving] = useState(false);
+  if (advanced) return <SettingsPanel state={{ ...state, config: draft }} onSave={async (next) => { setDraft(next); await onSave(next); onSaved(); }} onDetectLocal={onDetectLocal} />;
+  const name = SETTINGS_STEPS[step]!;
+  const updateIndex = (patch: Partial<NonNullable<SquirlConfig['index']>>) => setDraft((prev) => ({ ...prev, index: { enabled: false, store: 'local-chroma', embedder: 'local', ...prev.index, ...patch } }));
+  return <div className="settingsWizard">
+    <div className="wizardProgress">{SETTINGS_STEPS.map((item, i) => <span key={item} className={i === step ? 'active' : i < step ? 'done' : ''}>{i + 1}<small>{item}</small></span>)}</div>
+    <section className="wizardCard">
+      {name === 'profile' && <><h3>What should Squirl call you?</h3><p className="muted">Optional. Squirl never infers this from your computer, accounts, repositories, or imported conversations.</p><label>Preferred name<input value={draft.userProfile?.displayName ?? ''} onChange={(e) => setDraft({ ...draft, userProfile: { ...(e.target.value ? { displayName: e.target.value } : {}), onboardingComplete: true } })} placeholder="Leave blank to skip" /></label></>}
+      {name === 'provider' && <><h3>Choose your default provider</h3><div className="choiceGrid">{(['anthropic', 'openai', 'local'] as const).map((provider) => <button key={provider} className={draft.defaultProvider === provider ? 'selected' : ''} onClick={() => setDraft({ ...draft, defaultProvider: provider })}><strong>{provider}</strong><span>{provider === 'local' ? 'OpenAI-compatible local gateway' : `${provider} hosted models`}</span></button>)}</div></>}
+      {name === 'model' && <><h3>Choose the model</h3><label>Model ID<input value={draft.defaultModel ?? ''} onChange={(e) => setDraft({ ...draft, defaultModel: e.target.value })} placeholder="Model name" /></label>{draft.defaultProvider === 'local' && <label>Local base URL<span className="inline"><input value={draft.localBaseUrl ?? 'http://localhost:8000/v1'} onChange={(e) => setDraft({ ...draft, localBaseUrl: e.target.value })}/><button onClick={() => void onDetectLocal(draft.localBaseUrl ?? 'http://localhost:8000/v1')}>Detect</button></span></label>}</>}
+      {name === 'credentials' && <><h3>Credentials</h3><p className="muted">Leave an existing key unchanged, or enter a replacement.</p><label>Anthropic API key<input type="password" value={draft.anthropicApiKey ?? ''} onChange={(e) => setDraft({ ...draft, anthropicApiKey: e.target.value })}/></label><label>OpenAI API key<input type="password" value={draft.openaiApiKey ?? ''} onChange={(e) => setDraft({ ...draft, openaiApiKey: e.target.value })}/></label></>}
+      {name === 'memory' && <><h3>Semantic memory</h3><label className="check"><input type="checkbox" checked={draft.index?.enabled ?? false} onChange={(e) => updateIndex({ enabled: e.target.checked })}/>Enable semantic memory</label>{draft.index?.enabled && <><label>Vector store<select value={draft.index.store ?? 'local-chroma'} onChange={(e) => updateIndex({ store: e.target.value as 'local-chroma'|'remote-chroma'|'null' })}><option value="local-chroma">Local Chroma</option><option value="remote-chroma">Remote Chroma</option><option value="null">Disabled/null</option></select></label><label>Chroma URL<input value={draft.index.chromaUrl ?? 'http://localhost:8000'} onChange={(e) => updateIndex({ chromaUrl: e.target.value })}/></label><label>Embedder<select value={draft.index.embedder ?? 'local'} onChange={(e) => updateIndex({ embedder: e.target.value as 'local'|'openai' })}><option value="local">Local</option><option value="openai">OpenAI</option></select></label></>}</>}
+      {name === 'review' && <><h3>Review</h3><dl className="reviewGrid"><dt>Preferred name</dt><dd>{draft.userProfile?.displayName?.trim() || 'not provided'}</dd><dt>Provider</dt><dd>{draft.defaultProvider ?? 'anthropic'}</dd><dt>Model</dt><dd>{draft.defaultModel || 'provider default'}</dd><dt>Local URL</dt><dd>{draft.localBaseUrl || 'not configured'}</dd><dt>Memory</dt><dd>{draft.index?.enabled ? `${draft.index.store ?? 'local-chroma'} · ${draft.index.embedder ?? 'local'}` : 'off'}</dd></dl></>}
     </section>
+    <footer className="wizardFooter"><button onClick={() => step === 0 ? onClose() : setStep(step - 1)}>{step === 0 ? 'Cancel' : 'Back'}</button><button onClick={() => setAdvanced(true)}>Advanced</button><button className="primary" disabled={saving} onClick={() => {
+      if (profileCompletionOnly && name === 'profile') {
+        setSaving(true);
+        const next = { ...draft, userProfile: { ...(draft.userProfile?.displayName?.trim() ? { displayName: draft.userProfile.displayName.trim() } : {}), onboardingComplete: true } };
+        void onSave(next).then(onSaved).finally(() => setSaving(false));
+      } else if (step < SETTINGS_STEPS.length - 1) setStep(step + 1);
+      else { setSaving(true); void onSave(draft).then(onSaved).finally(() => setSaving(false)); }
+    }}>{saving ? 'Saving…' : profileCompletionOnly && name === 'profile' ? (draft.userProfile?.displayName?.trim() ? 'Save name' : 'Skip') : step < SETTINGS_STEPS.length - 1 ? 'Continue' : 'Save settings'}</button></footer>
+  </div>;
+}
+
+function CommandPaletteView({ commands, query, selected, onSelected, onChoose }: { commands: CommandDescriptor[]; query: string; selected: number; onSelected: (index: number) => void; onChoose: (command: CommandDescriptor) => void }) {
+  const matches = filterCommandPalette(commands, query);
+  const activeRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => { activeRef.current?.scrollIntoView({ block: 'nearest' }); }, [selected]);
+  return <div id="slash-command-list" className="commandAutocomplete" role="listbox" aria-label="Slash commands"><div className="autocompleteHeader"><span>Commands</span><small>↑↓ navigate · Tab or Enter select · Esc close</small></div><div className="autocompleteList">{matches.length ? matches.map((command, index) => <button id={`slash-command-${command.name}`} ref={index === selected ? activeRef : undefined} type="button" role="option" aria-selected={index === selected} key={command.name} className={index === selected ? 'selected' : ''} onMouseEnter={() => onSelected(index)} onMouseDown={(event) => event.preventDefault()} onClick={() => onChoose(command)}><b className="selectionCursor" aria-hidden="true">{index === selected ? '›' : ''}</b><code>/{command.name}</code><span>{command.description}</span><small>{command.usage ?? `/${command.name}`}</small></button>) : <div className="autocompleteEmpty">No matching commands</div>}</div></div>;
+}
+
+interface DirectoryListing {
+  path: string;
+  parent: string | null;
+  directories: Array<{ name: string; path: string }>;
+}
+
+function DirectoryPicker({ initialPath, workspacePath, onChoose, onClose }: {
+  initialPath: string;
+  workspacePath: string;
+  onChoose: (path: string) => void;
+  onClose: () => void;
+}) {
+  const [listing, setListing] = useState<DirectoryListing | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const load = async (path: string) => {
+    setLoading(true);
+    setError('');
+    try {
+      setListing(await api<DirectoryListing>(`/api/directories?path=${encodeURIComponent(path)}`));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => { void load(initialPath); }, []);
+  return <div className="directoryPicker" role="dialog" aria-label="Choose project directory">
+    <header><div><strong>Choose a project folder</strong><span>{listing?.path ?? initialPath}</span></div><button type="button" onClick={onClose} aria-label="Close folder browser">×</button></header>
+    <div className="directoryPickerActions">
+      <button type="button" disabled={!listing?.parent || loading} onClick={() => listing?.parent && void load(listing.parent)}>↑ Up</button>
+      <button type="button" disabled={loading} onClick={() => void load(workspacePath)}>Workspace</button>
+      <button type="button" disabled={loading} onClick={() => void load('~')}>Home</button>
+    </div>
+    <div className="directoryList">
+      {loading && <p className="muted">Loading folders…</p>}
+      {!loading && error && <p className="directoryError">{error}</p>}
+      {!loading && !error && listing?.directories.length === 0 && <p className="muted">No visible folders here.</p>}
+      {!loading && !error && listing?.directories.map((directory) => <button type="button" key={directory.path} onClick={() => void load(directory.path)}><span aria-hidden="true">▸</span><strong>{directory.name}</strong></button>)}
+    </div>
+    <footer><button type="button" onClick={onClose}>Cancel</button><button type="button" className="primary" disabled={!listing || loading} onClick={() => listing && onChoose(listing.path)}>Use this folder</button></footer>
+  </div>;
+}
+
+function AgentPanel({ participants, defaultCwd, onAdd, onStop }: {
+  participants: Participant[];
+  defaultCwd: string;
+  onAdd: (kind: AgentKind, options: { id?: string; model?: string; effort?: EffortLevel; cwd?: string }) => Promise<void>;
+  onStop: (id: string) => Promise<void>;
+}) {
+  const [kind, setKind] = useState<AgentKind>('claude-code');
+  const [id, setId] = useState('');
+  const [model, setModel] = useState('');
+  const [effort, setEffort] = useState<EffortLevel | ''>('');
+  const [cwd, setCwd] = useState(defaultCwd);
+  const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const agents = participants.filter((participant) => participant.kind === 'claude-code' || participant.kind === 'codex');
+
+  const add = async () => {
+    setAdding(true);
+    try {
+      await onAdd(kind, {
+        ...(id.trim() ? { id: id.trim() } : {}),
+        ...(model.trim() ? { model: model.trim() } : {}),
+        ...(effort ? { effort } : {}),
+        cwd: cwd.trim() || defaultCwd,
+      });
+      setId('');
+    } catch {
+      // The parent surfaces API failures as a toast.
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  return <div className="agentSurface">
+    <section className="agentAddCard">
+      <h3>Add a CLI agent</h3>
+      <p className="hint">Starts the installed CLI in the project you choose and adds it to the recipient picker.</p>
+      <div className="agentKindChoices">
+        <button className={kind === 'claude-code' ? 'selected' : ''} onClick={() => setKind('claude-code')}><strong>Claude Code</strong><span>Use the local <code>claude</code> CLI</span></button>
+        <button className={kind === 'codex' ? 'selected' : ''} onClick={() => setKind('codex')}><strong>Codex CLI</strong><span>Use the local <code>codex</code> CLI</span></button>
+      </div>
+      <div className="agentFields">
+        <label className="agentCwdField">Project / working directory<div className="agentCwdInput"><input value={cwd} onChange={(event) => setCwd(event.target.value)} placeholder={defaultCwd} spellCheck={false} /><button type="button" onClick={() => setDirectoryPickerOpen(true)}>Browse…</button></div><small>Choose a folder, or enter an absolute, <code>~/…</code>, or workspace-relative path.</small></label>
+        <label>Room name<input value={id} onChange={(event) => setId(event.target.value)} placeholder={kind === 'claude-code' ? 'cc' : 'codex'} /></label>
+        <label>Model<input value={model} onChange={(event) => setModel(event.target.value)} placeholder={kind === 'claude-code' ? 'fable (optional)' : 'gpt-5 (optional)'} /></label>
+        <label>Effort<select value={effort} onChange={(event) => setEffort(event.target.value as EffortLevel | '')}><option value="">CLI default</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
+      </div>
+      {directoryPickerOpen && <DirectoryPicker initialPath={cwd || defaultCwd} workspacePath={defaultCwd} onChoose={(path) => { setCwd(path); setDirectoryPickerOpen(false); }} onClose={() => setDirectoryPickerOpen(false)} />}
+      <button className="primary agentAddButton" disabled={adding} onClick={() => void add()}>{adding ? 'Adding…' : `Add ${kind === 'claude-code' ? 'Claude Code' : 'Codex CLI'}`}</button>
+    </section>
+    <section className="connectedAgents">
+      <h3>Connected agents</h3>
+      {agents.length === 0 && <p className="muted">No CLI agents are connected.</p>}
+      {agents.map((participant) => <div className="rosterRow" key={participant.id}>
+        <span className="rosterDot" style={{ background: AGENT_STATUS_COLOR[participant.status ?? 'ready'] }}/>
+        <strong>{participant.label}</strong>
+        <code>@{participant.id}</code>
+        <span className="rosterMeta" title={participant.cwd}>{participant.kind === 'claude-code' ? 'Claude Code' : 'Codex CLI'} · {participant.status ?? 'ready'}{participant.cwd ? ` · ${participant.cwd}` : ''}</span>
+        <button onClick={() => void onStop(participant.id).catch(() => {})}>Stop</button>
+      </div>)}
+    </section>
+  </div>;
+}
+
+function MessageView({ message, showThinking, registry, rewindCandidate, rewindSelected, showMeta = true }: { message: Message; showThinking: boolean; registry: Map<string, Participant>; rewindCandidate?: boolean; rewindSelected?: boolean; showMeta?: boolean }) {
+  const content = message.role === 'assistant' ? visibleAssistantContent(message.content, showThinking) : message.content;
+  const displayContent = content || (message.role === 'assistant' && message.isStreaming ? '_' : '');
+  const memoryLookup = message.role === 'tool' && message.toolCallId === 'memory' ? parseMemoryLookup(content) : null;
+  const memoryQueries = message.role === 'tool' ? message.memoryLookup?.queries ?? [] : [];
+  if (memoryLookup) {
+    return <article id={`message-${message.id}`} className="message tool memoryLookupMessage">
+      <details className="memoryLookup">
+        <summary><span className="memoryLookupChevron" aria-hidden="true"/><strong>Memory Lookup</strong><span className="memoryLookupCount">{memoryLookup.count} {memoryLookup.count === 1 ? 'memory' : 'memories'}</span></summary>
+        <div className="memoryLookupDetails">
+          <p>These memories were added to the model's context for this response.</p>
+          {memoryQueries.length ? <div className="memoryLookupQueries"><strong>Embedding queries</strong>{memoryQueries.map((query, index) => <code key={`${query}-${index}`}>{query}</code>)}</div> : <p className="memoryLookupUnavailable">Embedding queries were not recorded for this earlier result.</p>}
+          {memoryLookup.items.map((item, index) => <div className="memoryLookupItem" key={`${item.date}-${index}`}><time>{item.date || 'Unknown date'}</time><span>{item.snippet}</span></div>)}
+        </div>
+      </details>
+    </article>;
+  }
+  if (message.role === 'tool') return <ToolActivityView message={message}/>
+  const participant = resolveParticipant(message, registry);
+  const isRemoteAgent = participant.kind !== 'user' && participant.kind !== 'local-llm';
+  const labelColor = isRemoteAgent ? PARTICIPANT_CSS_COLOR[participant.color] : undefined;
+  const isSquirl = message.role === 'assistant' && participant.kind === 'local-llm';
+  return (
+    <article id={`message-${message.id}`} className={`message ${message.role}${rewindCandidate ? ' rewindCandidate' : ''}${rewindSelected ? ' rewindSelected' : ''}`} data-participant={message.participantId ?? ''}>
+      {showMeta && <div className="messageMeta">
+        <span className={isSquirl ? 'squirlLabel' : undefined} style={labelColor ? { color: labelColor, fontWeight: 600 } : undefined}>
+          {isSquirl && (
+            <svg className="squirlAcorn" viewBox="0 0 16 16" aria-label="acorn" role="img">
+              <path className="squirlAcornStem" d="M9.2 3.9c.1-1.2.8-2 2-2.6" />
+              <path className="squirlAcornCap" d="M3.2 6.6c.6-2.4 2.6-3.8 5.3-3.8 2.6 0 4.5 1.4 5.1 3.8-2.9 1.3-7.4 1.3-10.4 0Z" />
+              <path className="squirlAcornNut" d="M4.2 7.5c.5 3.9 2.1 6.4 4.3 6.4s3.8-2.5 4.2-6.4c-2.5.8-6 .8-8.5 0Z" />
+            </svg>
+          )}
+          {messageLabel(message, registry)}
+        </span>
+        {message.role === 'assistant' && message.responseMeta && (
+          <span className="responseMeta">
+            {message.responseMeta.model}{message.responseMeta.effort ? ` · ${message.responseMeta.effort}` : ''}
+          </span>
+        )}
+        {message.role === 'assistant' && message.isStreaming && <strong>streaming</strong>}
+      </div>}
+      <div className="messageBody">
+        <MarkdownContent>{message.role === 'user' ? `${addressedParticipantLabel(message, registry)} ${displayContent}` : displayContent}</MarkdownContent>
+      </div>
+    </article>
   );
 }
 
-function MessageView({ message, showThinking, registry }: { message: Message; showThinking: boolean; registry: Map<string, Participant> }) {
-  const content = message.role === 'assistant' ? visibleAssistantContent(message.content, showThinking) : message.content;
-  const participant = message.role === 'tool' ? undefined : resolveParticipant(message, registry);
-  const isRemoteAgent = participant ? participant.kind !== 'user' && participant.kind !== 'local-llm' : false;
-  const labelColor = isRemoteAgent && participant ? PARTICIPANT_CSS_COLOR[participant.color] : undefined;
-  return (
-    <article className={`message ${message.role}`} data-participant={message.participantId ?? ''}>
-      <div className="messageMeta">
-        <span style={labelColor ? { color: labelColor, fontWeight: 600 } : undefined}>{messageLabel(message, registry)}</span>
-        {message.role === 'assistant' && message.isStreaming && <strong>streaming</strong>}
-      </div>
-      <pre>{content || (message.role === 'assistant' && message.isStreaming ? '_' : '')}</pre>
-    </article>
-  );
+function TurnView({ turn, showThinking, registry, rewindCandidateIds, selectedMessageId }: {
+  turn: Message[]; showThinking: boolean; registry: Map<string, Participant>;
+  rewindCandidateIds: Set<string>; selectedMessageId?: string;
+}) {
+  let metaShown = false;
+  return <section className={`messageTurn ${turn[0]?.role === 'user' ? 'userTurn' : 'agentTurn'}`}>
+    {turn.map((message) => {
+      const showMeta = message.role !== 'tool' && !metaShown;
+      if (showMeta) metaShown = true;
+      return <MessageView key={message.id} message={message} showThinking={showThinking} registry={registry}
+        showMeta={showMeta} rewindCandidate={rewindCandidateIds.has(message.id)} rewindSelected={selectedMessageId === message.id}/>;
+    })}
+  </section>;
 }
 
 function ApprovalModal({ request, onRespond }: {
@@ -390,14 +595,34 @@ function ApprovalModal({ request, onRespond }: {
   );
 }
 
-function RoomRosterModal({ participants, onClose }: { participants: Participant[]; onClose: () => void }) {
+function RoomRosterDropdown({ participants, onClose, onRename }: {
+  participants: Participant[];
+  onClose: () => void;
+  onRename: (id: string, name: string) => Promise<void>;
+}) {
   const members = roomMembers(participants);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [name, setName] = useState('');
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Element;
+      if (!dropdownRef.current?.contains(target) && !target.closest('.roomRosterControl')) onClose();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [onClose]);
   return (
-    <div className="modalShade" onClick={onClose}>
-      <div className="modal" onClick={(event) => event.stopPropagation()}>
+    <div className="roomRosterDropdown" ref={dropdownRef} role="dialog" aria-label="Agents in room">
         <header>
           <h2>◈ In this room ({members.length})</h2>
-          <button onClick={onClose}>Close</button>
         </header>
         <div className="rosterList">
           {members.map((p) => {
@@ -408,50 +633,44 @@ function RoomRosterModal({ participants, onClose }: { participants: Participant[
                 <span className="rosterName" style={{ color: PARTICIPANT_CSS_COLOR[p.color] }}>{p.label}</span>
                 <span className="rosterHandle">{isRemote ? `@${p.id}` : 'local'}</span>
                 <span className="rosterMeta">{p.status ?? 'ready'}{p.mode ? ` · ${p.mode}` : ''}</span>
+                {isRemote && editingId !== p.id && (
+                  <button className="chip rosterRename" onClick={() => { setEditingId(p.id); setName(p.label); }}>Rename</button>
+                )}
+                {isRemote && editingId === p.id && (
+                  <form className="rosterRenameForm" onSubmit={(event) => {
+                    event.preventDefault();
+                    void onRename(p.id, name).then(() => setEditingId(null)).catch(() => undefined);
+                  }}>
+                    <input value={name} onChange={(event) => setName(event.target.value)} aria-label={`Rename @${p.id}`} autoFocus />
+                    <button className="chip" type="submit">Save</button>
+                    <button className="chip" type="button" onClick={() => setEditingId(null)}>Cancel</button>
+                  </form>
+                )}
               </div>
             );
           })}
         </div>
-        <p className="hint">Invite with <code>/agent add claude-code</code> or <code>/agent add codex</code>; address with <code>@cc</code> / <code>@codex</code>.</p>
-      </div>
-    </div>
-  );
-}
-
-function RewindModal({ candidates, onClose, onApply }: {
-  candidates: Array<{ label: string; preview: string } & Record<string, unknown>>;
-  onClose: () => void;
-  onApply: (candidate: Record<string, unknown>) => Promise<void>;
-}) {
-  return (
-    <div className="modalShade">
-      <div className="modal wide">
-        <h2>Rewind Conversation</h2>
-        <p>Choose the point to retain; later Squirl-owned messages will be removed.</p>
-        <div className="candidateList">
-          {candidates.map((candidate, index) => (
-            <button key={`${candidate.messageId}-${index}`} className="rowButton" onClick={() => void onApply(candidate)}>
-              <span>{candidate.label}</span>
-              <small>{candidate.preview}</small>
-            </button>
-          ))}
-        </div>
-        <footer><button onClick={onClose}>Cancel</button></footer>
-      </div>
+        <p className="hint">Use <code>/agent</code> to invite or manage agents.</p>
     </div>
   );
 }
 
 function App() {
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    const saved = window.localStorage.getItem('squirl-theme');
+    if (saved === 'light' || saved === 'dark') return saved;
+    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  });
   const [state, setState] = useState<AppState | null>(null);
   const [input, setInput] = useState('');
-  const [activePanel, setActivePanel] = useState<'settings' | 'models' | 'context' | 'memory' | 'rewind' | 'eval'>('context');
+  const [activeSurface, setActiveSurface] = useState<CommandSurface | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteIndex, setPaletteIndex] = useState(0);
+  const [systemPrompt, setSystemPrompt] = useState('Loading system prompt…');
   const [evalHistory, setEvalHistory] = useState<HistoryEntry[]>([]);
   const [evalRunning, setEvalRunning] = useState(false);
   const [evalProgress, setEvalProgress] = useState<string | undefined>(undefined);
   const [evalError, setEvalError] = useState<string | undefined>(undefined);
-  // Context-budget chat-pane takeover (recreates the TUI /context view)
-  const [contextViewActive, setContextViewActive] = useState(false);
   // Layer 3 chat-pane takeover
   const [evalRunActive, setEvalRunActive] = useState(false);
   const [evalRunTitle, setEvalRunTitle] = useState('');
@@ -461,18 +680,89 @@ function App() {
   const [showThinking, setShowThinking] = useState(false);
   const [approval, setApproval] = useState<ToolApprovalRequest | null>(null);
   const [rosterOpen, setRosterOpen] = useState(false);
+  const [recipientId, setRecipientId] = useState(SQUIRL_PARTICIPANT.id);
+  const [recipientMenuOpen, setRecipientMenuOpen] = useState(false);
   const [toast, setToast] = useState('');
-  const [rewindCandidates, setRewindCandidates] = useState<Array<{ label: string; preview: string } & Record<string, unknown>> | null>(null);
+  const [rewindCandidates, setRewindCandidates] = useState<Array<{ label: string; preview: string; messageId: string; messageIndex: number; retainedCount: number; removedCount: number; targetMessageId: string | null }> | null>(null);
+  const [rewindIndex, setRewindIndex] = useState(0);
+  const [rewindConfirming, setRewindConfirming] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const savedChatScrollRef = useRef<ChatViewportSnapshot | null>(null);
   const stickToBottomRef = useRef(true);
   const didInitialScrollRef = useRef(false);
+  const profilePromptedRef = useRef(false);
   const [isAtLatest, setIsAtLatest] = useState(true);
+  const chatVisible = !activeSurface && !evalRunActive;
+  const finishActiveSurface = () => setActiveSurface(null);
+  const finishEvalRun = () => setEvalRunActive(false);
+
+  async function startRewindMode() {
+    if (status.isStreaming) {
+      pushToast('Cannot rewind while streaming.');
+      return;
+    }
+    try {
+      const result = await api<{ candidates: Array<{ label: string; preview: string; messageId: string; messageIndex: number; retainedCount: number; removedCount: number; targetMessageId: string | null }> }>('/api/rewind/candidates');
+      if (result.candidates.length === 0) {
+        pushToast('No previous user messages to rewind to.');
+        return;
+      }
+      finishActiveSurface();
+      setPaletteOpen(false);
+      setRewindCandidates(result.candidates);
+      setRewindIndex(result.candidates.length - 1);
+      setRewindConfirming(false);
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  const openCommandSurface = (surface: CommandSurface) => {
+    if (surface === 'rewind') {
+      void startRewindMode();
+      return;
+    }
+    const list = listRef.current;
+    if (chatVisible && list && !savedChatScrollRef.current) {
+      const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
+      const listRect = list.getBoundingClientRect();
+      const anchor = Array.from(list.querySelectorAll<HTMLElement>('.message[id^="message-"]'))
+        .find((element) => element.getBoundingClientRect().bottom > listRect.top);
+      savedChatScrollRef.current = {
+        scrollTop: list.scrollTop,
+        atLatest: distanceFromBottom < 32,
+        ...(anchor ? {
+          anchorMessageId: anchor.id.slice('message-'.length),
+          anchorOffset: anchor.getBoundingClientRect().top - listRect.top,
+        } : {}),
+      };
+    }
+    setPaletteOpen(false);
+    setActiveSurface(surface);
+  };
+
+  useEffect(() => {
+    if (!state || state.config.userProfile?.onboardingComplete || profilePromptedRef.current) return;
+    profilePromptedRef.current = true;
+    openCommandSurface('settings');
+  }, [state]);
+
+  useEffect(() => {
+    window.localStorage.setItem('squirl-theme', theme);
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+  }, [theme]);
 
   const status = state?.status ?? defaultStatus();
   const messages = state?.messages ?? [];
   const participants = state?.participants ?? [USER_PARTICIPANT, SQUIRL_PARTICIPANT];
   const participantRegistry = useMemo(() => buildRegistry(participants), [participants]);
+  const recipients = roomMembers(participants);
+  useEffect(() => {
+    if (!recipients.some((participant) => participant.id === recipientId)) setRecipientId(SQUIRL_PARTICIPANT.id);
+  }, [participants, recipientId]);
   const lastMessage = messages[messages.length - 1];
   const scrollSignature = `${messages.length}:${lastMessage?.id ?? ''}:${lastMessage?.content.length ?? 0}`;
 
@@ -504,6 +794,35 @@ function App() {
     const list = listRef.current;
     if (!list || messages.length === 0) return;
 
+    const saved = savedChatScrollRef.current;
+    if (saved) {
+      const restore = () => {
+        const listRect = list.getBoundingClientRect();
+        const anchor = saved.anchorMessageId ? document.getElementById(`message-${saved.anchorMessageId}`) : null;
+        list.scrollTop = restoredChatScrollTop(saved, {
+          currentScrollTop: list.scrollTop,
+          scrollHeight: list.scrollHeight,
+          clientHeight: list.clientHeight,
+          listTop: listRect.top,
+          ...(anchor ? { anchorTop: anchor.getBoundingClientRect().top } : {}),
+        });
+        stickToBottomRef.current = saved.atLatest;
+        setIsAtLatest(saved.atLatest);
+      };
+      restore();
+      let nestedFrame = 0;
+      const frame = window.requestAnimationFrame(() => {
+        nestedFrame = window.requestAnimationFrame(() => {
+          restore();
+          savedChatScrollRef.current = null;
+        });
+      });
+      return () => {
+        window.cancelAnimationFrame(frame);
+        if (nestedFrame) window.cancelAnimationFrame(nestedFrame);
+      };
+    }
+
     if (!didInitialScrollRef.current) {
       didInitialScrollRef.current = true;
       stickToBottomRef.current = true;
@@ -519,7 +838,7 @@ function App() {
       window.cancelAnimationFrame(frame);
       if (nestedFrame) window.cancelAnimationFrame(nestedFrame);
     };
-  }, [scrollSignature, messages.length]);
+  }, [chatVisible, scrollSignature, messages.length]);
 
   const handleMessageScroll = () => {
     const list = listRef.current;
@@ -538,14 +857,12 @@ function App() {
   const sendMessage = async () => {
     const message = input.trim();
     if (!message || status.isStreaming) return;
-    // /room opens the roster client-side (the modal lives here, not on the server).
-    if (message === '/room') { setInput(''); setRosterOpen(true); return; }
     stickToBottomRef.current = true;
     setInput('');
     const res = await fetch(`${API_BASE}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, recipientId }),
     });
     if (!res.body) return;
     const reader = res.body.getReader();
@@ -584,6 +901,7 @@ function App() {
           setState((prev) => prev ? { ...prev, participants: prev.participants.map((p) => p.id === event.participantId ? { ...p, status: event.status as Participant['status'] } : p) } : prev);
         }
         if (event.type === 'tool-approval') setApproval(event.request);
+        if (event.type === 'open-command') openCommandSurface(event.surface);
         if (event.type === 'toast') pushToast(event.message);
         if (event.type === 'error') pushToast(event.message);
       }
@@ -594,6 +912,33 @@ function App() {
   const saveConfig = async (config: SquirlConfig) => {
     setState(await api<AppState>('/api/config', { method: 'POST', body: JSON.stringify(config) }));
     pushToast('Settings saved.');
+  };
+
+  const addAgent = async (kind: AgentKind, options: { id?: string; model?: string; effort?: EffortLevel; cwd?: string }) => {
+    try {
+      const response = await api<{ state: AppState; agent: { id: string; label: string } }>('/api/agents/add', {
+        method: 'POST',
+        body: JSON.stringify({ kind, ...options }),
+      });
+      setState(response.state);
+      setRecipientId(response.agent.id);
+      pushToast(`${response.agent.label} joined the room.`);
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+  };
+
+  const stopAgent = async (id: string) => {
+    try {
+      const response = await api<{ state: AppState }>('/api/agents/stop', { method: 'POST', body: JSON.stringify({ id }) });
+      setState(response.state);
+      if (recipientId === id) setRecipientId(SQUIRL_PARTICIPANT.id);
+      pushToast(`Stopped @${id}.`);
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
   };
 
   const selectModel = async (model: SelectedModel) => {
@@ -623,8 +968,13 @@ function App() {
   };
 
   useEffect(() => {
-    if (activePanel === 'eval') void loadEvalHistory();
-  }, [activePanel]);
+    if (activeSurface === 'eval') void loadEvalHistory();
+  }, [activeSurface]);
+
+  useEffect(() => {
+    if (activeSurface !== 'system') return;
+    void api<{ content: string }>('/api/system').then((result) => setSystemPrompt(result.content)).catch((error) => setSystemPrompt(error instanceof Error ? error.message : String(error)));
+  }, [activeSurface]);
 
   const runEval = async (req: EvalRunRequest) => {
     // Layer 3 is slow (LLM calls per case) → take over the chat pane with a live log.
@@ -679,21 +1029,31 @@ function App() {
     }
   };
 
-  // Escape returns to the regular chat from a takeover (an eval run continues server-side).
+  const closeActiveSurface = () => {
+    if (activeSurface === 'settings' && !window.confirm('Close settings and discard any unsaved changes?')) return;
+    finishActiveSurface();
+  };
+
+  // Escape unwinds one takeover level at a time: eval run → eval dashboard → chat.
   useEffect(() => {
-    if (!evalRunActive && !contextViewActive) return;
+    if (!evalRunActive && !activeSurface && !paletteOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
-      setEvalRunActive(false);
-      setContextViewActive(false);
+      if (evalRunActive) {
+        finishEvalRun();
+      } else if (activeSurface) {
+        closeActiveSurface();
+      } else {
+        setPaletteOpen(false);
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [evalRunActive, contextViewActive]);
+  }, [evalRunActive, activeSurface, paletteOpen]);
 
   const activePanelView = useMemo(() => {
     if (!state) return null;
-    if (activePanel === 'eval') {
+    if (activeSurface === 'eval') {
       return <EvalDashboard
         history={evalHistory}
         running={evalRunning}
@@ -708,9 +1068,9 @@ function App() {
         })}
       />;
     }
-    if (activePanel === 'settings') return <SettingsPanel state={state} onSave={saveConfig} onDetectLocal={detectLocal} />;
-    if (activePanel === 'models') return <ModelPanel current={status.selectedModel} onSelect={selectModel} onDetect={detectLocal} />;
-    if (activePanel === 'memory') {
+    if (activeSurface === 'settings') return <SettingsWizard state={state} onSave={saveConfig} onClose={closeActiveSurface} onSaved={finishActiveSurface} onDetectLocal={detectLocal} />;
+    if (activeSurface === 'model') return <ModelPanel current={status.selectedModel} onSelect={selectModel} onDetect={detectLocal} />;
+    if (activeSurface === 'memory') {
       return <ImportPanel
         onImport={async (path) => {
           const result = await api<{ count: number }>('/api/import', { method: 'POST', body: JSON.stringify({ source: 'chatgpt', path }) });
@@ -723,44 +1083,106 @@ function App() {
         }}
       />;
     }
-    if (activePanel === 'rewind') {
-      return <RewindPanel onRewind={async () => {
-        const result = await api<{ candidates: Array<{ label: string; preview: string } & Record<string, unknown>> }>('/api/rewind/candidates');
-        setRewindCandidates(result.candidates);
-      }} />;
-    }
     // 'context' is rendered as a chat-pane takeover (see ContextView), not in the right rail.
+    if (activeSurface === 'agent') return <AgentPanel participants={participants} defaultCwd={state.status.workingDir} onAdd={addAgent} onStop={stopAgent}/>;
+    if (activeSurface === 'room') return <div className="roomSurface"><h3>Participants</h3>{roomMembers(participants).map((p) => <div className="rosterRow" key={p.id}><span className="rosterDot" style={{ background: PARTICIPANT_CSS_COLOR[p.color] }}/><strong>{p.label}</strong><code>{p.kind === 'user' || p.kind === 'local-llm' ? 'local' : `@${p.id}`}</code><span>{p.status ?? 'ready'}</span></div>)}</div>;
+    if (activeSurface === 'system') return <pre className="systemPromptView">{systemPrompt}</pre>;
+    if (activeSurface === 'help') return <div className="helpGrid">{state.commands.map((command) => <button key={command.name} onClick={() => { const surface = resolveCommandSurface(command); if (surface) openCommandSurface(surface); }}><code>{command.usage}</code><span>{command.description}</span></button>)}</div>;
     return null;
-  }, [activePanel, state, status.selectedModel, approval, evalHistory, evalRunning, evalProgress, evalError]);
+  }, [activeSurface, state, status.selectedModel, approval, evalHistory, evalRunning, evalProgress, evalError, participants, systemPrompt, recipientId]);
+
+  const paletteMatches = useMemo(() => {
+    const needle = input.slice(1).toLowerCase();
+    return filterCommandPalette(state?.commands ?? [], input);
+  }, [input, state?.commands]);
+  const chooseCommand = (command: CommandDescriptor) => {
+    setPaletteOpen(false);
+    setPaletteIndex(0);
+    const surface = resolveCommandSurface(command);
+    if (surface) {
+      setInput('');
+      openCommandSurface(surface);
+    } else {
+      setInput(commandSelectionValue(command) ?? '');
+      window.requestAnimationFrame(() => composerRef.current?.focus());
+    }
+  };
+
+  const selectedRewindCandidate = rewindCandidates?.[Math.min(rewindIndex, Math.max(0, (rewindCandidates?.length ?? 1) - 1))];
+  const rewindCandidateIds = useMemo(() => new Set(rewindCandidates?.map((candidate) => candidate.messageId) ?? []), [rewindCandidates]);
+
+  const cancelRewindMode = () => {
+    setRewindCandidates(null);
+    setRewindConfirming(false);
+    composerRef.current?.focus();
+  };
+
+  const applySelectedRewind = async () => {
+    if (!selectedRewindCandidate) return;
+    try {
+      setState(await api<AppState>('/api/rewind', { method: 'POST', body: JSON.stringify(selectedRewindCandidate) }));
+      setRewindCandidates(null);
+      setRewindConfirming(false);
+      stickToBottomRef.current = true;
+      pushToast(`Rewound ${selectedRewindCandidate.removedCount} message${selectedRewindCandidate.removedCount === 1 ? '' : 's'}.`);
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  useEffect(() => {
+    if (!selectedRewindCandidate) return;
+    document.getElementById(`message-${selectedRewindCandidate.messageId}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [selectedRewindCandidate?.messageId]);
+
+  useEffect(() => {
+    if (!rewindCandidates?.length) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (rewindConfirming) {
+        if (event.key === 'Enter' || event.key.toLowerCase() === 'y') {
+          event.preventDefault();
+          void applySelectedRewind();
+        } else if (event.key === 'Escape' || event.key.toLowerCase() === 'n') {
+          event.preventDefault();
+          cancelRewindMode();
+        }
+        return;
+      }
+      if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+        event.preventDefault();
+        setRewindIndex((index) => Math.max(0, Math.min(rewindCandidates.length - 1, index + (event.key === 'ArrowUp' ? -1 : 1))));
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        setRewindConfirming(true);
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        cancelRewindMode();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [rewindCandidates, rewindConfirming, selectedRewindCandidate]);
 
   return (
-    <main className="appShell">
+    <main className="appShell" data-theme={theme}>
       <aside className="leftRail">
         <div className="brand">
-          <img src="/logo.png" alt="" />
-          <div>
-            <h1>squirl</h1>
-            <span>{status.workingDir || 'loading...'}</span>
-          </div>
+          <img
+            src={theme === 'dark' ? '/logo-dark.png' : '/logo-light.png'}
+            alt="Squirl"
+          />
+          <span>{status.workingDir || 'loading...'}</span>
         </div>
-        <nav>
-          {(['context', 'models', 'memory', 'rewind', 'eval', 'settings'] as const).map((panel) => {
-            const isContext = panel === 'context';
-            const active = isContext ? contextViewActive : (!contextViewActive && activePanel === panel);
-            return (
-              <button
-                key={panel}
-                className={active ? 'active' : ''}
-                onClick={() => {
-                  if (isContext) { setContextViewActive((v) => !v); }
-                  else { setActivePanel(panel); setContextViewActive(false); }
-                }}
-              >
-                {panel}
-              </button>
-            );
-          })}
-        </nav>
+        <button
+          className="themeToggle"
+          type="button"
+          onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
+          aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+          title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+        >
+          <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>
+          {theme === 'dark' ? 'Light mode' : 'Dark mode'}
+        </button>
         {state?.health && state.health.entries.length > 0 && (
           <div className="healthLights">
             {state.health.entries.map((h) => (
@@ -779,7 +1201,7 @@ function App() {
         </div>
       </aside>
 
-      <section className={evalRunActive || contextViewActive ? 'chatPane chatPaneTakeover' : 'chatPane'}>
+      <section className={chatVisible ? 'chatPane' : 'chatPane chatPaneTakeover'}>
         {evalRunActive ? (
           <EvalRunView
             title={evalRunTitle}
@@ -787,9 +1209,9 @@ function App() {
             done={evalRunDone}
             error={evalError}
             summary={evalRunSummary}
-            onClose={() => setEvalRunActive(false)}
+            onClose={finishEvalRun}
           />
-        ) : contextViewActive ? (
+        ) : activeSurface === 'context' ? (
           <ContextView
             breakdown={status.contextBreakdown}
             window={status.contextWindow}
@@ -798,8 +1220,13 @@ function App() {
             onRemove={async (path) => setState(await api<AppState>('/api/context/remove', { method: 'POST', body: JSON.stringify({ path }) }))}
             onClear={async () => setState(await api<AppState>('/api/context/clear', { method: 'POST' }))}
             onSearch={async (q) => (await api<{ files: string[] }>(`/api/files?q=${encodeURIComponent(q)}`)).files}
-            onClose={() => setContextViewActive(false)}
+            onLoadSnapshot={async () => (await api<{ snapshot: import('./types.js').ContextSnapshot | null }>('/api/context/snapshot')).snapshot}
+            onClose={closeActiveSurface}
           />
+        ) : activeSurface ? (
+          <SurfaceFrame title={activeSurface} onClose={closeActiveSurface}>
+            {activePanelView}
+          </SurfaceFrame>
         ) : (
         <>
         <header className="topBar">
@@ -808,9 +1235,31 @@ function App() {
             <span>{status.embedderName || 'index not configured'}</span>
           </div>
           <div className="topActions">
-            <button className="chip" onClick={() => setRosterOpen(true)} title="Show who is in the room">
-              ◈ {roomMembers(participants).length} in room
-            </button>
+            <div className="roomRosterControl">
+              <button
+                className="chip"
+                onClick={() => setRosterOpen((open) => !open)}
+                title="Show who is in the room"
+                aria-expanded={rosterOpen}
+                aria-haspopup="dialog"
+              >
+                ◈ {roomMembers(participants).length} in room
+              </button>
+              {rosterOpen && <RoomRosterDropdown
+                participants={participants}
+                onClose={() => setRosterOpen(false)}
+                onRename={async (id, name) => {
+                  try {
+                    const response = await api<{ state: AppState; agent: { id: string } }>('/api/agents/rename', { method: 'POST', body: JSON.stringify({ id, name }) });
+                    setState(response.state);
+                    if (recipientId === id) setRecipientId(response.agent.id);
+                  } catch (error) {
+                    pushToast(error instanceof Error ? error.message : String(error));
+                    throw error;
+                  }
+                }}
+              />}
+            </div>
             <label className="check">
               <input type="checkbox" checked={showThinking} onChange={(event) => setShowThinking(event.target.checked)} />
               thinking
@@ -819,13 +1268,13 @@ function App() {
           </div>
         </header>
 
-        <div className="messageList" ref={listRef} onScroll={handleMessageScroll}>
+        <div className={`messageList${rewindCandidates ? ' rewindMode' : ''}`} ref={listRef} onScroll={handleMessageScroll}>
           {messages.length === 0 ? (
             <div className="emptyState">
               <h2>Start a Squirl session</h2>
               <p>Ask a question, attach files from Context, or import ChatGPT history from Memory.</p>
             </div>
-          ) : messages.map((message) => <MessageView key={message.id} message={message} showThinking={showThinking} registry={participantRegistry} />)}
+          ) : groupMessageTurns(messages).map((turn) => <TurnView key={turn.key} turn={turn.messages} showThinking={showThinking} registry={participantRegistry} rewindCandidateIds={rewindCandidateIds} selectedMessageId={selectedRewindCandidate?.messageId}/>)}
           <div ref={bottomRef} className="bottomSentinel" aria-hidden="true" />
           {!isAtLatest && (
             <button className="latestButton" onClick={() => scrollToLatest('smooth')}>
@@ -834,10 +1283,80 @@ function App() {
           )}
         </div>
 
-        <footer className="composer">
+        <footer className={`composer${rewindCandidates ? ' rewindComposer' : ''}`} onKeyDownCapture={(event) => {
+          if (!paletteOpen) return;
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation();
+            setPaletteOpen(false);
+            return;
+          }
+          if (paletteMatches.length === 0) return;
+          if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+            event.preventDefault();
+            event.stopPropagation();
+            setPaletteIndex((index) => moveCommandSelection(index, event.key === 'ArrowUp' ? -1 : 1, paletteMatches.length));
+            return;
+          }
+          if (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey)) {
+            event.preventDefault();
+            event.stopPropagation();
+            chooseCommand(paletteMatches[Math.min(paletteIndex, paletteMatches.length - 1)]!);
+          }
+        }}>
+          {rewindCandidates && selectedRewindCandidate && <div className="rewindBar">
+            <strong>Rewind</strong>
+            <span>{rewindIndex + 1}/{rewindCandidates.length}</span>
+            <span className="rewindBarTarget">{selectedRewindCandidate.preview}</span>
+            <span>remove {selectedRewindCandidate.removedCount}</span>
+            {rewindConfirming ? <><span className="rewindWarning">Remove later messages?</span><button className="danger" onClick={() => void applySelectedRewind()}>Rewind</button><button onClick={cancelRewindMode}>Cancel</button></> : <><span className="hint">↑↓ select · Enter confirm · Esc cancel</span><button onClick={() => setRewindConfirming(true)}>Select</button></>}
+          </div>}
+          {paletteOpen && state && (
+            <CommandPaletteView commands={state.commands} query={input} selected={paletteIndex} onSelected={setPaletteIndex} onChoose={chooseCommand}/>
+          )}
+          <div className="recipientPicker">
+            <button
+              className="recipientButton"
+              type="button"
+              aria-haspopup="listbox"
+              aria-expanded={recipientMenuOpen}
+              onClick={() => setRecipientMenuOpen((open) => !open)}
+            >
+              @{recipientId} <span aria-hidden="true">▾</span>
+            </button>
+            {recipientMenuOpen && (
+              <div className="recipientMenu" role="listbox" aria-label="Message recipient">
+                {recipients.map((participant) => (
+                  <button
+                    key={participant.id}
+                    type="button"
+                    role="option"
+                    aria-selected={participant.id === recipientId}
+                    className={participant.id === recipientId ? 'selected' : ''}
+                    onClick={() => { setRecipientId(participant.id); setRecipientMenuOpen(false); }}
+                  >
+                    <span className="rosterDot" style={{ background: AGENT_STATUS_COLOR[participant.status ?? 'ready'] }} />
+                    <span>@{participant.id}</span>
+                    <small>{participant.status ?? 'ready'}</small>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <textarea
+            ref={composerRef}
+            aria-controls={paletteOpen ? 'slash-command-list' : undefined}
+            aria-activedescendant={paletteOpen && paletteMatches[paletteIndex] ? `slash-command-${paletteMatches[paletteIndex]!.name}` : undefined}
+            aria-autocomplete="list"
+            aria-expanded={paletteOpen}
             value={input}
-            onChange={(event) => setInput(event.target.value)}
+            onChange={(event) => {
+              const value = event.target.value;
+              setInput(value);
+              const shouldSuggest = shouldShowCommandPalette(value);
+              setPaletteOpen(shouldSuggest);
+              if (shouldSuggest) setPaletteIndex(0);
+            }}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault();
@@ -852,19 +1371,7 @@ function App() {
         )}
       </section>
 
-      <aside className="rightPane">{activePanelView}</aside>
-
-      {rosterOpen && <RoomRosterModal participants={participants} onClose={() => setRosterOpen(false)} />}
       {approval && <ApprovalModal request={approval} onRespond={approve} />}
-      {rewindCandidates && <RewindModal
-        candidates={rewindCandidates}
-        onClose={() => setRewindCandidates(null)}
-        onApply={async (candidate) => {
-          if (!window.confirm('Remove later Squirl-owned messages after this point?')) return;
-          setState(await api<AppState>('/api/rewind', { method: 'POST', body: JSON.stringify(candidate) }));
-          setRewindCandidates(null);
-        }}
-      />}
       {toast && <div className="toast">{toast}</div>}
     </main>
   );

@@ -29,6 +29,7 @@ export class ClaudeCodeAdapter extends BaseAgentSession {
       '--permission-mode', d.permissionMode ?? 'default',
     ];
     if (d.model) args.push('--model', d.model);
+    if (d.effort) args.push('--effort', d.effort);
     if (d.bare) args.push('--bare');
     if (d.sessionId) args.push('--resume', d.sessionId);
     args.push('--add-dir', d.cwd);

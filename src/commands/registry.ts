@@ -5,16 +5,27 @@ import { recall } from '../search/recall.js';
 import { isVectorStoreError } from '../search/stores/chroma.js';
 import type { Embedder, VectorStore } from '../search/types.js';
 import type { Orchestrator } from '../orchestrator.js';
-import type { Message } from '../types.js';
+import type { EffortLevel, Message } from '../types.js';
 import { preview, roleLabel } from '../rewind.js';
 import type { RewindRequest } from '../rewind.js';
-import type { AgentKind } from '../agents/types.js';
+import type { AgentKind, Participant } from '../agents/types.js';
 
 export interface AgentSummary {
   id: string;
   label: string;
   status: string;
   mode: string;
+}
+
+export type CommandSurface = 'settings' | 'model' | 'context' | 'memory' | 'eval' | 'rewind' | 'room' | 'agent' | 'system' | 'help';
+
+export interface CommandDescriptor {
+  name: string;
+  description: string;
+  usage: string;
+  aliases?: string[];
+  surface?: CommandSurface;
+  argumentTemplate?: string;
 }
 
 export type AddAgentResult = { ok: true; id: string; label: string } | { ok: false; error: string };
@@ -26,6 +37,7 @@ export interface CommandContext {
   modelId: string;
   setMessages: (fn: (prev: Message[]) => Message[]) => void;
   openContextPicker: () => void;
+  openModelPicker?: () => void;
   openSetup?: () => void;
   embedder?: Embedder;
   vectorStore?: VectorStore;
@@ -35,9 +47,13 @@ export interface CommandContext {
   requestRewind?: (request: RewindRequest) => void;
   openRewindPicker?: () => void;
   openRoomRoster?: () => void;
-  addAgent?: (kind: AgentKind, opts?: { id?: string; model?: string }) => Promise<AddAgentResult>;
+  openCommandSurface?: (surface: CommandSurface) => void;
+  addAgent?: (kind: AgentKind, opts?: { id?: string; model?: string; effort?: EffortLevel; cwd?: string }) => Promise<AddAgentResult>;
   stopAgent?: (id: string) => Promise<boolean>;
+  renameAgent?: (id: string, name: string) => Promise<AddAgentResult>;
   listAgents?: () => AgentSummary[];
+  displayName?: string;
+  participants?: Participant[];
 }
 
 function pushToolMessage(ctx: CommandContext, name: string, content: string): void {
@@ -57,14 +73,18 @@ function normalizeAgentKind(token?: string): AgentKind | null {
   return null;
 }
 
+function normalizeEffort(token?: string): EffortLevel | undefined {
+  if (!token) return undefined;
+  if (['low', 'medium', 'high', 'xhigh', 'max'].includes(token)) return token as EffortLevel;
+  throw new Error(`Unknown effort "${token}". Use low, medium, high, xhigh, or max.`);
+}
+
 function formatAgentList(agents: AgentSummary[]): string {
   if (agents.length === 0) return 'No agents connected. Add one with /agent add claude-code or /agent add codex.';
   return agents.map((a) => `@${a.id} — ${a.label} [${a.status}] ${a.mode}`).join('\n');
 }
 
-export interface SlashCommand {
-  name: string;
-  description: string;
+export interface SlashCommand extends CommandDescriptor {
   execute: (ctx: CommandContext) => void | Promise<void>;
 }
 
@@ -82,13 +102,21 @@ const commands: SlashCommand[] = [
   {
     name: 'context',
     description: 'Manage files and context sent to the model',
-    execute: (ctx) => ctx.openContextPicker(),
+    usage: '/context',
+    surface: 'context',
+    execute: (ctx) => {
+      if (ctx.openCommandSurface) ctx.openCommandSurface('context');
+      else ctx.openContextPicker();
+    },
   },
   {
     name: 'system',
     description: 'Show the raw system prompt',
+    usage: '/system',
+    surface: 'system',
     execute: (ctx) => {
       const config = getModelConfig(ctx.modelId);
+      const assembled = ctx.orchestrator.getLastPromptStack();
       const msg = buildSystemPrompt(
         {
           workingDir: ctx.workingDir,
@@ -97,10 +125,17 @@ const commands: SlashCommand[] = [
           platform: platform(),
           shell: process.env.SHELL ?? 'unknown',
           supportsTools: config.supportsTools,
+          displayName: ctx.displayName,
+          participants: ctx.participants?.map(({ id, label, status, specialty }) => ({ id, label, status, specialty })),
         },
         config.systemPromptStyle,
       );
-      const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
+      const base = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
+      const content = assembled || `=== BASE INSTRUCTIONS ===\n${base}`;
+      if (ctx.openCommandSurface) {
+        ctx.openCommandSurface('system');
+        return;
+      }
       ctx.setMessages((prev) => [...prev, {
         id: crypto.randomUUID(),
         role: 'tool' as const,
@@ -113,6 +148,8 @@ const commands: SlashCommand[] = [
   {
     name: 'recall',
     description: 'Search past conversations semantically',
+    usage: '/recall <query>',
+    argumentTemplate: '/recall ',
     execute: async (ctx) => {
       if (!ctx.indexEnabled || !ctx.embedder || !ctx.vectorStore) {
         ctx.setMessages((prev) => [...prev, {
@@ -157,6 +194,8 @@ const commands: SlashCommand[] = [
   {
     name: 'rewind',
     description: 'Remove later messages from context and history',
+    usage: '/rewind [list|last|number]',
+    surface: 'rewind',
     execute: (ctx) => {
       const arg = ctx.commandInput?.trim().split(/\s+/).slice(1).join(' ').toLowerCase() ?? '';
       if (ctx.messages.length === 0) {
@@ -168,7 +207,9 @@ const commands: SlashCommand[] = [
         return;
       }
       if (!arg) {
-        if (ctx.openRewindPicker) {
+        if (ctx.openCommandSurface) {
+          ctx.openCommandSurface('rewind');
+        } else if (ctx.openRewindPicker) {
           ctx.openRewindPicker();
         } else {
           showRewindUsage(ctx);
@@ -236,7 +277,10 @@ const commands: SlashCommand[] = [
   },
   {
     name: 'agent',
-    description: 'Add, list, or stop a remote agent: /agent add <claude-code|codex> [id]',
+    description: 'Add, rename, list, or stop a remote agent',
+    usage: '/agent [add|rename|stop] ...',
+    surface: 'agent',
+    argumentTemplate: '/agent ',
     execute: async (ctx) => {
       if (!ctx.addAgent || !ctx.stopAgent || !ctx.listAgents) {
         pushToolMessage(ctx, 'agent', 'Remote agents are not available in this session.');
@@ -245,15 +289,27 @@ const commands: SlashCommand[] = [
       const tokens = (ctx.commandInput ?? '').trim().split(/\s+/);
       const sub = (tokens[1] ?? 'list').toLowerCase();
 
+      if (sub === 'list' && ctx.openCommandSurface) {
+        ctx.openCommandSurface('agent');
+        return;
+      }
+
       if (sub === 'add') {
         const kind = normalizeAgentKind(tokens[2]);
         if (!kind) {
-          pushToolMessage(ctx, 'agent', 'Usage: /agent add <claude-code|codex> [id]');
+          pushToolMessage(ctx, 'agent', 'Usage: /agent add <claude-code|codex> [id] [model] [effort]');
           return;
         }
-        const result = await ctx.addAgent(kind, { id: tokens[3] });
+        let effort: EffortLevel | undefined;
+        try {
+          effort = normalizeEffort(tokens[5]?.toLowerCase());
+        } catch (error) {
+          pushToolMessage(ctx, 'agent', error instanceof Error ? error.message : String(error));
+          return;
+        }
+        const result = await ctx.addAgent(kind, { id: tokens[3], model: tokens[4], effort });
         pushToolMessage(ctx, 'agent', result.ok
-          ? `${result.label} joined as @${result.id}. Address it with "@${result.id} <message>".`
+          ? `${result.label} joined as @${result.id}. Select it from the recipient picker to send a message.`
           : `Could not add agent: ${result.error}`);
         return;
       }
@@ -269,13 +325,34 @@ const commands: SlashCommand[] = [
         return;
       }
 
+      if (sub === 'rename') {
+        const id = tokens[2]?.replace(/^@/, '');
+        const name = tokens.slice(3).join(' ');
+        if (!id || !name || !ctx.renameAgent) {
+          pushToolMessage(ctx, 'agent', 'Usage: /agent rename <current-handle> <new-name>');
+          return;
+        }
+        const result = await ctx.renameAgent(id, name);
+        pushToolMessage(ctx, 'agent', result.ok
+          ? `Renamed agent to @${result.id}.`
+          : `Could not rename agent: ${result.error}`);
+        return;
+      }
+
       pushToolMessage(ctx, 'agent', formatAgentList(ctx.listAgents()));
     },
   },
   {
     name: 'agents',
     description: 'List connected remote agents',
+    usage: '/agents',
+    aliases: ['room'],
+    surface: 'room',
     execute: (ctx) => {
+      if (ctx.openCommandSurface) {
+        ctx.openCommandSurface('room');
+        return;
+      }
       if (!ctx.listAgents) {
         pushToolMessage(ctx, 'agents', 'Remote agents are not available in this session.');
         return;
@@ -286,8 +363,12 @@ const commands: SlashCommand[] = [
   {
     name: 'room',
     description: 'Show who is in the room (squirl + connected agents)',
+    usage: '/room',
+    surface: 'room',
     execute: (ctx) => {
-      if (ctx.openRoomRoster) {
+      if (ctx.openCommandSurface) {
+        ctx.openCommandSurface('room');
+      } else if (ctx.openRoomRoster) {
         ctx.openRoomRoster();
       } else if (ctx.listAgents) {
         pushToolMessage(ctx, 'room', formatAgentList(ctx.listAgents()));
@@ -299,14 +380,67 @@ const commands: SlashCommand[] = [
   {
     name: 'setup',
     description: 'Re-run onboarding to change provider, keys, or index settings',
+    usage: '/setup',
+    aliases: ['settings'],
+    surface: 'settings',
     execute: (ctx) => {
-      if (ctx.openSetup) ctx.openSetup();
+      if (ctx.openCommandSurface) ctx.openCommandSurface('settings');
+      else if (ctx.openSetup) ctx.openSetup();
+    },
+  },
+  {
+    name: 'settings',
+    description: 'Open guided settings and advanced configuration',
+    usage: '/settings',
+    aliases: ['setup'],
+    surface: 'settings',
+    execute: (ctx) => {
+      if (ctx.openCommandSurface) ctx.openCommandSurface('settings');
+      else ctx.openSetup?.();
+    },
+  },
+  {
+    name: 'model',
+    description: 'Choose, detect, or test the active model',
+    usage: '/model',
+    aliases: ['models'],
+    surface: 'model',
+    execute: (ctx) => {
+      if (ctx.openCommandSurface) ctx.openCommandSurface('model');
+      else if (ctx.openModelPicker) ctx.openModelPicker();
+      else pushToolMessage(ctx, 'model', 'Model selection is not available in this session.');
+    },
+  },
+  {
+    name: 'memory',
+    description: 'Import history or search semantic memory',
+    usage: '/memory',
+    surface: 'memory',
+    execute: (ctx) => {
+      if (ctx.openCommandSurface) ctx.openCommandSurface('memory');
+      else pushToolMessage(ctx, 'memory', 'Use /recall <query> to search memory in the terminal UI.');
+    },
+  },
+  {
+    name: 'eval',
+    description: 'Run and inspect memory evaluations',
+    usage: '/eval',
+    surface: 'eval',
+    execute: (ctx) => {
+      if (ctx.openCommandSurface) ctx.openCommandSurface('eval');
+      else pushToolMessage(ctx, 'eval', 'The evaluation dashboard is available in the web and Electron UI.');
     },
   },
   {
     name: 'help',
     description: 'Show available commands',
+    usage: '/help',
+    surface: 'help',
     execute: (ctx) => {
+      if (ctx.openCommandSurface) {
+        ctx.openCommandSurface('help');
+        return;
+      }
       const lines = commands.map((c) => `/${c.name} — ${c.description}`).join('\n');
       ctx.setMessages((prev) => [...prev, {
         id: crypto.randomUUID(),
@@ -332,5 +466,5 @@ export function matchCommand(input: string): SlashCommand | null {
   const trimmed = input.trim();
   if (!trimmed.startsWith('/')) return null;
   const name = trimmed.slice(1).split(/\s/)[0]!.toLowerCase();
-  return commands.find((c) => c.name === name) ?? null;
+  return commands.find((c) => c.name === name || c.aliases?.includes(name)) ?? null;
 }
