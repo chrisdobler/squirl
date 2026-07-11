@@ -9,6 +9,13 @@ const tool = (id: string, callId: string, name: string, content: string): Messag
 });
 
 describe('messagesToTurnPairs', () => {
+  it('retains addressed and authoring participant ids for agent-aware recall', () => {
+    const pairs = messagesToTurnPairs([
+      { id: 'u-agent', role: 'user', content: 'fix it', participantId: 'cc' },
+      { id: 'a-agent', role: 'assistant', content: 'done', participantId: 'cc' },
+    ], 'c1', 'squirl');
+    expect(pairs[0]?.participantIds).toEqual(['cc']);
+  });
   it('pairs user + following assistant into one turn-pair', () => {
     const pairs = messagesToTurnPairs([user('u1', 'hello'), asst('a1', 'hi')], 'c1', 'squirl');
     expect(pairs).toHaveLength(1);

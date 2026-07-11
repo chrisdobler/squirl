@@ -18,6 +18,10 @@ function oldChunkText(p: TurnPair, maxChars = 768): string {
 }
 
 describe('buildChunkText', () => {
+  it('embeds participant handles for agent-aware recall', () => {
+    const pair = tp({ userText: 'fix the header', assistantText: 'done', participantIds: ['cc'] });
+    expect(buildChunkText(pair, DEFAULT_CHUNK_OPTIONS)).toContain('Agents: @cc');
+  });
   it('joins user and assistant text with a newline', () => {
     expect(buildChunkText(tp({ userText: 'hello', assistantText: 'world' }), DEFAULT_CHUNK_OPTIONS))
       .toBe('hello\nworld');

@@ -25,6 +25,7 @@ export function buildChunkText(pair: TurnPair, opts: ChunkOptions): string {
   let t = opts.template === 'user-only'
     ? pair.userText
     : `${pair.userText}\n${pair.assistantText}`;
+  if (pair.participantIds?.length) t = `Agents: ${pair.participantIds.map((id) => `@${id}`).join(', ')}\n${t}`;
   if (opts.includeToolSummary && pair.toolSummary) t += `\n${pair.toolSummary}`;
   t = t.replace(STRIP, '');
   if (t.length > opts.maxChars) t = t.slice(0, opts.maxChars);

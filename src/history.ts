@@ -126,6 +126,14 @@ export function loadHistory(): Message[] {
   return all.slice(-MAX_HISTORY).map((e) => e.message);
 }
 
+/** Load the complete Squirl-owned transcript for deterministic activity/accountability views. */
+export function loadAllHistoryMessages(): Message[] {
+  ensureDir();
+  const all = getAllHistoryFiles().flatMap((filePath) => readEntries(filePath));
+  all.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  return all.map((entry) => entry.message);
+}
+
 /**
  * Append a single message to the current log.
  */

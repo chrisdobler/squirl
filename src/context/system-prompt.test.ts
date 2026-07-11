@@ -47,4 +47,11 @@ describe('Squirl system prompt', () => {
     expect(message).toContain('Do not announce that memories were recalled');
     expect(message).toContain('only when the user explicitly asks');
   });
+
+  it('makes whole-room activity tracking a core responsibility', () => {
+    const message = String(buildSystemPrompt(vars, 'system').content);
+    expect(message).toContain('Maintain situational awareness of the whole room');
+    expect(message).toContain("what they are currently doing");
+    expect(message).toContain('list every specialized agent');
+  });
 });

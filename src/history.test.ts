@@ -143,6 +143,14 @@ describe('loadHistory', () => {
     expect(messages[49]!.content).toBe('day2-29');
   });
 
+  it('loads complete durable history for agent activity even beyond the chat window', async () => {
+    writeJsonl(join(historyDir, '2026-04-08.jsonl'), Array.from({ length: 60 }, (_, i) =>
+      entry(`agent-${i}`, 'user', `assignment-${i}`, `2026-04-08T12:${String(i).padStart(2, '0')}:00Z`),
+    ));
+    const { loadAllHistoryMessages } = await import('./history.js');
+    expect(loadAllHistoryMessages()).toHaveLength(60);
+  });
+
   it('returns empty when no history exists at all', async () => {
     const { loadHistory } = await import('./history.js');
     const messages = loadHistory();

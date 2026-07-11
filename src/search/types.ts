@@ -6,6 +6,8 @@ export interface TurnPair {
   userText: string;
   assistantText: string;
   toolSummary?: string;
+  /** Participants addressed or authoring this turn, retained for agent-aware recall. */
+  participantIds?: string[];
 }
 
 export interface EmbeddedChunk {

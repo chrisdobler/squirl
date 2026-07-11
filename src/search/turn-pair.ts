@@ -17,6 +17,8 @@ export function messagesToTurnPairs(messages: Message[], conversationId: string,
 
     const assistantTexts: string[] = [];
     const toolParts: string[] = [];
+    const participantIds = new Set<string>();
+    if (userMsg.participantId) participantIds.add(userMsg.participantId);
     let lastAssistantId = '';
 
     while (i < messages.length && messages[i]!.role !== 'user') {
@@ -24,6 +26,7 @@ export function messagesToTurnPairs(messages: Message[], conversationId: string,
       if (m.role === 'assistant') {
         assistantTexts.push(m.content);
         lastAssistantId = m.id;
+        if (m.participantId) participantIds.add(m.participantId);
       } else if (m.role === 'tool') {
         const snippet = m.content.length > 200 ? m.content.slice(0, 200) + '...' : m.content;
         toolParts.push(`${m.toolName} -> ${snippet}`);
@@ -41,6 +44,7 @@ export function messagesToTurnPairs(messages: Message[], conversationId: string,
       userText: userMsg.content,
       assistantText: assistantTexts.join('\n'),
       toolSummary: toolParts.length > 0 ? toolParts.join('\n') : undefined,
+      participantIds: participantIds.size > 0 ? [...participantIds] : undefined,
     });
   }
 
