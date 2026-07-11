@@ -1,5 +1,5 @@
 ---
-title: Architecture Status Tracker
+title: Pipeline Status Tracker
 tags:
   - squirl
   - architecture
@@ -7,49 +7,40 @@ tags:
   - status
 ---
 
-# Architecture Status Tracker
+# Pipeline Status Tracker
 
-Percentages are working estimates for architecture completion. They combine implemented behavior, test coverage, UX completeness, and known gaps.
+This is the detailed companion to [[README|Squirl Linear Pipeline]]. Percentages combine implemented behavior, test coverage, and day-to-day usability.
 
-## Rollup
+## Pipeline Rollup
 
 ```mermaid
-pie showData
-  title Architecture Completion Estimate
-  "Completed / stable" : 68
-  "Known gaps" : 22
-  "Unbuilt / future" : 10
+flowchart LR
+  capture["Capture<br/>80%"] --> context["Context<br/>85%"] --> route["Route<br/>75%"] --> execute["Execute<br/>80%"] --> present["Present<br/>80%"] --> persist["Persist<br/>82%"] --> measure["Measure<br/>75%"]
 ```
 
-## Component Tracker
+## Stage Tracker
 
-| Component | Completion | State | Current truth | Next step |
-|---|---:|---|---|---|
-| Core chat orchestration | 90% | Stable | Context assembly, truncation, streaming, tools, memory injection, and status callbacks are implemented. | Add prompt/tool inspection only when debugging workflows need it. |
-| TUI experience | 85% | Stable | Ink chat, status bar, model picker, context picker, rewind, room roster, and scrolling behavior exist. | Continue small UX hardening from real use. |
-| Web/Electron shared runtime | 75% | Usable | React/Vite web UI and Electron shell share `SquirlRuntime`, history, config, model state, health, evals, and agents. | Add persistent event broadcast before relying on multi-tab or background agent output. |
-| Provider routing | 80% | Usable | Hosted and local OpenAI-compatible paths exist; local gateway fallback behavior is in place. | Keep model discovery/context-window persistence polished as new backends appear. |
-| Memory indexing | 85% | Usable | Turn-pair ingestion, chunking, embeddings, vector store writes, and import/backfill paths exist. | Improve operational visibility around stale or failed indexing. |
-| Memory retrieval | 80% | Usable | Meta query extraction, embedding, vector search, ranking, prompt injection, and inline display exist. | Expand quality evals before changing ranking behavior. |
-| Eval harness | 80% | Usable | Layers 1-3, frozen/live modes, compare, dashboard, and monitor history exist. | Build Layer 0 for query-extraction quality. |
-| Health lights | 70% | Usable | Model, embedder, vector DB, and meta model probes are config-derived and shown in the web UI. | Tie health into a broader architecture/progress dashboard. |
-| Multi-agent room | 65% | Usable with limits | Coordinator, participants, adapters, parsers, CLI subprocess transport, roster, and safe handoff defaults exist. | Add persistent event broadcast and decide whether SSH transport is in scope. |
-| Tools and approvals | 70% | Usable | File, command, and directory tools exist; network command approval is guarded. | Revisit permissions if tool scope expands beyond local developer workflows. |
-| Rewind/history | 80% | Usable | Local JSONL history, imported-history boundaries, rewind, and vector cleanup exist. | Add more visual history management if rewind becomes a frequent workflow. |
+| Stage                   | Completion | State              | Current truth                                                                                         | Next action                                                                            |
+| ----------------------- | ---------: | ------------------ | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| 1. Capture request      |        80% | Usable             | The TUI, web UI, and Electron shell can start a chat through shared configuration and model state.    | Harden the web/Electron path through continued real use.                               |
+| 2. Assemble context     |        85% | Stable             | Conversation history, selected files, truncation, and recalled memory are assembled before execution. | Expand retrieval quality coverage before changing ranking behavior.                    |
+| 3. Route the work       |        75% | Usable with limits | Hosted and local models, built-in tools, and `@mention` participants can be selected or invoked.      | Decide the remote-agent transport scope and polish new-backend discovery.              |
+| 4. Execute the turn     |        80% | Usable             | Streaming chat, tool calls, approvals, and CLI-backed agent sessions work.                            | Improve asynchronous multi-agent behavior and revisit permissions as tool scope grows. |
+| 5. Present the response |        80% | Usable             | Streaming output, status, errors, room state, and dependency health are visible in the interfaces.    | Add persistent event broadcast for background agents and multiple web clients.         |
+| 6. Save and learn       |        82% | Stable             | JSONL history, rewind cleanup, turn-pair indexing, imports, and backfills are implemented.            | Improve visibility into stale or failed indexing.                                      |
+| 7. Verify and improve   |        75% | Usable             | Health probes, eval Layers 1-3, frozen/live runs, comparisons, dashboard, and monitor history exist.  | Build Layer 0 for query-extraction quality.                                            |
 
 ## Near-Term Sequence
 
 ```mermaid
 flowchart LR
-  layer0["Build Layer 0 eval"] --> status["Unify architecture status screen"]
-  status --> events["Add persistent web event broadcast"]
+  layer0["Build Layer 0 eval"] --> events["Add persistent web event broadcast"]
   events --> agents["Improve multi-agent async behavior"]
   agents --> remote["Decide SSH transport scope"]
 ```
 
 ## Update Checklist
 
-- Update this tracker when a component crosses a meaningful threshold: first usable, tested, shipped, or intentionally deferred.
-- Keep component names stable so progress can be scanned over time.
+- Update this tracker when a stage crosses a meaningful threshold: first usable, tested, shipped, or intentionally deferred.
+- Keep stage names stable so progress can be scanned over time.
 - Link new architecture notes from [[README]].
-

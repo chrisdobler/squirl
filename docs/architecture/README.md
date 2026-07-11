@@ -1,56 +1,50 @@
 ---
-title: Squirl Architecture Dashboard
+title: Squirl Linear Pipeline
 tags:
   - squirl
   - architecture
   - status
 ---
 
-# Squirl Architecture Dashboard
+# Squirl Linear Pipeline
 
-This folder is an Obsidian-friendly architecture workspace. Open the repo, or this `docs/architecture` folder, as an Obsidian vault to browse the diagrams and update the implementation status as the system changes.
+Read this page from top to bottom. It follows one request through Squirl from the moment it is entered until the result is saved and measured.
 
-## Navigation
+Percentages are planning estimates. They describe how complete each stage feels across implementation, tests, and day-to-day usability.
 
-- [[overall-architecture]] - system map across the TUI, web/Electron runtime, model providers, memory, tools, evals, health, and multi-agent room.
-- [[memory-and-eval]] - memory indexing, retrieval, eval layers, dashboard, and auto-monitoring.
-- [[multi-agent-room]] - @mention routing, subprocess adapters, participant status, and known broadcast limitations.
-- [[status-tracker]] - current completion estimates, blockers, and next steps.
-
-## Architecture At A Glance
+## The Pipeline
 
 ```mermaid
-flowchart LR
-  user["User"] --> surfaces["Squirl surfaces"]
+flowchart TB
+  capture["1. CAPTURE REQUEST<br/>TUI, Web, or Electron<br/>80%"]
+  context["2. ASSEMBLE CONTEXT<br/>Conversation, files, and recalled memory<br/>85%"]
+  route["3. ROUTE THE WORK<br/>Model, tools, or room participant<br/>75%"]
+  execute["4. EXECUTE THE TURN<br/>Stream model output and run tool calls<br/>80%"]
+  present["5. PRESENT THE RESPONSE<br/>Render output, status, and errors<br/>80%"]
+  persist["6. SAVE AND LEARN<br/>History, rewind state, and memory index<br/>82%"]
+  measure["7. VERIFY AND IMPROVE<br/>Health checks, evals, and monitoring<br/>75%"]
 
-  subgraph uiSurfaces["Squirl surfaces"]
-    tui["Ink TUI"]
-    web["React web UI"]
-    electron["Electron shell"]
-  end
-
-  surfaces --> tui
-  surfaces --> web
-  surfaces --> electron
-  tui --> runtime["Shared runtime and orchestrator"]
-  web --> runtime
-  electron --> runtime
-  runtime --> providers["Model providers"]
-  runtime --> memory["Memory and retrieval"]
-  runtime --> tools["Built-in tools"]
-  runtime --> agents["Multi-agent room"]
-  runtime --> evals["Eval dashboard and monitor"]
-  runtime --> health["Dependency health lights"]
-
-  providers --> hosted["OpenAI / Anthropic"]
-  providers --> local["Local OpenAI-compatible gateway"]
-  memory --> vector["Chroma / null vector store"]
-  agents --> clis["Claude Code / Codex CLIs"]
+  capture --> context --> route --> execute --> present --> persist --> measure
 ```
 
-## Operating Rules
+## Where We Are
 
-- Keep Mermaid diagrams close to the real code paths; avoid adding future components to the diagram until there is a concrete implementation plan or code.
-- Treat percentages in [[status-tracker]] as planning estimates, not quality scores.
-- When an architecture area changes, update both its diagram note and the tracker row in the same work pass.
-- Prefer short notes with links to source owners over long copied explanations.
+The main chat path is usable end to end. The strongest areas are context assembly, core chat orchestration, history, and memory indexing.
+
+The current gaps are concentrated near the end of the pipeline and in advanced routing: query-extraction evaluation, persistent web event delivery, asynchronous multi-agent behavior, and the decision around remote agent transport.
+
+See [[status-tracker]] for the next concrete action at every stage.
+
+## Drill Down Only When Needed
+
+- [[status-tracker]] - progress, current truth, and next action by pipeline stage.
+- [[architectural-decisions]] - accepted architecture choices, rationale, and consequences.
+- [[memory-and-eval]] - detail for recalled memory, indexing, and evaluation.
+- [[multi-agent-room]] - detail for participant routing and agent sessions.
+- [[overall-architecture]] - code-oriented component map for implementation tracing.
+
+## Keeping It Current
+
+- Update a stage only when something meaningfully changes in implementation, tests, or usability.
+- Update the stage percentage and its next action together.
+- Keep code-level detail in the drill-down notes so this page stays readable.
