@@ -18,14 +18,15 @@ export interface ContextMatrixCell {
   disabled?: boolean;
 }
 
-export function ContextMatrix({ cells, activeIndex, compact = false, label = 'Context matrix', onSelect }: {
+export function ContextMatrix({ cells, activeIndex, compact = false, label = 'Context matrix', tone = 'categorized', onSelect }: {
   cells: ContextMatrixCell[];
   activeIndex?: number | null;
   compact?: boolean;
   label?: string;
+  tone?: 'categorized' | 'neutral';
   onSelect?: (cell: ContextMatrixCell) => void;
 }) {
-  return <div className={`contextDiscGrid${onSelect ? ' interactive' : ''}${compact ? ' compact' : ''}`} aria-label={label}>
+  return <div className={`contextDiscGrid${onSelect ? ' interactive' : ''}${compact ? ' compact' : ''}${tone === 'neutral' ? ' neutral' : ''}`} aria-label={label}>
     {cells.map((cell) => onSelect && !cell.disabled ? (
       <button
         key={cell.index}

@@ -11,6 +11,7 @@ import { parseMentions } from './mentions.js';
 import { SQUIRL_PARTICIPANT, USER_PARTICIPANT, participantFromDescriptor, pickAgentColor } from './participants.js';
 import type { AgentDescriptor, AgentEvent, AgentSession, AgentTransport, Participant, ParticipantColor } from './types.js';
 import type { AgentContextTelemetry } from './context-preview.js';
+import { discoverCodexModels } from './codex-models.js';
 
 export interface CoordinatorConfig {
   autoHandoff?: boolean;
@@ -72,12 +73,16 @@ export class GroupChatCoordinator {
     } else if (event.type === 'usage') {
       const descriptor = this.sessions.get(event.participantId)?.descriptor;
       const previous = this.contextTelemetry.get(event.participantId) ?? { participantId: event.participantId };
+      const modelId = this.resolvedModels.get(event.participantId) ?? descriptor?.model ?? previous.modelId;
+      const codexWindow = descriptor?.kind === 'codex' && modelId
+        ? discoverCodexModels().models.find((model) => model.id === modelId)?.contextWindow
+        : undefined;
       this.contextTelemetry.set(event.participantId, {
         ...previous,
         sessionId: descriptor?.sessionId ?? previous.sessionId,
-        modelId: this.resolvedModels.get(event.participantId) ?? descriptor?.model ?? previous.modelId,
+        modelId,
         inputTokens: event.usage.inputTokens ?? previous.inputTokens,
-        contextWindow: event.usage.contextWindow ?? previous.contextWindow,
+        contextWindow: event.usage.contextWindow ?? previous.contextWindow ?? codexWindow,
         capturedAt: new Date().toISOString(),
       });
     }

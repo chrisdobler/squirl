@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 import type { Participant } from '../agents/types.js';
 import { PARTICIPANT_COLOR_VALUE, roomMembers } from '../agents/participants.js';
-import type { ParticipantContextPreview } from './types.js';
+import type { HealthEntry, ParticipantContextPreview } from './types.js';
 import { ContextLegend, ContextMatrix } from './ContextMatrix.js';
 import { ParticipantIdentity } from './ParticipantIdentity.js';
 
@@ -22,19 +22,29 @@ function kindLabel(participant: Participant): string {
   return participant.kind === 'claude-code' ? 'Claude Code' : 'Codex CLI';
 }
 
+export function sidebarDestination(participant: Participant): 'agent' | 'model' {
+  return participant.kind === 'local-llm' ? 'model' : 'agent';
+}
+
 function fidelityLabel(preview: ParticipantContextPreview): string {
   if (preview.fidelity === 'inspected-estimate') return 'inspected estimate';
   if (preview.fidelity === 'exact') return 'exact request';
   return preview.fidelity;
 }
 
-export function ContextPreviewCard({ participant, preview, loading, position }: {
+export function ContextPreviewCard({ participant, preview, loading, position, onPointerEnter, onPointerLeave }: {
   participant: Participant;
   preview: ParticipantContextPreview | null;
   loading: boolean;
   position: { left: number; top: number };
+  onPointerEnter?: React.PointerEventHandler<HTMLElement>;
+  onPointerLeave?: React.PointerEventHandler<HTMLElement>;
 }) {
-  return <aside className="agentContextPopover" style={position} role="tooltip">
+  const usageOnly = preview?.matrixMode === 'usage';
+  const availableTokens = preview?.contextWindow != null && preview.usedTokens != null
+    ? Math.max(0, preview.contextWindow - preview.usedTokens)
+    : null;
+  return <aside className="agentContextPopover" style={position} role="tooltip" onPointerEnter={onPointerEnter} onPointerLeave={onPointerLeave}>
     <header>
       <ParticipantIdentity participant={participant} />
       <div><ParticipantIdentity participant={participant} text={participant.label} marker={false} className="rosterName"/><span>@{participant.id} · {kindLabel(participant)}</span></div>
@@ -43,20 +53,29 @@ export function ContextPreviewCard({ participant, preview, loading, position }: 
       <div className="agentContextUnavailable"><strong>Context unavailable</strong><p>{preview.unavailableReason}</p></div>
     ) : preview ? <>
       <div className="agentContextMeta">
+        <span>view</span><strong>last turn input</strong>
         <span>model</span><strong>{preview.modelId ?? 'unknown'}</strong>
         <span>context</span><strong>{fmt(preview.usedTokens)} / {fmt(preview.contextWindow)} tokens</strong>
         <span>source</span><strong>{fidelityLabel(preview)}</strong>
         <span>updated</span><strong>{preview.capturedAt ? new Date(preview.capturedAt).toLocaleTimeString() : 'unknown'}</strong>
       </div>
-      <ContextMatrix compact label={`${participant.label} context matrix preview`} cells={preview.discs.map((kind, index) => ({ index, kind }))} />
-      <ContextLegend compact />
+      <ContextMatrix compact tone={usageOnly ? 'neutral' : 'categorized'} label={`${participant.label} context matrix preview`} cells={preview.discs.map((kind, index) => ({ index, kind }))} />
+      {usageOnly ? <div className="contextUsageLegend" aria-label="Context usage legend">
+        <span><i className="used" />used {fmt(preview.usedTokens)}</span>
+        <span><i className="available" />available {fmt(availableTokens)}</span>
+        <small>Usage only · Codex does not expose category-level context.</small>
+      </div> : <ContextLegend compact amounts={{ ...preview.buckets, available: availableTokens ?? undefined }} formatAmount={fmt} />}
       {loading && <span className="agentContextRefreshing">refreshing…</span>}
     </> : <div className="agentContextUnavailable"><strong>Context unavailable</strong></div>}
   </aside>;
 }
 
-export function RoomSidebarRoster({ participants, loadPreview }: {
+export function RoomSidebarRoster({ participants, healthEntries, squirlDependenciesExpanded, onSquirlDependenciesExpandedChange, onSelectParticipant, loadPreview }: {
   participants: Participant[];
+  healthEntries: HealthEntry[];
+  squirlDependenciesExpanded: boolean;
+  onSquirlDependenciesExpandedChange: (expanded: boolean) => void;
+  onSelectParticipant: (participant: Participant) => void;
   loadPreview: (participantId: string, signal: AbortSignal) => Promise<ParticipantContextPreview>;
 }) {
   const members = useMemo(() => roomMembers(participants), [participants]);
@@ -83,6 +102,10 @@ export function RoomSidebarRoster({ participants, loadPreview }: {
     if (openTimer.current != null) window.clearTimeout(openTimer.current);
     if (closeTimer.current != null) window.clearTimeout(closeTimer.current);
     closeTimer.current = window.setTimeout(() => setActiveId(null), delay);
+  };
+
+  const keepOpen = () => {
+    if (closeTimer.current != null) window.clearTimeout(closeTimer.current);
   };
 
   const open = (participant: Participant, element: HTMLElement, delay: number) => {
@@ -118,32 +141,57 @@ export function RoomSidebarRoster({ participants, loadPreview }: {
   return <section className="roomRail" aria-label="Agents in this room">
     <header><h3>In this room</h3><span>{members.length}</span></header>
     <div className="roomRailList">
-      {members.map((participant) => (
-        <button
-          type="button"
-          className={`roomRailAgent${activeId === participant.id ? ' active' : ''}`}
-          key={participant.id}
-          aria-label={`${participant.label} @${participant.id} · ${participant.status ?? 'ready'} ${participant.kind === 'local-llm' ? 'local' : participant.kind === 'claude-code' ? 'Claude' : 'Codex'}`}
-          aria-describedby={activeId === participant.id ? 'agent-context-preview' : undefined}
-          onPointerEnter={(event) => open(participant, event.currentTarget, 180)}
-          onPointerLeave={() => close()}
-          onFocus={(event) => open(participant, event.currentTarget, 0)}
-          onBlur={() => close(0)}
-          onClick={(event) => {
-            const touchLayout = window.matchMedia('(hover: none)').matches;
-            if (touchLayout && activeId === participant.id) close(0);
-            else open(participant, event.currentTarget, 0);
-          }}
-        >
-          <span className="roomRailIdentity" style={{ borderColor: PARTICIPANT_COLOR_VALUE[participant.color] }} aria-hidden="true">
-            {participant.label.slice(0, 1).toUpperCase()}
-            <span className="roomRailStatus" style={{ background: STATUS_COLOR[participant.status ?? 'ready'] }} />
-          </span>
-          <span className="roomRailText"><ParticipantIdentity participant={participant} text={participant.label} marker={false} className="roomRailName"/><small>@{participant.id} · {participant.status ?? 'ready'}</small></span>
-          <span className="roomRailKind">{participant.kind === 'local-llm' ? 'local' : participant.kind === 'claude-code' ? 'Claude' : 'Codex'}</span>
-        </button>
-      ))}
+      {members.map((participant) => {
+        const isSquirl = participant.kind === 'local-llm';
+        return <div className={`roomRailNode${isSquirl ? ' squirlNode' : ''}`} key={participant.id}>
+          <div className={`roomRailNodeRow${isSquirl ? ' hasDisclosure' : ''}`}>
+            <button
+              type="button"
+              className={`roomRailAgent${activeId === participant.id ? ' active' : ''}`}
+              aria-label={`${participant.label} @${participant.id} · ${participant.status ?? 'ready'} ${isSquirl ? 'local' : participant.kind === 'claude-code' ? 'Claude' : 'Codex'}`}
+              aria-describedby={activeId === participant.id ? 'agent-context-preview' : undefined}
+              onPointerEnter={(event) => open(participant, event.currentTarget, 180)}
+              onPointerLeave={() => close(220)}
+              onFocus={(event) => open(participant, event.currentTarget, 0)}
+              onBlur={() => close(0)}
+              data-destination={sidebarDestination(participant)}
+              onClick={() => {
+                close(0);
+                onSelectParticipant(participant);
+              }}
+            >
+              <span className="roomRailIdentity" style={{ borderColor: PARTICIPANT_COLOR_VALUE[participant.color] }} aria-hidden="true">
+                {participant.label.slice(0, 1).toUpperCase()}
+                <span className="roomRailStatus" style={{ background: STATUS_COLOR[participant.status ?? 'ready'] }} />
+              </span>
+              <span className="roomRailText"><ParticipantIdentity participant={participant} text={participant.label} marker={false} className="roomRailName"/><small>@{participant.id} · {participant.status ?? 'ready'}</small></span>
+              <span className="roomRailKind">{isSquirl ? 'local' : participant.kind === 'claude-code' ? 'Claude' : 'Codex'}</span>
+            </button>
+            {isSquirl && <button
+              type="button"
+              className="roomRailDisclosure"
+              aria-label={`${squirlDependenciesExpanded ? 'Collapse' : 'Expand'} Squirl dependencies`}
+              aria-expanded={squirlDependenciesExpanded}
+              aria-controls="squirl-dependency-tree"
+              onClick={() => onSquirlDependenciesExpandedChange(!squirlDependenciesExpanded)}
+            ><span aria-hidden="true">›</span></button>}
+          </div>
+          {isSquirl && squirlDependenciesExpanded && <div id="squirl-dependency-tree" className="squirlDependencyTree" role="tree" aria-label="Squirl dependencies">
+            {healthEntries.map((health) => <div
+              className="squirlDependency"
+              key={health.id}
+              role="treeitem"
+              title={health.detail ?? health.state}
+              aria-label={`${health.label}: ${health.state}${health.detail ? ` · ${health.detail}` : ''}`}
+            >
+              <span className={`healthDot ${health.state}`} aria-hidden="true" />
+              <span className="healthLabel">{health.label}</span>
+              <small>{health.state}</small>
+            </div>)}
+          </div>}
+        </div>;
+      })}
     </div>
-    {activeParticipant && <div id="agent-context-preview"><ContextPreviewCard participant={activeParticipant} preview={preview} loading={loading} position={position} /></div>}
+    {activeParticipant && <div id="agent-context-preview"><ContextPreviewCard participant={activeParticipant} preview={preview} loading={loading} position={position} onPointerEnter={keepOpen} onPointerLeave={() => close(160)} /></div>}
   </section>;
 }

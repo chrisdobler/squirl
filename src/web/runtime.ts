@@ -35,7 +35,8 @@ import { SQUIRL_PARTICIPANT } from '../agents/participants.js';
 import { materializeProfile, nextAvailableAgentId, profileFromDescriptor, removeAgentProfile, upsertAgentProfile, validateAgentHandle } from '../agents/profiles.js';
 import { parseDelegationIntent, type DelegationAgent } from '../agents/delegation.js';
 import type { AgentEvent, AgentKind, Participant } from '../agents/types.js';
-import { contextPreviewFromSnapshot, inspectParticipantContext, type ParticipantContextPreview } from '../agents/context-preview.js';
+import { contextPreviewFromSnapshot, inspectParticipantContext, unavailableContextPreview, type ParticipantContextPreview } from '../agents/context-preview.js';
+import { loadParticipantContextPreviews, saveParticipantContextPreviews } from '../agents/context-preview-store.js';
 import type { AddAgentResult, AgentSummary } from '../commands/registry.js';
 import type { SelectedModel } from '../components/ModelPicker.js';
 import type { Message, AssistantMessage } from '../types.js';
@@ -172,6 +173,8 @@ export class SquirlRuntime extends EventEmitter {
   private historySignature = '';
   private configSignature = '';
   private coordinator: GroupChatCoordinator;
+  private participantContextPreviews: Record<string, ParticipantContextPreview>;
+  private readonly lastAgentErrors = new Map<string, string>();
   private activeEmit: ((event: ChatEvent) => void) | null = null;
   private evalMonitorTimer: ReturnType<typeof setInterval> | null = null;
   private evalMonitorRunning = false;
@@ -188,6 +191,7 @@ export class SquirlRuntime extends EventEmitter {
     this.selectedModel = defaultModelFromConfig(this.config);
     this.healthReport = unknownReport(this.config, this.selectedModel);
     this.orchestrator = new Orchestrator(workingDir);
+    this.participantContextPreviews = loadParticipantContextPreviews(workingDir);
     this.coordinator = new GroupChatCoordinator({
       config: { autoHandoff: this.config.agents?.autoHandoff, maxHops: this.config.agents?.maxHops },
       transport: new LocalSpawnTransport(),
@@ -344,8 +348,15 @@ export class SquirlRuntime extends EventEmitter {
       return contextPreviewFromSnapshot(participant.id, this.orchestrator.getContextSnapshot(this.messages, this.selectedModel));
     }
     if (participant.kind !== 'claude-code' && participant.kind !== 'codex') return null;
+    const persisted = this.participantContextPreviews[participant.id];
+    if (persisted) return persisted;
     const telemetry = this.coordinator.getContextTelemetry(participant.id) ?? { participantId: participant.id };
-    return inspectParticipantContext(participant.kind, telemetry);
+    return unavailableContextPreview(
+      participant.id,
+      participant.kind === 'claude-code' ? 'claude-session' : 'codex-session',
+      'No completed turn input has been captured for this agent yet.',
+      telemetry.modelId,
+    );
   }
 
   addContextFile(path: string): AppState {
@@ -707,6 +718,20 @@ export class SquirlRuntime extends EventEmitter {
         appendMessage(finalized);
         this.historySignature = historySignature();
         emit?.({ type: 'assistant-final', message: finalized });
+        break;
+      }
+      case 'turn-end': {
+        const participant = this.coordinator.listParticipants().find((candidate) => candidate.id === event.participantId);
+        if (participant?.kind === 'claude-code' || participant?.kind === 'codex') {
+          const telemetry = this.coordinator.getContextTelemetry(participant.id);
+          if (telemetry) {
+            const preview = inspectParticipantContext(participant.kind, telemetry);
+            if (preview.fidelity !== 'unavailable') {
+              this.participantContextPreviews = { ...this.participantContextPreviews, [participant.id]: preview };
+              saveParticipantContextPreviews(this.workingDir, this.participantContextPreviews);
+            }
+          }
+        }
         break;
       }
       case 'tool-start': {

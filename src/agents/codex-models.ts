@@ -5,6 +5,7 @@ import { join } from 'node:path';
 export interface CodexModelOption {
   id: string;
   label: string;
+  contextWindow?: number;
 }
 
 export interface CodexModelDiscovery {
@@ -18,6 +19,8 @@ interface CodexModelsCache {
     display_name?: string;
     visibility?: string;
     priority?: number;
+    context_window?: number;
+    effective_context_window_percent?: number;
   }>;
 }
 
@@ -34,11 +37,24 @@ export function discoverCodexModels(codexHome = process.env.CODEX_HOME || join(h
   let models: CodexModelOption[] = [];
 
   if (existsSync(cachePath)) {
-    const cache = JSON.parse(readFileSync(cachePath, 'utf-8')) as CodexModelsCache;
-    models = (cache.models ?? [])
-      .filter((model) => model.slug && model.visibility !== 'hide')
-      .sort((left, right) => (left.priority ?? Number.MAX_SAFE_INTEGER) - (right.priority ?? Number.MAX_SAFE_INTEGER))
-      .map((model) => ({ id: model.slug!, label: model.display_name?.trim() || model.slug! }));
+    try {
+      const cache = JSON.parse(readFileSync(cachePath, 'utf-8')) as CodexModelsCache;
+      models = (cache.models ?? [])
+        .filter((model) => model.slug && model.visibility !== 'hide')
+        .sort((left, right) => (left.priority ?? Number.MAX_SAFE_INTEGER) - (right.priority ?? Number.MAX_SAFE_INTEGER))
+        .map((model) => {
+          const contextWindow = model.context_window && model.context_window > 0
+            ? Math.floor(model.context_window * ((model.effective_context_window_percent ?? 100) / 100))
+            : undefined;
+          return {
+            id: model.slug!,
+            label: model.display_name?.trim() || model.slug!,
+            ...(contextWindow ? { contextWindow } : {}),
+          };
+        });
+    } catch {
+      // The CLI may be replacing this cache while Squirl reads it. Keep chat/runtime paths usable.
+    }
   }
 
   if (defaultModel && !models.some((model) => model.id === defaultModel)) {

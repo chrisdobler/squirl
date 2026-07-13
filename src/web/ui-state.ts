@@ -11,6 +11,7 @@ export interface UiStateV1 {
   version: typeof UI_STATE_VERSION;
   activeSurface: CommandSurface | null;
   theme: 'light' | 'dark';
+  sidebar: { squirlDependenciesExpanded: boolean };
   chat: {
     draft: string;
     recipientId: string;
@@ -24,7 +25,8 @@ export interface UiStateV1 {
   agent: { kind: AgentKind; id: string; model: string; effort: EffortLevel | ''; cwd: string };
 }
 
-export type UiStatePatch = Partial<Omit<UiStateV1, 'version' | 'chat' | 'context' | 'eval' | 'memory' | 'model' | 'agent'>> & {
+export type UiStatePatch = Partial<Omit<UiStateV1, 'version' | 'sidebar' | 'chat' | 'context' | 'eval' | 'memory' | 'model' | 'agent'>> & {
+  sidebar?: Partial<UiStateV1['sidebar']>;
   chat?: Partial<UiStateV1['chat']>;
   context?: Partial<UiStateV1['context']>;
   eval?: Partial<UiStateV1['eval']>;
@@ -38,6 +40,7 @@ export function defaultUiState(): UiStateV1 {
     version: UI_STATE_VERSION,
     activeSurface: null,
     theme: 'dark',
+    sidebar: { squirlDependenciesExpanded: true },
     chat: { draft: '', recipientId: 'squirl', showThinking: false, viewport: null },
     context: { mode: 'explorer', query: '', activeDiscIndex: null },
     eval: { selectedKey: '', hiddenMetrics: [], layer: 1, mode: 'frozen', label: '' },
@@ -53,6 +56,7 @@ const record = (value: unknown): Record<string, unknown> => value && typeof valu
 export function normalizeUiState(value: unknown): UiStateV1 {
   const defaults = defaultUiState();
   const root = record(value);
+  const sidebar = record(root.sidebar);
   const chat = record(root.chat);
   const context = record(root.context);
   const evalState = record(root.eval);
@@ -67,6 +71,7 @@ export function normalizeUiState(value: unknown): UiStateV1 {
     version: UI_STATE_VERSION,
     activeSurface: surface,
     theme: root.theme === 'light' ? 'light' : 'dark',
+    sidebar: { squirlDependenciesExpanded: sidebar.squirlDependenciesExpanded !== false },
     chat: {
       draft: string(chat.draft, ''),
       recipientId: string(chat.recipientId, 'squirl'),
@@ -104,6 +109,7 @@ export function normalizeUiState(value: unknown): UiStateV1 {
 export function mergeUiState(current: UiStateV1, patch: UiStatePatch): UiStateV1 {
   return normalizeUiState({
     ...current, ...patch, version: UI_STATE_VERSION,
+    sidebar: { ...current.sidebar, ...patch.sidebar },
     chat: { ...current.chat, ...patch.chat },
     context: { ...current.context, ...patch.context },
     eval: { ...current.eval, ...patch.eval },

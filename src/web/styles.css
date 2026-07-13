@@ -196,21 +196,6 @@ nav button.active,
   font-weight: 600;
 }
 
-.healthLights {
-  display: grid;
-  gap: 7px;
-  border-top: 1px solid #24313a;
-  padding-top: 14px;
-  font-size: 12px;
-}
-
-.healthRow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: #9fb0bb;
-}
-
 .roomRail {
   display: flex;
   flex: 1 1 auto;
@@ -246,6 +231,65 @@ nav button.active,
   overflow: auto;
   scrollbar-width: thin;
 }
+
+.roomRailNode,
+.roomRailNodeRow { min-width: 0; }
+.roomRailNodeRow.hasDisclosure { display: grid; grid-template-columns: minmax(0, 1fr) 24px; gap: 2px; align-items: center; }
+
+.roomRailDisclosure {
+  display: grid;
+  width: 24px;
+  height: 30px;
+  place-items: center;
+  border-color: transparent;
+  background: transparent;
+  padding: 0;
+  color: #82949f;
+}
+
+.roomRailDisclosure:hover,
+.roomRailDisclosure:focus-visible { border-color: #355866; background: #14252d; color: #dce8ee; }
+.roomRailDisclosure span { display: block; font-size: 18px; line-height: 1; transform: rotate(90deg); transition: transform 120ms ease; }
+.roomRailDisclosure[aria-expanded='false'] span { transform: rotate(0deg); }
+
+.squirlDependencyTree {
+  display: grid;
+  gap: 4px;
+  margin: 2px 4px 4px 20px;
+  padding-left: 14px;
+}
+
+.squirlDependency {
+  position: relative;
+  display: grid;
+  grid-template-columns: 9px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  min-height: 20px;
+  color: #9fb0bb;
+  font-size: 10px;
+}
+
+.squirlDependency::before {
+  position: absolute;
+  left: -14px;
+  width: 10px;
+  border-top: 1px solid #33414c;
+  content: '';
+}
+
+.squirlDependency::after {
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  left: -14px;
+  border-left: 1px solid #33414c;
+  content: '';
+}
+
+.squirlDependency:last-child::after { bottom: 50%; }
+
+.squirlDependency small { color: #71838e; font-size: 9px; text-transform: lowercase; }
 
 .roomRailAgent {
   display: grid;
@@ -313,7 +357,7 @@ nav button.active,
   z-index: 60;
   width: 300px;
   min-height: 150px;
-  pointer-events: none;
+  pointer-events: auto;
   border: 1px solid #41606d;
   border-radius: 10px;
   background: #10181e;
@@ -339,6 +383,12 @@ nav button.active,
 .agentContextLoading, .agentContextUnavailable { min-height: 88px; display: grid; align-content: center; gap: 6px; color: #8fa4ae; font-size: 11px; }
 .agentContextUnavailable p { line-height: 1.4; }
 .agentContextRefreshing { display: block; margin-top: 6px; color: #71838e; font-size: 9px; text-align: right; }
+.contextUsageLegend { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 10px; color: #92a3ad; font-size: 9px; }
+.contextUsageLegend span { display: inline-flex; align-items: center; gap: 4px; }
+.contextUsageLegend i { width: 8px; height: 8px; border-radius: 2px; }
+.contextUsageLegend i.used { background: #eef3f5; }
+.contextUsageLegend i.available { border: 1px solid #46545e; background: #222d36; }
+.contextUsageLegend small { flex-basis: 100%; color: #71838e; font-size: 9px; }
 
 .healthDot {
   width: 9px;
@@ -1211,6 +1261,14 @@ nav button.active,
   .roomRail > header h3, .roomRail > header span, .roomRailText, .roomRailKind { display: none; }
   .roomRailAgent { grid-template-columns: 1fr; justify-items: center; padding: 6px 2px; }
   .roomRailIdentity { width: 30px; height: 30px; }
+  .roomRailNodeRow.hasDisclosure { grid-template-columns: minmax(0, 1fr) 18px; }
+  .roomRailDisclosure { width: 18px; }
+  .squirlDependencyTree { margin-left: 12px; padding-left: 9px; }
+  .squirlDependency { grid-template-columns: 9px; justify-content: start; }
+  .squirlDependency::before { left: -9px; width: 6px; }
+  .squirlDependency::after { left: -9px; }
+  .squirlDependency .healthLabel,
+  .squirlDependency small { display: none; }
 }
 
 .chip {
@@ -1704,6 +1762,8 @@ nav button.active,
 .disc.files { background: #facc15; }
 .disc.messages { background: #4ade80; }
 .disc.available { background: #222d36; border: 1px solid #33414c; }
+.contextDiscGrid.neutral .disc:not(.available) { background: #eef3f5; }
+.contextDiscGrid.neutral .disc.available { border-color: #46545e; background: #222d36; }
 
 .contextNavigator { position: sticky; top: -20px; z-index: 4; margin: 0 -22px; padding: 14px 22px; border-bottom: 1px solid #293740; background: #10181e; box-shadow: 0 8px 16px rgba(0, 0, 0, 0.18); }
 .contextDiscGrid.interactive button.disc { padding: 0; border: 0; cursor: pointer; opacity: 1; }
@@ -1822,7 +1882,6 @@ nav button.active,
 .appShell[data-theme='light'] .topBar,
 .appShell[data-theme='light'] .composer,
 .appShell[data-theme='light'] .telemetry,
-.appShell[data-theme='light'] .healthLights,
 .appShell[data-theme='light'] .contextViewHeader,
 .appShell[data-theme='light'] .contextViewFooter {
   border-color: #cbd5da;
@@ -1834,6 +1893,13 @@ nav button.active,
 .appShell[data-theme='light'] .roomRailAgent:hover,
 .appShell[data-theme='light'] .roomRailAgent:focus-visible,
 .appShell[data-theme='light'] .roomRailAgent.active { border-color: #9eb7c0; background: #e1ecef; }
+.appShell[data-theme='light'] .roomRailDisclosure { color: #60737d; }
+.appShell[data-theme='light'] .roomRailDisclosure:hover,
+.appShell[data-theme='light'] .roomRailDisclosure:focus-visible { border-color: #9eb7c0; background: #e1ecef; color: #26343c; }
+.appShell[data-theme='light'] .squirlDependency { color: #526872; }
+.appShell[data-theme='light'] .squirlDependency::before,
+.appShell[data-theme='light'] .squirlDependency::after { border-color: #b8c6cc; }
+.appShell[data-theme='light'] .squirlDependency small { color: #71838e; }
 .appShell[data-theme='light'] .roomRailIdentity { color: #26343c; }
 .appShell[data-theme='light'] .roomRailStatus { border-color: #eef2f4; }
 .appShell[data-theme='light'] .roomRailText strong { color: #26343c; }
@@ -1843,6 +1909,10 @@ nav button.active,
 .appShell[data-theme='light'] .agentContextMeta strong { color: #2d414a; }
 .appShell[data-theme='light'] .agentContextLoading,
 .appShell[data-theme='light'] .agentContextUnavailable { color: #60737d; }
+.appShell[data-theme='light'] .contextDiscGrid.neutral .disc:not(.available),
+.appShell[data-theme='light'] .contextUsageLegend i.used { background: #56636a; }
+.appShell[data-theme='light'] .contextDiscGrid.neutral .disc.available,
+.appShell[data-theme='light'] .contextUsageLegend i.available { border-color: #aebbc1; background: #edf1f3; }
 
 .appShell[data-theme='light'] .contextViewHeader { color: #243039; }
 .appShell[data-theme='light'] .contextTabs { border-color: #b9c7cd; background: #e8eef1; }

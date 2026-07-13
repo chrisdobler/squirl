@@ -230,6 +230,33 @@ describe('SquirlRuntime agents', () => {
     expect(saved.agents.defaults[0].cwd).toBe(projectDir);
   });
 
+  it('persists the last completed CLI turn input across runtime recreation', async () => {
+    const sessions = join(testHome, '.codex', 'sessions', '2026', '07', '13');
+    mkdirSync(sessions, { recursive: true });
+    writeFileSync(join(sessions, 'rollout-session-1.jsonl'), [
+      { type: 'session_meta', payload: { base_instructions: 'base rules', context_window: 1000 } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: 'last injected request' } },
+      { type: 'response_item', payload: { type: 'message', role: 'assistant', content: 'completed output must not be counted' } },
+      { type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 250 }, model_context_window: 1000 } } },
+    ].map((entry) => JSON.stringify(entry)).join('\n') + '\n', 'utf-8');
+    const first = await loadRuntime();
+    await first.addAgent('codex', { id: 'reviewer', model: 'gpt-test' });
+    const firstInternals = first as unknown as {
+      coordinator: { contextTelemetry: Map<string, unknown> };
+      handleAgentEvent: (event: unknown) => void;
+    };
+    firstInternals.coordinator.contextTelemetry.set('reviewer', {
+      participantId: 'reviewer', sessionId: 'session-1', modelId: 'gpt-test', inputTokens: 250, contextWindow: 1000,
+    });
+    firstInternals.handleAgentEvent({ type: 'turn-end', participantId: 'reviewer' });
+    expect(first.getParticipantContextPreview('reviewer')).toMatchObject({ usedTokens: 250, contextWindow: 1000, matrixMode: 'usage' });
+
+    const second = await loadRuntime();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(second.getParticipantContextPreview('reviewer')).toMatchObject({ usedTokens: 250, contextWindow: 1000, matrixMode: 'usage' });
+  });
+
   it('rejects an agent working directory that does not exist', async () => {
     const runtime = await loadRuntime();
     const missingDir = join(testHome, 'missing-project');

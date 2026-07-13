@@ -23,6 +23,7 @@ describe('participant context preview API', () => {
   it('returns only the sanitized preview contract', async () => {
     const preview: ParticipantContextPreview = {
       participantId: 'codex', modelId: 'gpt-test', source: 'codex-session', fidelity: 'inspected', capturedAt: 'now',
+      matrixMode: 'usage',
       usedTokens: 10, contextWindow: 100, buckets: { system: 2, memory: 0, files: 3, messages: 5 },
       discs: Array.from({ length: 100 }, (_, index) => index < 10 ? 'messages' : 'available'),
     };

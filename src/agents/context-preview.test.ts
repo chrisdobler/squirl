@@ -39,6 +39,16 @@ describe('Claude context artifact inspection', () => {
     expect(result.buckets.messages).toBeGreaterThan(0);
     expect(result.buckets.messages).toBeLessThan(20);
   });
+
+  it('measures the input to the completed turn without counting its final response', () => {
+    const result = inspectClaudeSession(jsonl([
+      { type: 'user', uuid: 'u1', message: { role: 'user', content: 'injected request' } },
+      { type: 'assistant', uuid: 'a1', parentUuid: 'u1', message: { role: 'assistant', model: 'claude-test', content: 'x'.repeat(20_000), usage: { input_tokens: 50 } } },
+      { type: 'last-prompt', leafUuid: 'a1' },
+    ]))!;
+    expect(result.inputTokens).toBe(50);
+    expect(result.buckets.messages).toBeLessThan(20);
+  });
 });
 
 describe('Codex context artifact inspection', () => {
@@ -57,6 +67,17 @@ describe('Codex context artifact inspection', () => {
     expect(result.buckets.files).toBeGreaterThan(0);
     expect(JSON.stringify(result)).not.toContain('source body');
   });
+
+  it('excludes the completed assistant response from the inspected turn input', () => {
+    const result = inspectCodexSession(jsonl([
+      { type: 'session_meta', payload: { base_instructions: 'rules', context_window: 1000 } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: 'injected request' } },
+      { type: 'response_item', payload: { type: 'message', role: 'assistant', content: 'x'.repeat(20_000) } },
+      { type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 50 }, model_context_window: 1000 } } },
+    ]))!;
+    expect(result.inputTokens).toBe(50);
+    expect(result.buckets.messages).toBeLessThan(20);
+  });
 });
 
 describe('participant context preview lookup', () => {
@@ -74,7 +95,7 @@ describe('participant context preview lookup', () => {
     const preview = inspectParticipantContext('claude-code', {
       participantId: 'cc', sessionId: 'session-1', modelId: 'claude-test', inputTokens: 400, contextWindow: 1000,
     }, { claudeProjects: join(root, 'claude'), codexSessions });
-    expect(preview).toMatchObject({ participantId: 'cc', fidelity: 'inspected', usedTokens: 400, contextWindow: 1000 });
+    expect(preview).toMatchObject({ participantId: 'cc', fidelity: 'inspected', matrixMode: 'categorized', usedTokens: 400, contextWindow: 1000 });
     expect(preview.discs).toHaveLength(100);
     expect(preview.discs.filter((kind) => kind !== 'available')).toHaveLength(40);
     expect(JSON.stringify(preview)).not.toContain('private prompt');
@@ -85,5 +106,13 @@ describe('participant context preview lookup', () => {
     const roots = { claudeProjects: '/missing', codexSessions: '/missing' };
     expect(inspectParticipantContext('codex', { participantId: 'codex' }, roots)).toMatchObject({ fidelity: 'unavailable', usedTokens: null });
     expect(inspectParticipantContext('codex', { participantId: 'codex', sessionId: 'missing' }, roots)).toMatchObject({ fidelity: 'unavailable' });
+  });
+
+  it('keeps Codex usage visible as a neutral matrix when its artifact is unavailable', () => {
+    const preview = inspectParticipantContext('codex', {
+      participantId: 'codex', modelId: 'gpt-test', inputTokens: 250, contextWindow: 1000,
+    }, { claudeProjects: '/missing', codexSessions: '/missing' });
+    expect(preview).toMatchObject({ fidelity: 'preview', matrixMode: 'usage', usedTokens: 250, contextWindow: 1000 });
+    expect(preview.discs.filter((kind) => kind !== 'available')).toHaveLength(25);
   });
 });

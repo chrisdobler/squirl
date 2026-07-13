@@ -16,6 +16,7 @@ export interface ContextPreviewBuckets {
 
 export type ContextPreviewFidelity = 'exact' | 'preview' | 'inspected' | 'inspected-estimate' | 'unavailable';
 export type ContextPreviewSource = 'squirl-request' | 'claude-session' | 'codex-session';
+export type ContextPreviewMatrixMode = 'categorized' | 'usage';
 
 /** Sanitized context data safe to return to the renderer. It intentionally contains no raw context text or paths. */
 export interface ParticipantContextPreview {
@@ -23,6 +24,7 @@ export interface ParticipantContextPreview {
   modelId: string | null;
   source: ContextPreviewSource;
   fidelity: ContextPreviewFidelity;
+  matrixMode: ContextPreviewMatrixMode;
   capturedAt: string | null;
   usedTokens: number | null;
   contextWindow: number | null;
@@ -144,8 +146,19 @@ export function inspectClaudeSession(content: string): InspectedContext | null {
   let modelId: string | undefined;
   let inputTokens: number | undefined;
   let capturedAt: string | undefined;
+  let finalAssistantIndex = -1;
+  let finalAssistantMessageId: string | undefined;
+  for (let index = active.length - 1; index >= 0; index--) {
+    if (active[index]!.type === 'assistant') {
+      finalAssistantIndex = index;
+      const message = active[index]!.message as Record<string, unknown> | undefined;
+      if (typeof message?.id === 'string') finalAssistantMessageId = message.id;
+      break;
+    }
+  }
 
-  for (const entry of active) {
+  for (let entryIndex = 0; entryIndex < active.length; entryIndex++) {
+    const entry = active[entryIndex]!;
     const value = claudeContent(entry);
     if (typeof entry.timestamp === 'string') capturedAt = entry.timestamp;
     const message = entry.message as Record<string, unknown> | undefined;
@@ -189,7 +202,9 @@ export function inspectClaudeSession(content: string): InspectedContext | null {
       addBucket(buckets, toolName && FILE_TOOL_PATTERN.test(toolName) ? 'files' : 'messages', value);
       continue;
     }
-    if (entry.type === 'user' || entry.type === 'assistant') addBucket(buckets, 'messages', value);
+    const isCompletedResponse = entry.type === 'assistant'
+      && (entryIndex === finalAssistantIndex || (finalAssistantMessageId != null && message?.id === finalAssistantMessageId));
+    if (entry.type === 'user' || (entry.type === 'assistant' && !isCompletedResponse)) addBucket(buckets, 'messages', value);
   }
   return { buckets, modelId, inputTokens, capturedAt };
 }
@@ -217,6 +232,14 @@ export function inspectCodexSession(content: string): InspectedContext | null {
   let inputTokens: number | undefined;
   let contextWindow: number | undefined;
   let capturedAt: string | undefined;
+  let finalAssistantIndex = -1;
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const payload = entries[index]!.payload as Record<string, unknown> | undefined;
+    if (entries[index]!.type === 'response_item' && payload?.type === 'message' && payload.role === 'assistant') {
+      finalAssistantIndex = index;
+      break;
+    }
+  }
 
   for (let index = 0; index < entries.length; index++) {
     const entry = entries[index]!;
@@ -257,7 +280,7 @@ export function inspectCodexSession(content: string): InspectedContext | null {
     if (payload?.type === 'message') {
       const value = codexText(entry);
       const kind = payload.role === 'developer' ? 'system' : contentLooksLikeMemory(value) ? 'memory' : 'messages';
-      addBucket(buckets, kind, value);
+      if (index !== finalAssistantIndex) addBucket(buckets, kind, value);
     } else if (typeof payload?.type === 'string' && /tool_call$|function_call$/.test(payload.type)) {
       const callId = payload.call_id;
       const name = payload.name;
@@ -310,6 +333,7 @@ export function unavailableContextPreview(participantId: string, source: Context
     modelId: modelId ?? null,
     source,
     fidelity: 'unavailable',
+    matrixMode: source === 'codex-session' ? 'usage' : 'categorized',
     capturedAt: null,
     usedTokens: null,
     contextWindow: null,
@@ -327,6 +351,7 @@ export function contextPreviewFromSnapshot(participantId: string, snapshot: Cont
     modelId: snapshot.modelId,
     source: 'squirl-request',
     fidelity: snapshot.origin,
+    matrixMode: 'categorized',
     capturedAt: snapshot.capturedAt,
     usedTokens: snapshot.approximateTokens,
     contextWindow: snapshot.contextWindow,
@@ -344,11 +369,27 @@ export function defaultContextArtifactRoots(): ContextArtifactRoots {
 
 export function inspectParticipantContext(kind: AgentKind, telemetry: AgentContextTelemetry, roots = defaultContextArtifactRoots()): ParticipantContextPreview {
   const source: ContextPreviewSource = kind === 'claude-code' ? 'claude-session' : 'codex-session';
-  if (!telemetry.sessionId) return unavailableContextPreview(telemetry.participantId, source, 'No session context is available until this agent has started a turn.', telemetry.modelId);
+  const codexUsageFallback = (): ParticipantContextPreview | null => {
+    if (kind !== 'codex' || telemetry.inputTokens == null) return null;
+    const buckets = { ...EMPTY_BUCKETS, messages: telemetry.inputTokens };
+    return {
+      participantId: telemetry.participantId,
+      modelId: telemetry.modelId ?? null,
+      source,
+      fidelity: 'preview',
+      matrixMode: 'usage',
+      capturedAt: telemetry.capturedAt ?? null,
+      usedTokens: telemetry.inputTokens,
+      contextWindow: telemetry.contextWindow ?? null,
+      buckets,
+      discs: computeContextDiscs(buckets, telemetry.contextWindow ?? 0),
+    };
+  };
+  if (!telemetry.sessionId) return codexUsageFallback() ?? unavailableContextPreview(telemetry.participantId, source, 'No session context is available until this agent has started a turn.', telemetry.modelId);
   const file = kind === 'claude-code'
     ? findFile(roots.claudeProjects, (name) => name === `${telemetry.sessionId}.jsonl`, 2)
     : findFile(roots.codexSessions, (name) => name.endsWith(`${telemetry.sessionId}.jsonl`), 4);
-  if (!file) return unavailableContextPreview(telemetry.participantId, source, 'The local CLI session artifact is not available yet.', telemetry.modelId);
+  if (!file) return codexUsageFallback() ?? unavailableContextPreview(telemetry.participantId, source, 'The local CLI session artifact is not available yet.', telemetry.modelId);
   let inspected: InspectedContext | null;
   try {
     const content = readFileSync(file, 'utf-8');
@@ -356,7 +397,7 @@ export function inspectParticipantContext(kind: AgentKind, telemetry: AgentConte
   } catch {
     inspected = null;
   }
-  if (!inspected) return unavailableContextPreview(telemetry.participantId, source, 'The local CLI session artifact could not be inspected.', telemetry.modelId);
+  if (!inspected) return codexUsageFallback() ?? unavailableContextPreview(telemetry.participantId, source, 'The local CLI session artifact could not be inspected.', telemetry.modelId);
 
   const estimated = inspected.buckets.system + inspected.buckets.memory + inspected.buckets.files + inspected.buckets.messages;
   const authoritativeUsed = telemetry.inputTokens ?? inspected.inputTokens;
@@ -368,6 +409,7 @@ export function inspectParticipantContext(kind: AgentKind, telemetry: AgentConte
     modelId: telemetry.modelId ?? inspected.modelId ?? null,
     source,
     fidelity: authoritativeUsed == null ? 'inspected-estimate' : 'inspected',
+    matrixMode: kind === 'codex' ? 'usage' : 'categorized',
     capturedAt: telemetry.capturedAt ?? inspected.capturedAt ?? null,
     usedTokens,
     contextWindow,

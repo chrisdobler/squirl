@@ -716,6 +716,7 @@ function App() {
   const [approval, setApproval] = useState<ToolApprovalRequest | null>(null);
   const [rosterOpen, setRosterOpen] = useState(false);
   const [recipientId, setRecipientId] = useState(SQUIRL_PARTICIPANT.id);
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [recipientMenuOpen, setRecipientMenuOpen] = useState(false);
   const [toast, setToast] = useState('');
   const [rewindCandidates, setRewindCandidates] = useState<Array<{ label: string; preview: string; messageId: string; messageIndex: number; retainedCount: number; removedCount: number; targetMessageId: string | null }> | null>(null);
@@ -736,6 +737,7 @@ function App() {
   const updateUiState = useCallback((patch: UiStatePatch) => {
     setUiState((current) => current ? {
       ...current, ...patch,
+      sidebar: { ...current.sidebar, ...patch.sidebar },
       chat: { ...current.chat, ...patch.chat }, context: { ...current.context, ...patch.context },
       eval: { ...current.eval, ...patch.eval }, memory: { ...current.memory, ...patch.memory },
       model: { ...current.model, ...patch.model }, agent: { ...current.agent, ...patch.agent },
@@ -1289,18 +1291,20 @@ function App() {
           <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>
           {theme === 'dark' ? 'Light mode' : 'Dark mode'}
         </button>
-        {state?.health && state.health.entries.length > 0 && (
-          <div className="healthLights">
-            {state.health.entries.map((h) => (
-              <div key={h.id} className="healthRow" title={h.detail ?? h.state}>
-                <span className={`healthDot ${h.state}`} />
-                <span className="healthLabel">{h.label}</span>
-              </div>
-            ))}
-          </div>
-        )}
         <RoomSidebarRoster
           participants={participants}
+          healthEntries={state.health.entries}
+          squirlDependenciesExpanded={uiState.sidebar.squirlDependenciesExpanded}
+          onSquirlDependenciesExpandedChange={(expanded) => updateUiState({ sidebar: { squirlDependenciesExpanded: expanded } })}
+          onSelectParticipant={(participant) => {
+            if (participant.kind === 'local-llm') {
+              setSelectedAgentId(null);
+              openCommandSurface('model');
+            } else {
+              setSelectedAgentId(participant.id);
+              openCommandSurface('agent');
+            }
+          }}
           loadPreview={async (participantId, signal) => (
             await api<{ preview: ParticipantContextPreview }>(`/api/participants/${encodeURIComponent(participantId)}/context-preview`, { signal })
           ).preview}

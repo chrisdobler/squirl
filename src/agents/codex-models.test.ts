@@ -23,13 +23,13 @@ describe('discoverCodexModels', () => {
     writeFileSync(join(dir, 'models_cache.json'), JSON.stringify({ models: [
       { slug: 'gpt-second', display_name: 'GPT Second', visibility: 'list', priority: 2 },
       { slug: 'internal', display_name: 'Internal', visibility: 'hide', priority: 0 },
-      { slug: 'gpt-current', display_name: 'GPT Current', visibility: 'list', priority: 1 },
+      { slug: 'gpt-current', display_name: 'GPT Current', visibility: 'list', priority: 1, context_window: 272000, effective_context_window_percent: 95 },
     ] }));
 
     expect(discoverCodexModels(dir)).toEqual({
       defaultModel: 'gpt-current',
       models: [
-        { id: 'gpt-current', label: 'GPT Current' },
+        { id: 'gpt-current', label: 'GPT Current', contextWindow: 258400 },
         { id: 'gpt-second', label: 'GPT Second' },
       ],
     });

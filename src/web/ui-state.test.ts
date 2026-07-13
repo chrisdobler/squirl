@@ -16,14 +16,16 @@ describe('UI state normalization', () => {
     expect(state.chat.draft).toBe('hello');
     expect(state.chat.viewport?.scrollTop).toBe(0);
     expect(state.eval.layer).toBe(1);
+    expect(state.sidebar.squirlDependenciesExpanded).toBe(true);
     expect(state).not.toHaveProperty('anthropicApiKey');
     expect(normalizeUiState({ memory: { importPath: '/safe' }, settings: { openaiApiKey: 'secret' } })).not.toHaveProperty('settings');
   });
 
   it('merges nested partial patches without losing sibling fields', () => {
-    const next = mergeUiState(defaultUiState(), { chat: { draft: 'durable' }, context: { mode: 'files' } });
+    const next = mergeUiState(defaultUiState(), { chat: { draft: 'durable' }, context: { mode: 'files' }, sidebar: { squirlDependenciesExpanded: false } });
     expect(next.chat).toMatchObject({ draft: 'durable', recipientId: 'squirl', showThinking: false });
     expect(next.context).toEqual({ mode: 'files', query: '', activeDiscIndex: null });
+    expect(next.sidebar.squirlDependenciesExpanded).toBe(false);
   });
 });
 
@@ -57,11 +59,11 @@ describe('UI state API', () => {
       return `http://127.0.0.1:${address.port}`;
     };
     const first = await start();
-    const patched = await fetch(`${first}/api/ui-state`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ activeSurface: 'context', chat: { draft: 'keep me' } }) }).then((res) => res.json());
+    const patched = await fetch(`${first}/api/ui-state`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ activeSurface: 'context', chat: { draft: 'keep me' }, sidebar: { squirlDependenciesExpanded: false } }) }).then((res) => res.json());
     expect(patched).toMatchObject({ activeSurface: 'context', chat: { draft: 'keep me', recipientId: 'squirl' } });
     await new Promise<void>((resolve) => servers.shift()!.close(() => resolve()));
     const second = await start();
     const restored = await fetch(`${second}/api/ui-state`).then((res) => res.json());
-    expect(restored).toMatchObject({ activeSurface: 'context', chat: { draft: 'keep me' } });
+    expect(restored).toMatchObject({ activeSurface: 'context', chat: { draft: 'keep me' }, sidebar: { squirlDependenciesExpanded: false } });
   });
 });
