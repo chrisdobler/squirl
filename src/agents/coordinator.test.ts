@@ -174,16 +174,16 @@ describe('GroupChatCoordinator', () => {
     expect(h.events).toContainEqual({ type: 'session-status', participantId: 'cc', status: 'ready' });
   });
 
-  it('assigns unique colors in palette order and rejects an eleventh live agent', async () => {
+  it('assigns unique colors in palette order and rejects a tenth live agent', async () => {
     const h = makeHarness();
-    for (let index = 0; index < 10; index++) await h.coordinator.addAgent(descriptor(`agent-${index}`));
+    for (let index = 0; index < 9; index++) await h.coordinator.addAgent(descriptor(`agent-${index}`));
     const agents = h.coordinator.listParticipants().filter((participant) => participant.kind !== 'user' && participant.kind !== 'local-llm');
     expect(agents.map((participant) => participant.color)).toEqual([
-      'magenta', 'orange', 'blue', 'green', 'red', 'yellow', 'gray', 'teal', 'violet', 'brown',
+      'magenta', 'blue', 'gray', 'green', 'red', 'yellow', 'teal', 'violet', 'brown',
     ]);
-    expect(new Set(agents.map((participant) => participant.color)).size).toBe(10);
-    await expect(h.coordinator.addAgent(descriptor('agent-10'))).rejects.toThrow('all 10 identity colors are in use');
-    expect(h.built.has('agent-10')).toBe(false);
+    expect(new Set(agents.map((participant) => participant.color)).size).toBe(9);
+    await expect(h.coordinator.addAgent(descriptor('agent-9'))).rejects.toThrow('all 9 identity colors are in use');
+    expect(h.built.has('agent-9')).toBe(false);
   });
 
   it('reuses the first released color without colliding with live agents', async () => {
@@ -193,7 +193,7 @@ describe('GroupChatCoordinator', () => {
     await h.coordinator.addAgent(descriptor('third'));
     await h.coordinator.removeAgent('second');
     const replacement = await h.coordinator.addAgent(descriptor('replacement'));
-    expect(replacement.color).toBe('orange');
+    expect(replacement.color).toBe('blue');
     const colors = h.coordinator.listParticipants()
       .filter((participant) => participant.kind !== 'user' && participant.kind !== 'local-llm')
       .map((participant) => participant.color);

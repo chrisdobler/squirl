@@ -10,7 +10,7 @@ const codex: Participant = { id: 'codex', kind: 'codex', label: 'codex', color: 
 
 describe('ParticipantIdentity', () => {
   it.each([
-    [SQUIRL_PARTICIPANT, '#4ade80'],
+    [SQUIRL_PARTICIPANT, '#fb923c'],
     [cc, '#e879f9'],
     [codex, '#fb923c'],
   ])('renders a diamond and matching identity label for %s', (participant, color) => {

@@ -4,11 +4,11 @@
 import type { AgentDescriptor, Participant, ParticipantColor } from './types.js';
 
 export const USER_PARTICIPANT: Participant = { id: 'user', kind: 'user', label: 'you', color: 'cyan' };
-export const SQUIRL_PARTICIPANT: Participant = { id: 'squirl', kind: 'local-llm', label: 'squirl', color: 'green' };
+export const SQUIRL_PARTICIPANT: Participant = { id: 'squirl', kind: 'local-llm', label: 'squirl', color: 'orange' };
 
 /** Stable identity colors for remote agents, ordered to avoid status-like colors initially. */
 export const AGENT_COLOR_PALETTE: readonly ParticipantColor[] = [
-  'magenta', 'orange', 'blue', 'green', 'red', 'yellow', 'gray', 'teal', 'violet', 'brown',
+  'magenta', 'blue', 'gray', 'green', 'red', 'yellow', 'teal', 'violet', 'brown',
 ];
 
 /** Shared RGB values keep participant identities consistent between Ink and web renderers. */

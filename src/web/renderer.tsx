@@ -556,8 +556,7 @@ function MessageView({ message, showThinking, registry, rewindCandidate, rewindS
   }
   if (message.role === 'tool') return <ToolActivityView message={message}/>
   const participant = resolveParticipant(message, registry);
-  const isRemoteAgent = participant.kind !== 'user' && participant.kind !== 'local-llm';
-  const labelColor = isRemoteAgent ? PARTICIPANT_COLOR_VALUE[participant.color] : undefined;
+  const labelColor = participant.kind !== 'user' ? PARTICIPANT_COLOR_VALUE[participant.color] : undefined;
   const isSquirl = message.role === 'assistant' && participant.kind === 'local-llm';
   return (
     <article id={`message-${message.id}`} className={`message ${message.role}${rewindCandidate ? ' rewindCandidate' : ''}${rewindSelected ? ' rewindSelected' : ''}`} data-participant={message.participantId ?? ''}>

@@ -18,7 +18,7 @@ const codexDescriptor: AgentDescriptor = { id: 'codex', kind: 'codex', label: 'c
 describe('participants', () => {
   it('uses the intended identity palette and avoids status-like colors for the first three agents', () => {
     expect(AGENT_COLOR_PALETTE).toEqual([
-      'magenta', 'orange', 'blue', 'green', 'red', 'yellow', 'gray', 'teal', 'violet', 'brown',
+      'magenta', 'blue', 'gray', 'green', 'red', 'yellow', 'teal', 'violet', 'brown',
     ]);
     expect(AGENT_COLOR_PALETTE.slice(0, 3)).not.toContain('green');
     expect(AGENT_COLOR_PALETTE.slice(0, 3)).not.toContain('yellow');
@@ -50,8 +50,8 @@ describe('participants', () => {
   });
 
   it('chooses the first unused agent color and rejects an exhausted palette', () => {
-    expect(pickAgentColor(['magenta', 'blue'])).toBe('orange');
-    expect(() => pickAgentColor(AGENT_COLOR_PALETTE)).toThrow('all 10 identity colors are in use');
+    expect(pickAgentColor(['magenta', 'green'])).toBe('blue');
+    expect(() => pickAgentColor(AGENT_COLOR_PALETTE)).toThrow('all 9 identity colors are in use');
   });
 
   it('resolves user, local squirl, and agent messages to the right participant', () => {
