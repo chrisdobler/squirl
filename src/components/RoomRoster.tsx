@@ -1,7 +1,7 @@
 import React from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import type { AgentStatus, Participant } from '../agents/types.js';
-import { roomMembers } from '../agents/participants.js';
+import { PARTICIPANT_COLOR_VALUE, roomMembers } from '../agents/participants.js';
 
 interface RoomRosterProps {
   participants: Participant[];
@@ -48,8 +48,8 @@ export const RoomRoster: React.FC<RoomRosterProps> = ({ participants, onClose })
           return (
             <Box key={p.id} paddingTop={1} flexDirection="column">
               <Box>
-                <Text color={p.color} dimColor={dim}>{glyph} </Text>
-                <Text bold color={p.color}>{p.label}</Text>
+                <Text color={PARTICIPANT_COLOR_VALUE[p.color]} dimColor={dim}>{glyph} </Text>
+                <Text bold color={PARTICIPANT_COLOR_VALUE[p.color]}>{p.label}</Text>
                 <Text dimColor>{`  ${handle}  ${p.status ?? 'ready'}`}</Text>
               </Box>
               {p.mode ? <Box paddingLeft={2}><Text dimColor>{p.mode}</Text></Box> : null}

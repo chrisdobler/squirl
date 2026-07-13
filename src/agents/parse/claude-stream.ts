@@ -136,11 +136,30 @@ export function createClaudeParser(opts: ParserOptions): StreamParser {
       return;
     }
     closeMessage(out);
-    const usage = (obj.usage ?? {}) as { input_tokens?: number; output_tokens?: number };
+    const usage = (obj.usage ?? {}) as {
+      input_tokens?: number;
+      cache_read_input_tokens?: number;
+      cache_creation_input_tokens?: number;
+      output_tokens?: number;
+    };
+    const modelUsage = obj.modelUsage && typeof obj.modelUsage === 'object'
+      ? obj.modelUsage as Record<string, { contextWindow?: number }>
+      : {};
+    const selectedModelUsage = modelUsage[currentModel] ?? Object.values(modelUsage)[0];
+    const cachedInputTokens = usage.cache_read_input_tokens;
+    const cacheCreationInputTokens = usage.cache_creation_input_tokens;
+    const inputTokens = (usage.input_tokens ?? 0) + (cachedInputTokens ?? 0) + (cacheCreationInputTokens ?? 0);
     out.push({
       type: 'usage',
       participantId,
-      usage: { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens, costUsd: typeof obj.total_cost_usd === 'number' ? obj.total_cost_usd : undefined },
+      usage: {
+        inputTokens: inputTokens || undefined,
+        cachedInputTokens,
+        cacheCreationInputTokens,
+        outputTokens: usage.output_tokens,
+        costUsd: typeof obj.total_cost_usd === 'number' ? obj.total_cost_usd : undefined,
+        contextWindow: selectedModelUsage?.contextWindow,
+      },
     });
     out.push({ type: 'turn-end', participantId });
   }

@@ -22,7 +22,18 @@ export type ClaudePermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassP
 export type CodexSandbox = 'read-only' | 'workspace-write' | 'danger-full-access';
 
 /** Colors used to visually distinguish participants in both UIs. */
-export type ParticipantColor = 'cyan' | 'green' | 'yellow' | 'magenta' | 'blue' | 'gray';
+export type ParticipantColor =
+  | 'cyan'
+  | 'magenta'
+  | 'orange'
+  | 'blue'
+  | 'green'
+  | 'red'
+  | 'yellow'
+  | 'gray'
+  | 'teal'
+  | 'violet'
+  | 'brown';
 
 /** How a participant is configured. `id` is its unique room handle. */
 export interface AgentDescriptor {
@@ -64,8 +75,11 @@ export interface Participant {
 
 export interface AgentUsage {
   inputTokens?: number;
+  cachedInputTokens?: number;
+  cacheCreationInputTokens?: number;
   outputTokens?: number;
   costUsd?: number;
+  contextWindow?: number;
 }
 
 /**

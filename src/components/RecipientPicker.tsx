@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import type { Participant } from '../agents/types.js';
-import { roomMembers } from '../agents/participants.js';
+import { PARTICIPANT_COLOR_VALUE, roomMembers } from '../agents/participants.js';
 
 export const RecipientPicker: React.FC<{
   participants: Participant[];
@@ -19,7 +19,7 @@ export const RecipientPicker: React.FC<{
   });
   return <Box flexDirection="column" borderStyle="round" borderColor="green" paddingX={1}>
     <Text bold>Select recipient</Text>
-    {members.map((participant, i) => <Text key={participant.id} color={participant.color} inverse={i === index}>
+    {members.map((participant, i) => <Text key={participant.id} color={PARTICIPANT_COLOR_VALUE[participant.color]} inverse={i === index}>
       {i === index ? '❯ ' : '  '}@{participant.id}  <Text dimColor>{participant.status ?? 'ready'}</Text>
     </Text>)}
     <Text dimColor>↑/↓ choose · enter select · esc cancel</Text>

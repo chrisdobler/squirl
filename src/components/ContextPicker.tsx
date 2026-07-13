@@ -2,10 +2,8 @@ import React, { useState, useMemo } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import { execSync } from 'child_process';
 import { estimateTokens } from '../context/token-estimator.js';
-import { computeContextDiscs, type DiscKind } from '../context/context-discs.js';
-import { buildSystemPrompt } from '../context/system-prompt.js';
-import { getModelConfig } from '../model-config.js';
-import { platform } from 'os';
+import type { DiscKind } from '../context/context-discs.js';
+import { buildContextExplorerRows, findContextExplorerSectionRow } from '../context/context-explorer-rows.js';
 import type { Orchestrator } from '../orchestrator.js';
 import type { Message } from '../types.js';
 import type { ContextSnapshotDisc } from '../context/context-snapshot.js';
@@ -34,6 +32,14 @@ function formatTokenCount(n: number): string {
   return String(n);
 }
 
+const DISC_STYLE: Record<DiscKind, { char: string; color: string }> = {
+  system: { char: '■', color: 'blue' },
+  memory: { char: '■', color: 'red' },
+  files: { char: '■', color: 'yellow' },
+  messages: { char: '■', color: 'green' },
+  available: { char: '□', color: 'gray' },
+};
+
 export const ContextPicker: React.FC<ContextPickerProps> = ({
   orchestrator,
   workingDir,
@@ -56,15 +62,7 @@ export const ContextPicker: React.FC<ContextPickerProps> = ({
   const contextFiles = orchestrator.getContextFiles();
   const contextEntries = useMemo(() => Array.from(contextFiles.entries()), [contextFiles]);
   const snapshot = orchestrator.getContextSnapshot(messages, { id: modelId, label: modelId, provider: 'local', contextWindow });
-  const documentLines = snapshot?.renderedDocument.split('\n') ?? [];
-  const documentLineStarts = useMemo(() => {
-    let offset = 0;
-    return documentLines.map((line) => {
-      const start = offset;
-      offset += line.length + 1;
-      return start;
-    });
-  }, [snapshot?.renderedDocument]);
+  const explorerRows = useMemo(() => buildContextExplorerRows(snapshot), [snapshot]);
   const documentRows = Math.max(5, (stdout.rows ?? 30) - 22);
   const usedDiscCount = snapshot?.discs.filter((disc) => disc.start != null).length ?? 0;
 
@@ -87,40 +85,6 @@ export const ContextPicker: React.FC<ContextPickerProps> = ({
       .slice(0, 10);
   }, [query, gitFiles, contextFiles]);
 
-  // Token buckets
-  const tokenBuckets = useMemo(() => {
-    const config = getModelConfig(modelId);
-    const systemPrompt = buildSystemPrompt(
-      {
-        workingDir,
-        date: new Date().toISOString().slice(0, 10),
-        modelId,
-        platform: platform(),
-        shell: process.env.SHELL ?? 'unknown',
-        supportsTools: config.supportsTools,
-      },
-      config.systemPromptStyle,
-    );
-    const systemTokens = estimateTokens(
-      typeof systemPrompt.content === 'string' ? systemPrompt.content : '',
-    );
-
-    let filesTokens = 0;
-    for (const [, content] of contextFiles) {
-      filesTokens += estimateTokens(content);
-    }
-
-    let messagesTokens = 0;
-    for (const msg of messages) {
-      messagesTokens += estimateTokens(msg.content);
-    }
-
-    const used = systemTokens + filesTokens + messagesTokens;
-    const available = Math.max(0, contextWindow - used);
-
-    return { systemTokens, filesTokens, messagesTokens, available };
-  }, [contextFiles, messages, contextWindow, modelId, workingDir]);
-
   // Current section list length
   const contextLen = contextEntries.length;
   const searchLen = searchResults.length;
@@ -142,13 +106,13 @@ export const ContextPicker: React.FC<ContextPickerProps> = ({
       else if (key.upArrow) setSelectedDisc((current) => Math.max(0, current - 10));
       else if (key.downArrow) setSelectedDisc((current) => Math.min(Math.max(0, usedDiscCount - 1), current + 10));
       else if (key.return && snapshot?.discs[selectedDisc]?.start != null) {
-        const offset = snapshot.discs[selectedDisc]!.start!;
-        const targetLine = snapshot.renderedDocument.slice(0, offset).split('\n').length - 1;
-        setDocumentScroll(Math.max(0, targetLine - 1));
+        const sectionId = snapshot.discs[selectedDisc]!.sectionId;
+        const targetRow = sectionId ? findContextExplorerSectionRow(explorerRows, sectionId) : null;
+        if (targetRow != null) setDocumentScroll(targetRow);
       } else if (key.pageUp || input === 'k') {
         setDocumentScroll((current) => Math.max(0, current - documentRows));
       } else if (key.pageDown || input === 'j') {
-        setDocumentScroll((current) => Math.min(Math.max(0, documentLines.length - documentRows), current + documentRows));
+        setDocumentScroll((current) => Math.min(Math.max(0, explorerRows.length - documentRows), current + documentRows));
       }
       return;
     }
@@ -221,25 +185,19 @@ export const ContextPicker: React.FC<ContextPickerProps> = ({
   });
 
   // Token grid rendering
-  const { systemTokens, filesTokens, messagesTokens, available } = tokenBuckets;
-  const usedTokens = systemTokens + filesTokens + messagesTokens;
+  const amounts: Record<DiscKind, number> = {
+    system: snapshot.sections.filter((entry) => entry.category === 'system').reduce((sum, entry) => sum + entry.approximateTokens, 0),
+    memory: snapshot.sections.filter((entry) => entry.category === 'memory').reduce((sum, entry) => sum + entry.approximateTokens, 0),
+    files: snapshot.sections.filter((entry) => entry.category === 'files').reduce((sum, entry) => sum + entry.approximateTokens, 0),
+    messages: snapshot.sections.filter((entry) => entry.category === 'messages').reduce((sum, entry) => sum + entry.approximateTokens, 0),
+    available: 0,
+  };
+  const usedTokens = amounts.system + amounts.memory + amounts.files + amounts.messages;
+  amounts.available = Math.max(0, snapshot.contextWindow - usedTokens);
   const gridWidth = 10;
   const rows = 10;
-  const totalDiscs = gridWidth * rows;
 
-  const DISC_STYLE: Record<DiscKind, { char: string; color: string }> = {
-    system: { char: '■', color: 'blue' },
-    files: { char: '■', color: 'yellow' },
-    messages: { char: '■', color: 'green' },
-    available: { char: '□', color: 'gray' },
-  };
-  const discKinds = snapshot
-    ? snapshot.discs.map((disc) => disc.kind)
-    : computeContextDiscs(
-      { system: systemTokens, files: filesTokens, messages: messagesTokens },
-      contextWindow,
-      totalDiscs,
-    );
+  const discKinds = snapshot.discs.map((disc) => disc.kind);
   const discChars = discKinds.map((kind) => DISC_STYLE[kind]);
 
   const gridRows: React.ReactNode[] = [];
@@ -263,7 +221,7 @@ export const ContextPicker: React.FC<ContextPickerProps> = ({
       {/* Token grid header */}
       <Box paddingBottom={0}>
         <Text bold>
-          Context {formatTokenCount(usedTokens)} / {formatTokenCount(contextWindow)} tokens
+          Context {formatTokenCount(usedTokens)} / {formatTokenCount(snapshot.contextWindow)} tokens
         </Text>
       </Box>
 
@@ -274,10 +232,11 @@ export const ContextPicker: React.FC<ContextPickerProps> = ({
 
       {/* Legend */}
       <Box gap={2} paddingBottom={1} paddingTop={1}>
-        <Text><Text color="blue">■</Text> system {formatTokenCount(systemTokens)}</Text>
-        <Text><Text color="yellow">■</Text> files {formatTokenCount(filesTokens)}</Text>
-        <Text><Text color="green">■</Text> messages {formatTokenCount(messagesTokens)}</Text>
-        <Text><Text color="gray">□</Text> available {formatTokenCount(available)}</Text>
+        <Text><Text color="blue">■</Text> system {formatTokenCount(amounts.system)}</Text>
+        <Text><Text color="red">■</Text> recalled memory {formatTokenCount(amounts.memory)}</Text>
+        <Text><Text color="yellow">■</Text> files {formatTokenCount(amounts.files)}</Text>
+        <Text><Text color="green">■</Text> messages {formatTokenCount(amounts.messages)}</Text>
+        <Text><Text color="gray">□</Text> available {formatTokenCount(amounts.available)}</Text>
       </Box>
 
       {mode === 'explorer' ? (
@@ -296,11 +255,17 @@ export const ContextPicker: React.FC<ContextPickerProps> = ({
                 </Text>
               )}
               <Box flexDirection="column" borderStyle="single" paddingX={1} height={documentRows + 2}>
-                {documentLines.slice(documentScroll, documentScroll + documentRows).map((line, index) => (
+                {explorerRows.slice(documentScroll, documentScroll + documentRows).map((row) => row.kind === 'section' ? (
+                  <Text key={row.key} bold wrap="truncate-end">
+                    <Text color={DISC_STYLE[row.category].color}>{DISC_STYLE[row.category].char}</Text>{' '}
+                    {row.label}
+                    <Text dimColor>  {row.role} · ~{formatTokenCount(row.approximateTokens)} tokens</Text>
+                  </Text>
+                ) : (
                   <ExplorerLine
-                    key={`${documentScroll}-${index}`}
-                    text={line}
-                    start={documentLineStarts[documentScroll + index] ?? 0}
+                    key={row.key}
+                    text={row.text}
+                    start={row.start}
                     active={snapshot.discs[selectedDisc]}
                   />
                 ))}

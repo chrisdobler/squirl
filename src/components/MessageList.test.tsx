@@ -3,7 +3,7 @@ import { buildMessageLines } from './MessageList.js';
 import { SQUIRL_PARTICIPANT, USER_PARTICIPANT, participantFromDescriptor } from '../agents/participants.js';
 import type { Message } from '../types.js';
 
-const cc = participantFromDescriptor({ id: 'cc', kind: 'claude-code', label: 'claude-code', transport: 'local', cwd: '/repo' }, 0);
+const cc = participantFromDescriptor({ id: 'cc', kind: 'claude-code', label: 'claude-code', transport: 'local', cwd: '/repo' }, 'magenta');
 
 function lines(messages: Message[]) {
   return buildMessageLines({

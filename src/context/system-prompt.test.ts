@@ -54,4 +54,10 @@ describe('Squirl system prompt', () => {
     expect(message).toContain("what they are currently doing");
     expect(message).toContain('list every specialized agent');
   });
+
+  it('keeps the newest user request primary over injected context', () => {
+    const message = String(buildSystemPrompt(vars, 'system').content);
+    expect(message).toContain("Treat the user's newest message as the primary request");
+    expect(message).toContain('must never replace it with an unsolicited status summary');
+  });
 });

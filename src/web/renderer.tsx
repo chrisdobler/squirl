@@ -3,10 +3,10 @@ import { createRoot } from 'react-dom/client';
 import type { SquirlConfig } from '../config.js';
 import type { SelectedModel } from '../components/ModelPicker.js';
 import type { EffortLevel, Message } from '../types.js';
-import type { AppState, ChatEvent, ContextFileSummary, RuntimeStatus, ToolApprovalRequest, EvalEvent, EvalRunRequest, HistoryEntry, JudgeSummary } from './types.js';
-import type { AgentKind, Participant, ParticipantColor } from '../agents/types.js';
+import type { AppState, ChatEvent, ContextFileSummary, ParticipantContextPreview, RuntimeStatus, ToolApprovalRequest, EvalEvent, EvalRunRequest, HistoryEntry, JudgeSummary } from './types.js';
+import type { AgentKind, Participant } from '../agents/types.js';
 import type { CommandDescriptor, CommandSurface } from '../commands/registry.js';
-import { SQUIRL_PARTICIPANT, USER_PARTICIPANT, addressedParticipantLabel, buildRegistry, resolveParticipant, roomMembers } from '../agents/participants.js';
+import { PARTICIPANT_COLOR_VALUE, SQUIRL_PARTICIPANT, USER_PARTICIPANT, addressedParticipantLabel, buildRegistry, resolveParticipant, roomMembers } from '../agents/participants.js';
 import { EvalDashboard } from './EvalDashboard.js';
 import { ContextView } from './ContextView.js';
 import { EvalRunView } from './EvalRunView.js';
@@ -16,20 +16,11 @@ import { parseMemoryLookup } from './memory-lookup.js';
 import { restoredChatScrollTop, type ChatViewportSnapshot } from './chat-viewport.js';
 import { groupMessageTurns } from '../tool-activity.js';
 import { ToolActivityView } from './ToolActivityView.js';
+import { chatActivityLabel } from './chat-activity.js';
+import { RoomSidebarRoster } from './RoomSidebarRoster.js';
 import { defaultUiState, type UiStatePatch, type UiStateV1 } from './ui-state.js';
+import { ParticipantIdentity } from './ParticipantIdentity.js';
 import './styles.css';
-
-const PARTICIPANT_CSS_COLOR: Record<ParticipantColor, string> = {
-  cyan: '#22d3ee', green: '#4ade80', yellow: '#facc15', magenta: '#e879f9', blue: '#60a5fa', gray: '#9ca3af',
-};
-
-const AGENT_STATUS_COLOR: Record<NonNullable<Participant['status']>, string> = {
-  starting: '#facc15',
-  ready: '#4ade80',
-  busy: '#60a5fa',
-  stopped: '#94a3b8',
-  error: '#f87171',
-};
 
 const API_BASE = import.meta.env.VITE_SQUIRL_API_BASE || window.location.origin;
 
@@ -468,8 +459,30 @@ function AgentPanel({ participants, defaultCwd, onAdd, onStop, initialState, onS
   const [cwd, setCwd] = useState(initialState.cwd || defaultCwd);
   const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [codexModels, setCodexModels] = useState<Array<{ id: string; label: string }>>([]);
+  const [codexModelsLoading, setCodexModelsLoading] = useState(false);
+  const [codexModelsError, setCodexModelsError] = useState('');
   const agents = participants.filter((participant) => participant.kind === 'claude-code' || participant.kind === 'codex');
   useEffect(() => onStateChange({ kind, id, model, effort, cwd }), [kind, id, model, effort, cwd, onStateChange]);
+  useEffect(() => {
+    if (kind !== 'codex') return;
+    let cancelled = false;
+    setCodexModelsLoading(true);
+    setCodexModelsError('');
+    void api<{ models: Array<{ id: string; label: string }>; defaultModel?: string }>('/api/agents/models?kind=codex')
+      .then((result) => {
+        if (cancelled) return;
+        setCodexModels(result.models);
+        setModel((current) => result.models.some((option) => option.id === current)
+          ? current
+          : result.defaultModel ?? result.models[0]?.id ?? '');
+      })
+      .catch((error) => {
+        if (!cancelled) setCodexModelsError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => { if (!cancelled) setCodexModelsLoading(false); });
+    return () => { cancelled = true; };
+  }, [kind]);
 
   const add = async () => {
     setAdding(true);
@@ -493,24 +506,29 @@ function AgentPanel({ participants, defaultCwd, onAdd, onStop, initialState, onS
       <h3>Add a CLI agent</h3>
       <p className="hint">Starts the installed CLI in the project you choose and adds it to the recipient picker.</p>
       <div className="agentKindChoices">
-        <button className={kind === 'claude-code' ? 'selected' : ''} onClick={() => setKind('claude-code')}><strong>Claude Code</strong><span>Use the local <code>claude</code> CLI</span></button>
-        <button className={kind === 'codex' ? 'selected' : ''} onClick={() => setKind('codex')}><strong>Codex CLI</strong><span>Use the local <code>codex</code> CLI</span></button>
+        <button className={kind === 'claude-code' ? 'selected' : ''} onClick={() => { setKind('claude-code'); setModel(''); }}><strong>Claude Code</strong><span>Use the local <code>claude</code> CLI</span></button>
+        <button className={kind === 'codex' ? 'selected' : ''} onClick={() => { setKind('codex'); setModel(''); }}><strong>Codex CLI</strong><span>Use the local <code>codex</code> CLI</span></button>
       </div>
       <div className="agentFields">
         <label className="agentCwdField">Project / working directory<div className="agentCwdInput"><input value={cwd} onChange={(event) => setCwd(event.target.value)} placeholder={defaultCwd} spellCheck={false} /><button type="button" onClick={() => setDirectoryPickerOpen(true)}>Browse…</button></div><small>Choose a folder, or enter an absolute, <code>~/…</code>, or workspace-relative path.</small></label>
         <label>Room name<input value={id} onChange={(event) => setId(event.target.value)} placeholder={kind === 'claude-code' ? 'cc' : 'codex'} /></label>
-        <label>Model<input value={model} onChange={(event) => setModel(event.target.value)} placeholder={kind === 'claude-code' ? 'fable (optional)' : 'gpt-5 (optional)'} /></label>
+        {kind === 'codex'
+          ? <label>Model<select value={model} disabled={codexModelsLoading || codexModels.length === 0} onChange={(event) => setModel(event.target.value)}>
+              {codexModelsLoading && <option value="">Loading Codex models…</option>}
+              {!codexModelsLoading && codexModels.length === 0 && <option value="">No Codex models available</option>}
+              {codexModels.map((option) => <option key={option.id} value={option.id}>{option.label} ({option.id})</option>)}
+            </select>{codexModelsError && <small className="directoryError">{codexModelsError}</small>}</label>
+          : <label>Model<input value={model} onChange={(event) => setModel(event.target.value)} placeholder="fable (optional)" /></label>}
         <label>Effort<select value={effort} onChange={(event) => setEffort(event.target.value as EffortLevel | '')}><option value="">CLI default</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
       </div>
       {directoryPickerOpen && <DirectoryPicker initialPath={cwd || defaultCwd} workspacePath={defaultCwd} onChoose={(path) => { setCwd(path); setDirectoryPickerOpen(false); }} onClose={() => setDirectoryPickerOpen(false)} />}
-      <button className="primary agentAddButton" disabled={adding} onClick={() => void add()}>{adding ? 'Adding…' : `Add ${kind === 'claude-code' ? 'Claude Code' : 'Codex CLI'}`}</button>
+      <button className="primary agentAddButton" disabled={adding || (kind === 'codex' && (codexModelsLoading || !model))} onClick={() => void add()}>{adding ? 'Adding…' : `Add ${kind === 'claude-code' ? 'Claude Code' : 'Codex CLI'}`}</button>
     </section>
     <section className="connectedAgents">
       <h3>Connected agents</h3>
       {agents.length === 0 && <p className="muted">No CLI agents are connected.</p>}
       {agents.map((participant) => <div className="rosterRow" key={participant.id}>
-        <span className="rosterDot" style={{ background: AGENT_STATUS_COLOR[participant.status ?? 'ready'] }}/>
-        <strong>{participant.label}</strong>
+        <ParticipantIdentity participant={participant} text={participant.label} className="rosterName" />
         <code>@{participant.id}</code>
         <span className="rosterMeta" title={participant.cwd}>{participant.kind === 'claude-code' ? 'Claude Code' : 'Codex CLI'} · {participant.status ?? 'ready'}{participant.cwd ? ` · ${participant.cwd}` : ''}</span>
         <button onClick={() => void onStop(participant.id).catch(() => {})}>Stop</button>
@@ -539,7 +557,7 @@ function MessageView({ message, showThinking, registry, rewindCandidate, rewindS
   if (message.role === 'tool') return <ToolActivityView message={message}/>
   const participant = resolveParticipant(message, registry);
   const isRemoteAgent = participant.kind !== 'user' && participant.kind !== 'local-llm';
-  const labelColor = isRemoteAgent ? PARTICIPANT_CSS_COLOR[participant.color] : undefined;
+  const labelColor = isRemoteAgent ? PARTICIPANT_COLOR_VALUE[participant.color] : undefined;
   const isSquirl = message.role === 'assistant' && participant.kind === 'local-llm';
   return (
     <article id={`message-${message.id}`} className={`message ${message.role}${rewindCandidate ? ' rewindCandidate' : ''}${rewindSelected ? ' rewindSelected' : ''}`} data-participant={message.participantId ?? ''}>
@@ -566,6 +584,17 @@ function MessageView({ message, showThinking, registry, rewindCandidate, rewindS
       </div>
     </article>
   );
+}
+
+function ChatActivity({ label }: { label: string }) {
+  return <div className="chatActivity" role="status" aria-live="polite">
+    <svg className="chatActivityAcorn" viewBox="0 0 16 16" aria-hidden="true">
+      <path className="squirlAcornStem" d="M9.2 3.9c.1-1.2.8-2 2-2.6" />
+      <path className="squirlAcornCap" d="M3.2 6.6c.6-2.4 2.6-3.8 5.3-3.8 2.6 0 4.5 1.4 5.1 3.8-2.9 1.3-7.4 1.3-10.4 0Z" />
+      <path className="squirlAcornNut" d="M4.2 7.5c.5 3.9 2.1 6.4 4.3 6.4s3.8-2.5 4.2-6.4c-2.5.8-6 .8-8.5 0Z" />
+    </svg>
+    <span>{label}</span>
+  </div>;
 }
 
 function TurnView({ turn, showThinking, registry, rewindCandidateIds, selectedMessageId }: {
@@ -602,10 +631,11 @@ function ApprovalModal({ request, onRespond }: {
   );
 }
 
-function RoomRosterDropdown({ participants, onClose, onRename }: {
+function RoomRosterDropdown({ participants, onClose, onRename, onManage }: {
   participants: Participant[];
   onClose: () => void;
   onRename: (id: string, name: string) => Promise<void>;
+  onManage: () => void;
 }) {
   const members = roomMembers(participants);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -636,8 +666,7 @@ function RoomRosterDropdown({ participants, onClose, onRename }: {
             const isRemote = p.kind !== 'user' && p.kind !== 'local-llm';
             return (
               <div className="rosterRow" key={p.id}>
-                <span className="rosterDot" style={{ background: PARTICIPANT_CSS_COLOR[p.color] }} aria-hidden="true" />
-                <span className="rosterName" style={{ color: PARTICIPANT_CSS_COLOR[p.color] }}>{p.label}</span>
+                <ParticipantIdentity participant={p} text={p.label} className="rosterName" />
                 <span className="rosterHandle">{isRemote ? `@${p.id}` : 'local'}</span>
                 <span className="rosterMeta">{p.status ?? 'ready'}{p.mode ? ` · ${p.mode}` : ''}</span>
                 {isRemote && editingId !== p.id && (
@@ -657,7 +686,10 @@ function RoomRosterDropdown({ participants, onClose, onRename }: {
             );
           })}
         </div>
-        <p className="hint">Use <code>/agent</code> to invite or manage agents.</p>
+        <footer className="rosterFooter">
+          <p className="hint">Use <code>/agent</code> to invite or manage agents.</p>
+          <button className="primary rosterManage" type="button" onClick={onManage}>Add / manage agents</button>
+        </footer>
     </div>
   );
 }
@@ -798,10 +830,15 @@ function App() {
   const participants = state?.participants ?? [USER_PARTICIPANT, SQUIRL_PARTICIPANT];
   const participantRegistry = useMemo(() => buildRegistry(participants), [participants]);
   const recipients = roomMembers(participants);
+  const selectedRecipient = recipients.find((participant) => participant.id === recipientId) ?? SQUIRL_PARTICIPANT;
   useEffect(() => {
     if (!recipients.some((participant) => participant.id === recipientId)) setRecipientId(SQUIRL_PARTICIPANT.id);
   }, [participants, recipientId]);
   const lastMessage = messages[messages.length - 1];
+  const waitingForAssistantMessage = status.isStreaming && !(
+    lastMessage?.role === 'assistant' && lastMessage.isStreaming && lastMessage.content.length > 0
+  );
+  const activityLabel = chatActivityLabel(status.pipelineStatus);
   const scrollSignature = `${messages.length}:${lastMessage?.id ?? ''}:${lastMessage?.content.length ?? 0}`;
 
   const loadState = async () => {
@@ -1143,7 +1180,7 @@ function App() {
     }
     // 'context' is rendered as a chat-pane takeover (see ContextView), not in the right rail.
     if (activeSurface === 'agent') return <AgentPanel participants={participants} defaultCwd={state.status.workingDir} onAdd={addAgent} onStop={stopAgent} initialState={uiState?.agent ?? defaultUiState().agent} onStateChange={updateAgentState}/>;
-    if (activeSurface === 'room') return <div className="roomSurface"><h3>Participants</h3>{roomMembers(participants).map((p) => <div className="rosterRow" key={p.id}><span className="rosterDot" style={{ background: PARTICIPANT_CSS_COLOR[p.color] }}/><strong>{p.label}</strong><code>{p.kind === 'user' || p.kind === 'local-llm' ? 'local' : `@${p.id}`}</code><span>{p.status ?? 'ready'}</span></div>)}</div>;
+    if (activeSurface === 'room') return <div className="roomSurface"><h3>Participants</h3>{roomMembers(participants).map((p) => <div className="rosterRow" key={p.id}><ParticipantIdentity participant={p} text={p.label} className="rosterName"/><code>{p.kind === 'user' || p.kind === 'local-llm' ? 'local' : `@${p.id}`}</code><span>{p.status ?? 'ready'}</span></div>)}</div>;
     if (activeSurface === 'system') return <pre className="systemPromptView">{systemPrompt}</pre>;
     if (activeSurface === 'help') return <div className="helpGrid">{state.commands.map((command) => <button key={command.name} onClick={() => { const surface = resolveCommandSurface(command); if (surface) openCommandSurface(surface); }}><code>{command.usage}</code><span>{command.description}</span></button>)}</div>;
     return null;
@@ -1263,6 +1300,12 @@ function App() {
             ))}
           </div>
         )}
+        <RoomSidebarRoster
+          participants={participants}
+          loadPreview={async (participantId, signal) => (
+            await api<{ preview: ParticipantContextPreview }>(`/api/participants/${encodeURIComponent(participantId)}/context-preview`, { signal })
+          ).preview}
+        />
         <div className="telemetry">
           <span>model</span><strong>{status.modelDisplay}</strong>
           <span>context</span><strong>{formatTokens(status.tokenCount)} / {status.contextWindow == null ? '?' : formatTokens(status.contextWindow)}</strong>
@@ -1320,6 +1363,10 @@ function App() {
               {rosterOpen && <RoomRosterDropdown
                 participants={participants}
                 onClose={() => setRosterOpen(false)}
+                onManage={() => {
+                  setRosterOpen(false);
+                  openCommandSurface('agent');
+                }}
                 onRename={async (id, name) => {
                   try {
                     const response = await api<{ state: AppState; agent: { id: string } }>('/api/agents/rename', { method: 'POST', body: JSON.stringify({ id, name }) });
@@ -1347,6 +1394,7 @@ function App() {
               <p>Ask a question, attach files from Context, or import ChatGPT history from Memory.</p>
             </div>
           ) : groupMessageTurns(messages).map((turn) => <TurnView key={turn.key} turn={turn.messages} showThinking={showThinking} registry={participantRegistry} rewindCandidateIds={rewindCandidateIds} selectedMessageId={selectedRewindCandidate?.messageId}/>)}
+          {waitingForAssistantMessage && <ChatActivity label={activityLabel}/>}
           <div ref={bottomRef} className="bottomSentinel" aria-hidden="true" />
           {!isAtLatest && (
             <button className="latestButton" onClick={() => scrollToLatest('smooth')}>
@@ -1355,7 +1403,7 @@ function App() {
           )}
         </div>
 
-        <footer className={`composer${rewindCandidates ? ' rewindComposer' : ''}`} onKeyDownCapture={(event) => {
+        <footer className={`composer${status.isStreaming ? ' composerActive' : ''}${rewindCandidates ? ' rewindComposer' : ''}`} onKeyDownCapture={(event) => {
           if (!paletteOpen) return;
           if (event.key === 'Escape') {
             event.preventDefault();
@@ -1394,7 +1442,8 @@ function App() {
               aria-expanded={recipientMenuOpen}
               onClick={() => setRecipientMenuOpen((open) => !open)}
             >
-              @{recipientId} <span aria-hidden="true">▾</span>
+              <ParticipantIdentity participant={selectedRecipient} text={`@${recipientId}`} />
+              <span aria-hidden="true">▾</span>
             </button>
             {recipientMenuOpen && (
               <div className="recipientMenu" role="listbox" aria-label="Message recipient">
@@ -1407,8 +1456,7 @@ function App() {
                     className={participant.id === recipientId ? 'selected' : ''}
                     onClick={() => { setRecipientId(participant.id); setRecipientMenuOpen(false); }}
                   >
-                    <span className="rosterDot" style={{ background: AGENT_STATUS_COLOR[participant.status ?? 'ready'] }} />
-                    <span>@{participant.id}</span>
+                    <ParticipantIdentity participant={participant} text={`@${participant.id}`} />
                     <small>{participant.status ?? 'ready'}</small>
                   </button>
                 ))}
@@ -1437,6 +1485,7 @@ function App() {
             }}
             placeholder="Type a message, slash command, or @file reference..."
           />
+          {status.isStreaming && <div className="composerProgress" role="progressbar" aria-label={activityLabel}><span /></div>}
           <button className="primary" disabled={status.isStreaming} onClick={() => void sendMessage()}>Send</button>
         </footer>
         </>

@@ -1,58 +1,75 @@
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions.js';
-import { estimateTokens, estimateMessagesTokens } from './token-estimator.js';
+import { estimateMessagesTokens } from './token-estimator.js';
 
 export interface TruncationResult {
   messages: ChatCompletionMessageParam[];
-  droppedFileCount: number;
+  droppedEvidenceCount: number;
   droppedMessageCount: number;
 }
 
 export function truncateToFit(
-  systemMessages: ChatCompletionMessageParam[],
-  fileContextMessage: ChatCompletionMessageParam | null,
+  baseMessages: ChatCompletionMessageParam[],
+  evidenceMessages: ChatCompletionMessageParam[],
   conversationMessages: ChatCompletionMessageParam[],
   maxTokens: number,
   reserveForCompletion: number = 4096,
 ): TruncationResult {
-  const budget = maxTokens - reserveForCompletion;
-  let used = estimateMessagesTokens(systemMessages);
-  let droppedFileCount = 0;
+  const budget = Math.max(0, maxTokens - reserveForCompletion);
+  let used = estimateMessagesTokens(baseMessages);
+  let droppedEvidenceCount = 0;
   let droppedMessageCount = 0;
 
-  // Try to include file context
-  let includedFileContext: ChatCompletionMessageParam | null = null;
-  if (fileContextMessage) {
-    const fileCost = estimateMessagesTokens([fileContextMessage]);
-    if (used + fileCost < budget) {
-      includedFileContext = fileContextMessage;
-      used += fileCost;
-    } else {
-      droppedFileCount = 1; // simplified — dropped entire file context block
-    }
+  // The newest conversation message is the current user request. It is mandatory:
+  // sending an over-budget request is preferable to silently asking the model a
+  // different question. Older conversation is then included newest-first.
+  const includedConversation: ChatCompletionMessageParam[] = [];
+  const latestMessage = conversationMessages.at(-1);
+  if (latestMessage) {
+    includedConversation.unshift(latestMessage);
+    used += estimateMessagesTokens([latestMessage]);
   }
 
-  // Include conversation messages from newest to oldest
-  const included: ChatCompletionMessageParam[] = [];
-  for (let i = conversationMessages.length - 1; i >= 0; i--) {
+  for (let i = conversationMessages.length - 2; i >= 0; i--) {
     const msg = conversationMessages[i]!;
     const cost = estimateMessagesTokens([msg]);
     if (used + cost > budget) {
       droppedMessageCount = i + 1;
       break;
     }
-    included.unshift(msg);
+    includedConversation.unshift(msg);
     used += cost;
   }
 
-  // Preserve message roles. Project data, files, and recalled memory intentionally use
-  // user priority so their contents cannot be promoted into behavioral instructions.
-  const result: ChatCompletionMessageParam[] = [...systemMessages];
-  if (includedFileContext) result.push(includedFileContext);
+  let omissionMessage: ChatCompletionMessageParam | null = null;
   if (droppedMessageCount > 0) {
-    const role = systemMessages[0]?.role === 'developer' ? 'developer' as const : 'system' as const;
-    result.push({ role, content: `[${droppedMessageCount} earlier message(s) were omitted to fit the context window]` });
+    const role = baseMessages[0]?.role === 'developer' ? 'developer' as const : 'system' as const;
+    const candidate: ChatCompletionMessageParam = {
+      role,
+      content: `[${droppedMessageCount} earlier message(s) were omitted to fit the context window]`,
+    };
+    const cost = estimateMessagesTokens([candidate]);
+    if (used + cost <= budget) {
+      omissionMessage = candidate;
+      used += cost;
+    }
   }
-  result.push(...included);
 
-  return { messages: result, droppedFileCount, droppedMessageCount };
+  // Evidence is ordered from highest to lowest priority by the caller. Select it
+  // only after recent conversation, while preserving its role as untrusted user data.
+  const includedEvidence: ChatCompletionMessageParam[] = [];
+  for (const message of evidenceMessages) {
+    const cost = estimateMessagesTokens([message]);
+    if (used + cost <= budget) {
+      includedEvidence.push(message);
+      used += cost;
+    } else {
+      droppedEvidenceCount++;
+    }
+  }
+
+  const messages = [...baseMessages, ...includedEvidence];
+  if (omissionMessage) messages.push(omissionMessage);
+  messages.push(...includedConversation);
+
+  return { messages, droppedEvidenceCount, droppedMessageCount };
 }

@@ -112,6 +112,19 @@ describe('GroupChatCoordinator', () => {
     });
   });
 
+  it('tracks the latest session, model, and context usage for read-only previews', async () => {
+    const h = makeHarness();
+    await h.coordinator.addAgent({ ...descriptor('cc'), model: 'configured-model' });
+    h.built.get('cc')!.descriptor.sessionId = 'session-1';
+    h.built.get('cc')!.emit({ type: 'session-status', participantId: 'cc', status: 'ready', sessionId: 'session-1', model: 'resolved-model' });
+    h.built.get('cc')!.emit({ type: 'usage', participantId: 'cc', usage: { inputTokens: 1234, contextWindow: 200_000 } });
+    expect(h.coordinator.getContextTelemetry('cc')).toMatchObject({
+      participantId: 'cc', sessionId: 'session-1', modelId: 'resolved-model', inputTokens: 1234, contextWindow: 200_000,
+    });
+    await h.coordinator.removeAgent('cc');
+    expect(h.coordinator.getContextTelemetry('cc')).toBeUndefined();
+  });
+
   it('does NOT hand off when autoHandoff is disabled', async () => {
     const h = makeHarness({ autoHandoff: false, replies: { cc: () => 'done, @codex please run tests' } });
     await h.coordinator.addAgent(descriptor('cc'));
@@ -161,11 +174,38 @@ describe('GroupChatCoordinator', () => {
     expect(h.events).toContainEqual({ type: 'session-status', participantId: 'cc', status: 'ready' });
   });
 
+  it('assigns unique colors in palette order and rejects an eleventh live agent', async () => {
+    const h = makeHarness();
+    for (let index = 0; index < 10; index++) await h.coordinator.addAgent(descriptor(`agent-${index}`));
+    const agents = h.coordinator.listParticipants().filter((participant) => participant.kind !== 'user' && participant.kind !== 'local-llm');
+    expect(agents.map((participant) => participant.color)).toEqual([
+      'magenta', 'orange', 'blue', 'green', 'red', 'yellow', 'gray', 'teal', 'violet', 'brown',
+    ]);
+    expect(new Set(agents.map((participant) => participant.color)).size).toBe(10);
+    await expect(h.coordinator.addAgent(descriptor('agent-10'))).rejects.toThrow('all 10 identity colors are in use');
+    expect(h.built.has('agent-10')).toBe(false);
+  });
+
+  it('reuses the first released color without colliding with live agents', async () => {
+    const h = makeHarness();
+    await h.coordinator.addAgent(descriptor('first'));
+    await h.coordinator.addAgent(descriptor('second'));
+    await h.coordinator.addAgent(descriptor('third'));
+    await h.coordinator.removeAgent('second');
+    const replacement = await h.coordinator.addAgent(descriptor('replacement'));
+    expect(replacement.color).toBe('orange');
+    const colors = h.coordinator.listParticipants()
+      .filter((participant) => participant.kind !== 'user' && participant.kind !== 'local-llm')
+      .map((participant) => participant.color);
+    expect(new Set(colors).size).toBe(colors.length);
+  });
+
   it('restarts a session under a renamed identity', async () => {
     const h = makeHarness();
-    await h.coordinator.addAgent(descriptor('cc'));
+    const original = await h.coordinator.addAgent(descriptor('cc'));
     const participant = await h.coordinator.renameAgent('cc', 'claude-builder', 'claude-builder');
     expect(participant.id).toBe('claude-builder');
+    expect(participant.color).toBe(original.color);
     expect(h.coordinator.hasAgent('cc')).toBe(false);
     expect(h.coordinator.hasAgent('claude-builder')).toBe(true);
     await h.coordinator.dispatchTo('claude-builder', 'build it', new AbortController().signal);

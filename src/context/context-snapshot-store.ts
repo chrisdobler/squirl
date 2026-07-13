@@ -42,9 +42,13 @@ export function loadContextSnapshot(workingDir: string): ContextSnapshot | null 
     const stored = JSON.parse(readFileSync(path, 'utf-8')) as Partial<StoredContextSnapshot>;
     if (stored.version !== SCHEMA_VERSION || stored.workingDir !== resolve(workingDir) || !isSnapshot(stored.snapshot)) return null;
     const snapshot = stored.snapshot;
+    const sections = snapshot.sections.map((section) => section.label === 'Recalled memory'
+      ? { ...section, category: 'memory' as const }
+      : section);
     return {
       ...snapshot,
-      discs: buildSnapshotDiscs(snapshot.sections, snapshot.renderedDocument.length, snapshot.approximateTokens, snapshot.contextWindow),
+      sections,
+      discs: buildSnapshotDiscs(sections, snapshot.renderedDocument.length, snapshot.approximateTokens, snapshot.contextWindow),
     };
   } catch {
     return null;

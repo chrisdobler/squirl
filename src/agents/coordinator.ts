@@ -8,8 +8,9 @@
 
 import { createAgentSession } from './adapters/index.js';
 import { parseMentions } from './mentions.js';
-import { SQUIRL_PARTICIPANT, USER_PARTICIPANT, participantFromDescriptor } from './participants.js';
-import type { AgentDescriptor, AgentEvent, AgentSession, AgentTransport, Participant } from './types.js';
+import { SQUIRL_PARTICIPANT, USER_PARTICIPANT, participantFromDescriptor, pickAgentColor } from './participants.js';
+import type { AgentDescriptor, AgentEvent, AgentSession, AgentTransport, Participant, ParticipantColor } from './types.js';
+import type { AgentContextTelemetry } from './context-preview.js';
 
 export interface CoordinatorConfig {
   autoHandoff?: boolean;
@@ -32,6 +33,7 @@ export class GroupChatCoordinator {
   private sessions = new Map<string, AgentSession>();
   private agentParticipants = new Map<string, Participant>();
   private resolvedModels = new Map<string, string>();
+  private contextTelemetry = new Map<string, AgentContextTelemetry>();
   private listeners = new Set<(event: AgentEvent) => void>();
   private readonly localId: string;
   private readonly createSession: NonNullable<CoordinatorOptions['createSession']>;
@@ -59,6 +61,26 @@ export class GroupChatCoordinator {
         responseMeta: { model, ...(effort ? { effort } : {}) },
       };
     }
+    if (event.type === 'session-status') {
+      const previous = this.contextTelemetry.get(event.participantId) ?? { participantId: event.participantId };
+      this.contextTelemetry.set(event.participantId, {
+        ...previous,
+        ...(event.sessionId ? { sessionId: event.sessionId } : {}),
+        ...(event.model ? { modelId: event.model } : {}),
+        capturedAt: new Date().toISOString(),
+      });
+    } else if (event.type === 'usage') {
+      const descriptor = this.sessions.get(event.participantId)?.descriptor;
+      const previous = this.contextTelemetry.get(event.participantId) ?? { participantId: event.participantId };
+      this.contextTelemetry.set(event.participantId, {
+        ...previous,
+        sessionId: descriptor?.sessionId ?? previous.sessionId,
+        modelId: this.resolvedModels.get(event.participantId) ?? descriptor?.model ?? previous.modelId,
+        inputTokens: event.usage.inputTokens ?? previous.inputTokens,
+        contextWindow: event.usage.contextWindow ?? previous.contextWindow,
+        capturedAt: new Date().toISOString(),
+      });
+    }
     for (const handler of this.listeners) handler(emitted);
   }
 
@@ -74,9 +96,28 @@ export class GroupChatCoordinator {
     return this.sessions.get(id)?.descriptor;
   }
 
+  getContextTelemetry(id: string): AgentContextTelemetry | undefined {
+    const descriptor = this.sessions.get(id)?.descriptor;
+    if (!descriptor) return undefined;
+    const current = this.contextTelemetry.get(id) ?? { participantId: id };
+    return {
+      ...current,
+      sessionId: descriptor.sessionId ?? current.sessionId,
+      modelId: this.resolvedModels.get(id) ?? descriptor.model ?? current.modelId,
+    };
+  }
+
   async addAgent(descriptor: AgentDescriptor): Promise<Participant> {
+    return this.addAgentWithColor(descriptor);
+  }
+
+  private async addAgentWithColor(descriptor: AgentDescriptor, preferredColor?: ParticipantColor): Promise<Participant> {
     if (this.sessions.has(descriptor.id)) throw new Error(`Agent "${descriptor.id}" already exists`);
-    const participant = participantFromDescriptor(descriptor, this.agentParticipants.size);
+    const colorsInUse = [...this.agentParticipants.values()].map((participant) => participant.color);
+    const color = preferredColor && !colorsInUse.includes(preferredColor)
+      ? preferredColor
+      : pickAgentColor(colorsInUse);
+    const participant = participantFromDescriptor(descriptor, color);
     const session = this.createSession(descriptor, this.options.transport);
     // Permanent forwarder: surface lifecycle/status events and keep participant status in sync.
     session.onEvent((event) => {
@@ -98,6 +139,7 @@ export class GroupChatCoordinator {
     this.sessions.delete(id);
     this.agentParticipants.delete(id);
     this.resolvedModels.delete(id);
+    this.contextTelemetry.delete(id);
     this.emit({ type: 'session-status', participantId: id, status: 'stopped' });
   }
 
@@ -107,12 +149,13 @@ export class GroupChatCoordinator {
     if (currentId !== nextId && this.sessions.has(nextId)) throw new Error(`Agent "@${nextId}" already exists.`);
 
     const old = session.descriptor;
+    const oldColor = this.agentParticipants.get(currentId)?.color;
     const replacement: AgentDescriptor = { ...old, id: nextId, label };
     await this.removeAgent(currentId);
     try {
-      return await this.addAgent(replacement);
+      return await this.addAgentWithColor(replacement, oldColor);
     } catch (error) {
-      try { await this.addAgent(old); } catch { /* Preserve the original startup error. */ }
+      try { await this.addAgentWithColor(old, oldColor); } catch { /* Preserve the original startup error. */ }
       throw error;
     }
   }

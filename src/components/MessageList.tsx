@@ -2,7 +2,7 @@ import React, { useEffect, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import type { Message } from '../types.js';
 import type { Participant, ParticipantColor } from '../agents/types.js';
-import { SQUIRL_PARTICIPANT, USER_PARTICIPANT, addressedParticipantLabel, buildRegistry, resolveParticipant } from '../agents/participants.js';
+import { PARTICIPANT_COLOR_VALUE, SQUIRL_PARTICIPANT, USER_PARTICIPANT, addressedParticipantLabel, buildRegistry, resolveParticipant } from '../agents/participants.js';
 import { toolActivitySummary } from '../tool-activity.js';
 
 interface MessageListProps {
@@ -354,7 +354,7 @@ export const MessageList: React.FC<MessageListProps & { dimmed?: boolean }> = ({
         {viewport.rows.map((line, i) => (
           <Text
             key={`${line.key}:${i}`}
-            color={line.color}
+            color={line.color ? PARTICIPANT_COLOR_VALUE[line.color] : undefined}
             dimColor={line.dim}
             bold={line.bold}
             wrap="truncate-end"

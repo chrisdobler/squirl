@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, rmSync } from 'node:fs';
 import type { StreamOptions } from './api.js';
+import type { MemoryPipeline } from './search/memory-pipeline.js';
 import type { AssistantMessage, Message } from './types.js';
 
 const mocks = vi.hoisted(() => ({
@@ -75,6 +76,45 @@ describe('Orchestrator streaming callbacks', () => {
     expect(callbackAssistant?.content).toBe('');
     expect(tokenSnapshots.map((snapshot) => snapshot.content)).toEqual(["I'm"]);
     expect(returnedAssistant?.content).toBe("I'm");
+  });
+
+  it('uses a local model live context window for truncation and preserves the current request', async () => {
+    mocks.streamChatCompletion.mockImplementation(async (options: StreamOptions) => {
+      options.onToken('instrumentation answer');
+      options.onDone({ promptTokens: 1, completionTokens: 1, totalTokens: 2 });
+    });
+
+    const { Orchestrator } = await import('./orchestrator.js');
+    const orchestrator = new Orchestrator('/tmp/squirl-orchestrator-live-window', { snapshotPersistence: false });
+    const memorySentinel = `RECALLED_SENTINEL ${'memory '.repeat(2_800)}`;
+    orchestrator.setMemoryPipeline({
+      retrieve: vi.fn().mockResolvedValue({
+        results: [],
+        systemMessage: memorySentinel,
+        inlineDisplay: '',
+        queries: [],
+      }),
+    } as unknown as MemoryPipeline);
+
+    const currentRequest = 'What instrumentation should a coding harness capture?';
+    await orchestrator.chat(
+      currentRequest,
+      [],
+      {
+        id: 'local-model-with-live-window',
+        label: 'local-model-with-live-window',
+        provider: 'local',
+        contextWindow: 17_120,
+      },
+      { onToken: () => {}, onDone: () => {}, onError: () => {} },
+    );
+
+    const requestMessages = mocks.streamChatCompletion.mock.calls.at(-1)![0].messages;
+    const snapshot = orchestrator.getLatestContextSnapshot();
+    expect(snapshot?.contextWindow).toBe(17_120);
+    expect(requestMessages.at(-1)?.content).toBe(currentRequest);
+    expect(requestMessages.some((message: { content?: unknown }) =>
+      typeof message.content === 'string' && message.content.includes('RECALLED_SENTINEL'))).toBe(true);
   });
 
   it('captures the exact latest primary request, including tool-loop additions', async () => {

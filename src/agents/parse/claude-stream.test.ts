@@ -38,6 +38,9 @@ describe('createClaudeParser', () => {
     expect((ends[0] as { content: string }).content).toBe('turn one ok.');
 
     expect(events.some((e) => e.type === 'turn-end')).toBe(true);
+    expect(events.find((e) => e.type === 'usage')).toMatchObject({
+      usage: { inputTokens: 26925, cachedInputTokens: 15626, cacheCreationInputTokens: 4770, contextWindow: 1000000 },
+    });
     // No duplicate text from the top-level `assistant` snapshot.
     expect(tokens.join('')).not.toContain('turn one ok.turn one ok.');
   });

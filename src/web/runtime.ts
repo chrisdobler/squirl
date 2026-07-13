@@ -35,6 +35,7 @@ import { SQUIRL_PARTICIPANT } from '../agents/participants.js';
 import { materializeProfile, nextAvailableAgentId, profileFromDescriptor, removeAgentProfile, upsertAgentProfile, validateAgentHandle } from '../agents/profiles.js';
 import { parseDelegationIntent, type DelegationAgent } from '../agents/delegation.js';
 import type { AgentEvent, AgentKind, Participant } from '../agents/types.js';
+import { contextPreviewFromSnapshot, inspectParticipantContext, type ParticipantContextPreview } from '../agents/context-preview.js';
 import type { AddAgentResult, AgentSummary } from '../commands/registry.js';
 import type { SelectedModel } from '../components/ModelPicker.js';
 import type { Message, AssistantMessage } from '../types.js';
@@ -334,6 +335,17 @@ export class SquirlRuntime extends EventEmitter {
 
   getContextSnapshot(): ContextSnapshot | null {
     return this.orchestrator.getContextSnapshot(this.messages, this.selectedModel);
+  }
+
+  getParticipantContextPreview(participantId: string): ParticipantContextPreview | null {
+    const participant = this.coordinator.listParticipants().find((candidate) => candidate.id === participantId && candidate.kind !== 'user');
+    if (!participant) return null;
+    if (participant.kind === 'local-llm') {
+      return contextPreviewFromSnapshot(participant.id, this.orchestrator.getContextSnapshot(this.messages, this.selectedModel));
+    }
+    if (participant.kind !== 'claude-code' && participant.kind !== 'codex') return null;
+    const telemetry = this.coordinator.getContextTelemetry(participant.id) ?? { participantId: participant.id };
+    return inspectParticipantContext(participant.kind, telemetry);
   }
 
   addContextFile(path: string): AppState {

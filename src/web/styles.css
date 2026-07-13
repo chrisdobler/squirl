@@ -211,6 +211,135 @@ nav button.active,
   color: #9fb0bb;
 }
 
+.roomRail {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 92px;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+  border-top: 1px solid #24313a;
+  padding-top: 14px;
+}
+
+.roomRail > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.roomRail > header span {
+  min-width: 20px;
+  border-radius: 999px;
+  background: #1c2730;
+  color: #8fa4ae;
+  padding: 2px 6px;
+  text-align: center;
+  font-size: 10px;
+}
+
+.roomRailList {
+  display: grid;
+  gap: 5px;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+
+.roomRailAgent {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  border-color: transparent;
+  background: transparent;
+  padding: 6px;
+  text-align: left;
+}
+
+.roomRailAgent:hover,
+.roomRailAgent:focus-visible,
+.roomRailAgent.active {
+  border-color: #355866;
+  background: #14252d;
+}
+
+.roomRailIdentity {
+  position: relative;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 2px solid;
+  border-radius: 50%;
+  color: #dce8ee;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.roomRailStatus {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 8px;
+  height: 8px;
+  border: 2px solid #0d1217;
+  border-radius: 50%;
+}
+
+.roomRailText {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.roomRailText strong,
+.roomRailText .roomRailName,
+.roomRailText small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.roomRailText strong,
+.roomRailText .roomRailName { font-size: 12px; font-weight: 700; }
+.roomRailText small { color: #74858f; font-size: 10px; }
+.roomRailKind { color: #738792; font-size: 9px; text-transform: uppercase; }
+
+.agentContextPopover {
+  position: fixed;
+  z-index: 60;
+  width: 300px;
+  min-height: 150px;
+  pointer-events: none;
+  border: 1px solid #41606d;
+  border-radius: 10px;
+  background: #10181e;
+  color: #dce8ee;
+  padding: 13px;
+  box-shadow: 0 18px 46px #000b;
+}
+
+.agentContextPopover > header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 11px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #293740;
+}
+
+.agentContextPopover > header div { display: grid; min-width: 0; gap: 2px; }
+.agentContextPopover > header span { color: #82949f; font-size: 10px; }
+.agentContextMeta { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 10px; margin-bottom: 11px; font-size: 10px; }
+.agentContextMeta span { color: #74858f; text-transform: uppercase; }
+.agentContextMeta strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c8d7de; }
+.agentContextLoading, .agentContextUnavailable { min-height: 88px; display: grid; align-content: center; gap: 6px; color: #8fa4ae; font-size: 11px; }
+.agentContextUnavailable p { line-height: 1.4; }
+.agentContextRefreshing { display: block; margin-top: 6px; color: #71838e; font-size: 9px; text-align: right; }
+
 .healthDot {
   width: 9px;
   height: 9px;
@@ -307,8 +436,48 @@ nav button.active,
 .messageList {
   position: relative;
   min-height: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 20px 22px;
+}
+
+.chatActivity {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: min(100%, 1040px);
+  min-height: 34px;
+  margin: -8px 0 22px;
+  color: #8fa4ae;
+  font-size: 13px;
+}
+
+.chatActivityAcorn {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 auto;
+  overflow: visible;
+  animation: acornBounce 1.15s ease-in-out infinite;
+  transform-origin: 50% 90%;
+}
+
+.chatActivityAcorn .squirlAcornStem,
+.chatActivityAcorn .squirlAcornCap,
+.chatActivityAcorn .squirlAcornNut {
+  fill: none;
+  stroke: #7ab8c9;
+  stroke-width: 1.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+@keyframes acornBounce {
+  0%, 100% { transform: translateY(0) rotate(-2deg); }
+  45% { transform: translateY(-3px) rotate(2deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chatActivityAcorn { animation: none; }
 }
 
 .bottomSentinel {
@@ -371,7 +540,9 @@ nav button.active,
 
 .message {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
+  min-width: 0;
   max-width: 1040px;
   margin: 0;
 }
@@ -382,7 +553,9 @@ nav button.active,
 
 .messageTurn {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 7px;
+  min-width: 0;
   max-width: 1040px;
   margin: 0 0 22px;
 }
@@ -396,6 +569,7 @@ nav button.active,
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   color: #7f909b;
   font-size: 12px;
   text-transform: uppercase;
@@ -445,6 +619,8 @@ nav button.active,
 }
 
 .messageBody {
+  min-width: 0;
+  max-width: 100%;
   margin: 0;
   overflow-wrap: anywhere;
   border: 1px solid #26333c;
@@ -511,6 +687,7 @@ nav button.active,
 }
 
 .messageBody pre {
+  max-width: 100%;
   overflow-x: auto;
   border: 1px solid #26333c;
   border-radius: 6px;
@@ -580,6 +757,7 @@ nav button.active,
 }
 
 .jsonViewer {
+  max-width: 100%;
   border: 1px solid #26333c;
   border-radius: 6px;
   background: #0b1014;
@@ -714,6 +892,8 @@ nav button.active,
 
 .toolActivity {
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid transparent;
   border-radius: 7px;
   color: #8fa0aa;
@@ -742,10 +922,10 @@ nav button.active,
 .toolSummary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .toolResultState { color: #657680; font-size: 10px; text-transform: uppercase; }
 .toolActivity.failed .toolResultState { color: #d98181; }
-.toolDetails { display: grid; gap: 10px; border-top: 1px solid #26343d; padding: 10px; }
+.toolDetails { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; min-width: 0; border-top: 1px solid #26343d; padding: 10px; }
 .toolDetails section { min-width: 0; }
 .toolDetails h4 { margin: 0 0 5px; color: #71848e; font-size: 10px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
-.toolDetails pre { max-height: 420px; margin: 0; overflow: auto; border: 1px solid #25323a; border-radius: 5px; background: #0a0f13; padding: 10px; color: #c5d0d6; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
+.toolDetails pre { max-width: 100%; max-height: 420px; margin: 0; overflow: auto; border: 1px solid #25323a; border-radius: 5px; background: #0a0f13; padding: 10px; color: #c5d0d6; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
 @keyframes toolPulse { 50% { opacity: .35; } }
 
 .memoryLookupMessage { margin: 2px 0 6px; }
@@ -775,12 +955,43 @@ nav button.active,
   padding: 14px 18px;
 }
 
+.composerProgress {
+  position: absolute;
+  top: -1px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  overflow: hidden;
+  background: rgba(122, 184, 201, 0.1);
+}
+
+.composerProgress span {
+  display: block;
+  width: 32%;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, #7ab8c9, transparent);
+  animation: composerProgress 1.35s ease-in-out infinite;
+}
+
+@keyframes composerProgress {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(420%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composerProgress span { width: 100%; animation: none; opacity: 0.65; }
+}
+
 .recipientPicker {
   position: relative;
   align-self: start;
 }
 
 .recipientButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   min-height: 38px;
   border-color: #41606d;
   background: #14232b;
@@ -996,6 +1207,10 @@ nav button.active,
   .brand span, .themeToggle:not(:focus), .healthLabel, .telemetry span { font-size: 0; }
   .themeToggle { padding: 6px; }
   .telemetry { grid-template-columns: 1fr; gap: 3px; text-align: center; }
+  .roomRail > header { justify-content: center; }
+  .roomRail > header h3, .roomRail > header span, .roomRailText, .roomRailKind { display: none; }
+  .roomRailAgent { grid-template-columns: 1fr; justify-items: center; padding: 6px 2px; }
+  .roomRailIdentity { width: 30px; height: 30px; }
 }
 
 .chip {
@@ -1123,11 +1338,12 @@ nav button.active,
   min-width: 0;
 }
 
-.rosterDot {
+.participantMark {
   flex: none;
   width: 9px;
   height: 9px;
-  border-radius: 50%;
+  border-radius: 1px;
+  transform: rotate(45deg);
 }
 
 .rosterName {
@@ -1154,6 +1370,29 @@ nav button.active,
   margin-top: 6px;
 }
 .rosterRenameForm input { min-width: 0; flex: 1; }
+
+.rosterFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.rosterFooter .hint {
+  margin: 0;
+}
+
+.rosterManage {
+  flex: none;
+  padding: 7px 12px;
+}
+
+@media (max-width: 520px) {
+  .rosterFooter {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
 
 .hint {
   color: #7f909b;
@@ -1441,6 +1680,17 @@ nav button.active,
   width: max-content;
 }
 
+.contextDiscGrid.compact {
+  grid-template-columns: repeat(10, 10px);
+  gap: 3px;
+}
+
+.contextDiscGrid.compact .disc {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
 .disc {
   display: inline-block;
   width: 16px;
@@ -1450,6 +1700,7 @@ nav button.active,
 }
 
 .disc.system { background: #60a5fa; }
+.disc.memory { background: #f87171; }
 .disc.files { background: #facc15; }
 .disc.messages { background: #4ade80; }
 .disc.available { background: #222d36; border: 1px solid #33414c; }
@@ -1457,6 +1708,7 @@ nav button.active,
 .contextNavigator { position: sticky; top: -20px; z-index: 4; margin: 0 -22px; padding: 14px 22px; border-bottom: 1px solid #293740; background: #10181e; box-shadow: 0 8px 16px rgba(0, 0, 0, 0.18); }
 .contextDiscGrid.interactive button.disc { padding: 0; border: 0; cursor: pointer; opacity: 1; }
 .contextDiscGrid.interactive button.disc.system { background: #60a5fa; }
+.contextDiscGrid.interactive button.disc.memory { background: #f87171; }
 .contextDiscGrid.interactive button.disc.files { background: #facc15; }
 .contextDiscGrid.interactive button.disc.messages { background: #4ade80; }
 .contextDiscGrid.interactive button.disc.available { background: #222d36; }
@@ -1471,8 +1723,11 @@ nav button.active,
 .contextDocument { margin-top: 18px; border: 1px solid #293740; border-radius: 8px; overflow: clip; background: #0e151a; }
 .contextDocument article { scroll-margin-top: 340px; border-bottom: 1px solid #293740; }
 .contextDocument article:last-child { border-bottom: 0; }
-.contextDocument article > header { display: flex; justify-content: space-between; gap: 14px; padding: 9px 12px; background: #19242c; color: #d3e2e9; font-size: 12px; }
-.contextDocument article > header span { color: #8496a1; font-weight: normal; }
+.contextDocument article > header { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 8px 14px; padding: 9px 12px; background: #19242c; color: #d3e2e9; font-size: 12px; }
+.contextSectionTitle { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
+.contextSectionTitle > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.contextSectionDisc { width: 12px; height: 12px; flex: 0 0 12px; }
+.contextSectionMeta { margin-left: auto; color: #8496a1; font-weight: normal; white-space: nowrap; }
 .contextDocument pre { margin: 0; padding: 14px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: #c8d5db; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .contextDocument details { padding: 8px 12px; border-bottom: 1px solid #202d35; color: #91a4af; font-size: 12px; }
 .contextDocument details pre { padding: 9px 0 0; color: #91a4af; }
@@ -1492,6 +1747,16 @@ nav button.active,
   align-items: center;
   gap: 6px;
 }
+
+.contextLegend.compact {
+  gap: 5px 10px;
+  margin: 10px 0 0;
+  color: #92a3ad;
+  font-size: 9px;
+}
+
+.contextLegend.compact .legendItem { gap: 4px; font-size: 9px; }
+.contextLegend.compact .disc { width: 8px; height: 8px; border-radius: 2px; }
 
 .contextNavigator .contextLegend { margin: 10px 0 0; }
 
@@ -1563,6 +1828,22 @@ nav button.active,
   border-color: #cbd5da;
 }
 
+.appShell[data-theme='light'] .roomRail,
+.appShell[data-theme='light'] .agentContextPopover > header { border-color: #cbd5da; }
+.appShell[data-theme='light'] .roomRail > header span { background: #dfe7ea; color: #526872; }
+.appShell[data-theme='light'] .roomRailAgent:hover,
+.appShell[data-theme='light'] .roomRailAgent:focus-visible,
+.appShell[data-theme='light'] .roomRailAgent.active { border-color: #9eb7c0; background: #e1ecef; }
+.appShell[data-theme='light'] .roomRailIdentity { color: #26343c; }
+.appShell[data-theme='light'] .roomRailStatus { border-color: #eef2f4; }
+.appShell[data-theme='light'] .roomRailText strong { color: #26343c; }
+.appShell[data-theme='light'] .roomRailText small,
+.appShell[data-theme='light'] .roomRailKind { color: #60737d; }
+.appShell[data-theme='light'] .agentContextPopover { border-color: #aebfc6; background: #fff; color: #243039; box-shadow: 0 14px 40px rgba(35, 55, 64, 0.22); }
+.appShell[data-theme='light'] .agentContextMeta strong { color: #2d414a; }
+.appShell[data-theme='light'] .agentContextLoading,
+.appShell[data-theme='light'] .agentContextUnavailable { color: #60737d; }
+
 .appShell[data-theme='light'] .contextViewHeader { color: #243039; }
 .appShell[data-theme='light'] .contextTabs { border-color: #b9c7cd; background: #e8eef1; }
 .appShell[data-theme='light'] .contextNavigator { border-color: #cbd5da; background: #f6f8f9; box-shadow: 0 8px 16px rgba(35, 55, 64, 0.1); }
@@ -1577,7 +1858,7 @@ nav button.active,
 .appShell[data-theme='light'] .contextDocument { border-color: #bcc9cf; background: #ffffff; }
 .appShell[data-theme='light'] .contextDocument article { border-color: #cbd5da; }
 .appShell[data-theme='light'] .contextDocument article > header { background: #e7eef1; color: #25343c; }
-.appShell[data-theme='light'] .contextDocument article > header span,
+.appShell[data-theme='light'] .contextSectionMeta,
 .appShell[data-theme='light'] .contextDocument details { color: #60727c; }
 .appShell[data-theme='light'] .contextDocument details { border-color: #d6dfe3; }
 .appShell[data-theme='light'] .contextDocument pre { color: #26343c; }

@@ -9,6 +9,7 @@ import type { AgentKind } from '../agents/types.js';
 import type { EffortLevel } from '../types.js';
 import type { UiStatePatch } from './ui-state.js';
 import { UiStateStore } from './ui-state-store.js';
+import { discoverCodexModels } from '../agents/codex-models.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
@@ -28,6 +29,8 @@ export interface SquirlServerOptions {
   workingDir?: string;
   staticDir?: string;
   uiStatePath?: string;
+  /** Injection seam for API tests and embedders that already own a runtime. */
+  runtime?: SquirlRuntime;
 }
 
 function readBody(req: IncomingMessage): Promise<unknown> {
@@ -105,7 +108,7 @@ function serveStatic(res: ServerResponse, staticDir: string, pathname: string): 
 }
 
 export function createSquirlServer(options: SquirlServerOptions = {}) {
-  const runtime = new SquirlRuntime(options.workingDir ?? process.cwd());
+  const runtime = options.runtime ?? new SquirlRuntime(options.workingDir ?? process.cwd());
   const uiState = new UiStateStore(options.uiStatePath);
   const staticDir = options.staticDir ?? resolve(__dirname, '../../dist-web');
 
@@ -202,6 +205,18 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
         return;
       }
 
+      const participantContextMatch = url.pathname.match(/^\/api\/participants\/([^/]+)\/context-preview$/);
+      if (participantContextMatch && req.method === 'GET') {
+        const participantId = decodeURIComponent(participantContextMatch[1]!);
+        const preview = runtime.getParticipantContextPreview(participantId);
+        if (!preview) {
+          sendJson(res, 404, { error: `No participant "${participantId}" is in the room.` });
+          return;
+        }
+        sendJson(res, 200, { preview });
+        return;
+      }
+
       if (url.pathname === '/api/import' && req.method === 'POST') {
         const body = await readBody(req);
         sendJson(res, 200, await runtime.importHistory(body as never));
@@ -244,6 +259,15 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
         const result = await runtime.renameAgent(body.id, body.name);
         if (!result.ok) throw new Error(result.error);
         sendJson(res, 200, { state: runtime.getState(), agent: result });
+        return;
+      }
+
+      if (url.pathname === '/api/agents/models' && req.method === 'GET') {
+        const kind = url.searchParams.get('kind');
+        if (kind !== 'codex') throw new Error('Model discovery is only available for Codex agents');
+        const discovery = discoverCodexModels();
+        if (discovery.models.length === 0) throw new Error('Codex has no cached models. Open the Codex CLI once to refresh its model list.');
+        sendJson(res, 200, discovery);
         return;
       }
 

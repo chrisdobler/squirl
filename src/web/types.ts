@@ -7,6 +7,7 @@ import type { Participant } from '../agents/types.js';
 import type { CommandDescriptor, CommandSurface } from '../commands/registry.js';
 import type { HealthReport, HealthEntry, HealthState } from './health.js';
 export type { ContextSnapshot, ContextSnapshotSection, ContextSnapshotDisc } from '../context/context-snapshot.js';
+export type { ParticipantContextPreview, ContextPreviewBuckets, ContextPreviewFidelity, ContextPreviewSource } from '../agents/context-preview.js';
 
 export type { HealthReport, HealthEntry, HealthState };
 

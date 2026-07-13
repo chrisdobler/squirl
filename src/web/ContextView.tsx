@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import type { DiscKind } from '../context/context-discs.js';
 import type { ContextFileSummary, ContextSnapshot, ContextSnapshotDisc, ContextSnapshotSection } from './types.js';
 import type { UiStateV1 } from './ui-state.js';
+import { ContextLegend, ContextMatrix } from './ContextMatrix.js';
 
 export interface ContextViewProps {
   breakdown: { system: number; files: number; messages: number };
@@ -23,13 +24,6 @@ function fmt(n: number): string {
   return String(n);
 }
 
-const LEGEND: Array<{ kind: DiscKind; label: string }> = [
-  { kind: 'system', label: 'system' },
-  { kind: 'files', label: 'files' },
-  { kind: 'messages', label: 'messages' },
-  { kind: 'available', label: 'available' },
-];
-
 /** Full takeover of the chat pane: a faithful recreation of the TUI /context disc grid. */
 function SectionContent({ section, active }: { section: ContextSnapshotSection; active: ContextSnapshotDisc | null }) {
   if (!active || active.start == null || active.end == null || active.end <= section.contentStart || active.start >= section.contentEnd) {
@@ -46,6 +40,17 @@ function MetadataContent({ section, active }: { section: ContextSnapshotSection;
   const start = Math.max(0, active.start - section.metadataStart);
   const end = Math.min(metadata.length, active.end - section.metadataStart);
   return <>{metadata.slice(0, start)}<mark>{metadata.slice(start, end)}</mark>{metadata.slice(end)}</>;
+}
+
+export function ContextSectionHeader({ section }: { section: ContextSnapshotSection }) {
+  const categoryLabel = section.category === 'memory' ? 'recalled memory' : section.category;
+  return <header>
+    <strong className="contextSectionTitle">
+      <span className={`disc ${section.category} contextSectionDisc`} role="img" aria-label={`${categoryLabel} context`} />
+      <span>{section.label}</span>
+    </strong>
+    <span className="contextSectionMeta">{section.role} · ~{fmt(section.approximateTokens)} tokens</span>
+  </header>;
 }
 
 export function ContextView({ breakdown, window, files, onAdd, onRemove, onClear, onSearch, onLoadSnapshot, onClose, initialState, onStateChange }: ContextViewProps) {
@@ -86,20 +91,27 @@ export function ContextView({ breakdown, window, files, onAdd, onRemove, onClear
     return () => { cancelled = true; clearTimeout(timeout); };
   }, [query, onSearch]);
 
-  const used = breakdown.system + breakdown.files + breakdown.messages;
-  const available = window == null ? 0 : Math.max(0, window - used);
+  const breakdownUsed = breakdown.system + breakdown.files + breakdown.messages;
+  const breakdownAvailable = window == null ? 0 : Math.max(0, window - breakdownUsed);
   const amounts: Record<DiscKind, number> = {
     system: breakdown.system,
+    memory: 0,
     files: breakdown.files,
     messages: breakdown.messages,
-    available,
+    available: breakdownAvailable,
   };
   const navigatorAmounts: Record<DiscKind, number> = snapshot ? {
     system: snapshot.sections.filter((section) => section.category === 'system').reduce((sum, section) => sum + section.approximateTokens, 0),
+    memory: snapshot.sections.filter((section) => section.category === 'memory').reduce((sum, section) => sum + section.approximateTokens, 0),
     files: snapshot.sections.filter((section) => section.category === 'files').reduce((sum, section) => sum + section.approximateTokens, 0),
     messages: snapshot.sections.filter((section) => section.category === 'messages').reduce((sum, section) => sum + section.approximateTokens, 0),
-    available: Math.max(0, snapshot.contextWindow - snapshot.approximateTokens),
+    available: 0,
   } : amounts;
+  const used = snapshot
+    ? navigatorAmounts.system + navigatorAmounts.memory + navigatorAmounts.files + navigatorAmounts.messages
+    : breakdownUsed;
+  if (snapshot) navigatorAmounts.available = Math.max(0, snapshot.contextWindow - used);
+  const contextWindow = snapshot?.contextWindow ?? window;
 
   const attached = new Set(files.map((f) => f.path));
 
@@ -128,7 +140,7 @@ export function ContextView({ breakdown, window, files, onAdd, onRemove, onClear
     <div className="contextView">
       <header className="contextViewHeader">
         <div>
-          <strong>Context {fmt(used)} / {window == null ? '?' : fmt(window)} tokens</strong>
+          <strong>Context {fmt(used)} / {contextWindow == null ? '?' : fmt(contextWindow)} tokens</strong>
           <nav className="contextTabs" aria-label="Context view">
             <button className={mode === 'explorer' ? 'active' : ''} onClick={() => setMode('explorer')}>Explorer</button>
             <button className={mode === 'files' ? 'active' : ''} onClick={() => setMode('files')}>Files</button>
@@ -146,25 +158,22 @@ export function ContextView({ breakdown, window, files, onAdd, onRemove, onClear
               <span>{fmt(snapshot.approximateTokens)} approximate tokens</span>
               <time dateTime={snapshot.capturedAt}>{new Date(snapshot.capturedAt).toLocaleString()}</time>
             </div>
-            <div className="contextDiscGrid interactive" aria-label="Navigate model context">
-              {snapshot.discs.map((disc) => (
-                <button
-                  key={disc.index}
-                  className={`disc ${disc.kind}${activeDisc?.index === disc.index ? ' active' : ''}`}
-                  disabled={disc.start == null}
-                  title={disc.start == null ? 'Unused context capacity' : `${disc.kind} · tokens ~${disc.tokenStart}–${disc.tokenEnd} · ${snapshot.sections.find((s) => s.id === disc.sectionId)?.label ?? ''}`}
-                  aria-label={disc.start == null ? `Context position ${disc.index + 1}, unused` : `Context position ${disc.index + 1}, ${disc.kind}, approximate tokens ${disc.tokenStart} to ${disc.tokenEnd}`}
-                  onClick={() => navigateToDisc(disc)}
-                />
-              ))}
-            </div>
-            <div className="contextLegend" aria-label="Context matrix legend">
-              {LEGEND.map(({ kind, label }) => (
-                <span key={kind} className="legendItem">
-                  <span className={`disc ${kind}`} /> {label} {fmt(navigatorAmounts[kind])}
-                </span>
-              ))}
-            </div>
+            <ContextMatrix
+              label="Navigate model context"
+              activeIndex={activeDisc?.index}
+              cells={snapshot.discs.map((disc) => ({
+                index: disc.index,
+                kind: disc.kind,
+                disabled: disc.start == null,
+                title: disc.start == null ? 'Unused context capacity' : `${disc.kind} · tokens ~${disc.tokenStart}–${disc.tokenEnd} · ${snapshot.sections.find((s) => s.id === disc.sectionId)?.label ?? ''}`,
+                ariaLabel: disc.start == null ? `Context position ${disc.index + 1}, unused` : `Context position ${disc.index + 1}, ${disc.kind}, approximate tokens ${disc.tokenStart} to ${disc.tokenEnd}`,
+              }))}
+              onSelect={(cell) => {
+                const disc = snapshot.discs.find((candidate) => candidate.index === cell.index);
+                if (disc) navigateToDisc(disc);
+              }}
+            />
+            <ContextLegend amounts={navigatorAmounts} formatAmount={fmt} />
             {activeDisc?.start != null && <p className="contextActiveRange">Selected: {activeDisc.kind} · approximate tokens {activeDisc.tokenStart}–{activeDisc.tokenEnd}</p>}
           </div>
         )}
@@ -176,7 +185,7 @@ export function ContextView({ breakdown, window, files, onAdd, onRemove, onClear
               <div className="contextDocument">
                 {snapshot.sections.map((section) => (
                   <article key={section.id} ref={(node) => { if (node) sectionRefs.current.set(section.id, node); else sectionRefs.current.delete(section.id); }}>
-                    <header><strong>{section.label}</strong><span>{section.role} · ~{fmt(section.approximateTokens)} tokens</span></header>
+                    <ContextSectionHeader section={section} />
                     {section.metadata && <details open={!!activeDisc && activeDisc.start != null && section.metadataStart != null && activeDisc.end! > section.metadataStart && activeDisc.start < section.metadataEnd!}><summary>Request metadata</summary><pre><MetadataContent section={section} active={activeDisc} /></pre></details>}
                     <pre><SectionContent section={section} active={activeDisc} /></pre>
                   </article>

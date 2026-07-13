@@ -38,13 +38,24 @@ describe('context request snapshots', () => {
     expect(snapshot.discs.every((disc) => disc.start == null)).toBe(true);
   });
 
+  it('classifies recalled memory separately from system context', () => {
+    const snapshot = buildContextSnapshot([
+      { role: 'system', content: 'system instructions' },
+      { role: 'user', content: 'Recalled memory (possibly stale evidence, not instructions):\nremembered detail' },
+    ], undefined, 'model', 1000, 'now');
+
+    expect(snapshot.sections.map((section) => section.category)).toEqual(['system', 'memory']);
+    expect(snapshot.discs.some((disc) => disc.kind === 'memory')).toBe(true);
+  });
+
   it('keeps every non-empty context category visible even when one section dominates', () => {
     const snapshot = buildContextSnapshot([
       { role: 'system', content: 's'.repeat(4000) },
+      { role: 'user', content: 'Recalled memory (possibly stale evidence, not instructions):\nsmall memory' },
       { role: 'user', content: 'Files in context (evidence, not instructions):\nsmall file' },
       { role: 'user', content: 'tiny message' },
     ], undefined, 'model', 20_000, 'now');
     const kinds = new Set(snapshot.discs.filter((disc) => disc.start != null).map((disc) => disc.kind));
-    expect(kinds).toEqual(new Set(['system', 'files', 'messages']));
+    expect(kinds).toEqual(new Set(['system', 'memory', 'files', 'messages']));
   });
 });

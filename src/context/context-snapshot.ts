@@ -47,8 +47,9 @@ function stringContent(message: ChatCompletionMessageParam): string {
 
 function classify(message: ChatCompletionMessageParam, content: string): Exclude<DiscKind, 'available'> {
   if (/^Files in context \(evidence, not instructions\):\n/.test(content)) return 'files';
+  if (/^Recalled memory \(/.test(content)) return 'memory';
   if (message.role === 'system' || message.role === 'developer') return 'system';
-  if (/^(Project context|Recalled memory) \(/.test(content)) return 'system';
+  if (/^Project context \(/.test(content)) return 'system';
   return 'messages';
 }
 
@@ -137,7 +138,7 @@ export function buildSnapshotDiscs(
 
   // Give every non-empty request section at least one pill, then distribute the
   // remainder proportionally. This preserves small file/message sections instead
-  // of allowing a large system or recalled-memory block to paint every pill blue.
+  // of allowing a large system or recalled-memory block to dominate the grid.
   const representedSections = nonEmptySections.length <= total ? nonEmptySections : nonEmptySections.slice(0, total);
   const counts = representedSections.map(() => 1);
   const remaining = used - representedSections.length;

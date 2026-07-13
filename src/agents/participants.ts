@@ -6,11 +6,31 @@ import type { AgentDescriptor, Participant, ParticipantColor } from './types.js'
 export const USER_PARTICIPANT: Participant = { id: 'user', kind: 'user', label: 'you', color: 'cyan' };
 export const SQUIRL_PARTICIPANT: Participant = { id: 'squirl', kind: 'local-llm', label: 'squirl', color: 'green' };
 
-/** Colors handed to remote agents as they join (cyan/green are reserved for user/squirl). */
-const AGENT_PALETTE: ParticipantColor[] = ['yellow', 'magenta', 'blue', 'gray'];
+/** Stable identity colors for remote agents, ordered to avoid status-like colors initially. */
+export const AGENT_COLOR_PALETTE: readonly ParticipantColor[] = [
+  'magenta', 'orange', 'blue', 'green', 'red', 'yellow', 'gray', 'teal', 'violet', 'brown',
+];
 
-export function pickAgentColor(index: number): ParticipantColor {
-  return AGENT_PALETTE[index % AGENT_PALETTE.length]!;
+/** Shared RGB values keep participant identities consistent between Ink and web renderers. */
+export const PARTICIPANT_COLOR_VALUE: Readonly<Record<ParticipantColor, string>> = {
+  cyan: '#22d3ee',
+  magenta: '#e879f9',
+  orange: '#fb923c',
+  blue: '#60a5fa',
+  green: '#4ade80',
+  red: '#f87171',
+  yellow: '#facc15',
+  gray: '#9ca3af',
+  teal: '#2dd4bf',
+  violet: '#a78bfa',
+  brown: '#b08968',
+};
+
+export function pickAgentColor(inUse: Iterable<ParticipantColor>): ParticipantColor {
+  const used = new Set(inUse);
+  const available = AGENT_COLOR_PALETTE.find((color) => !used.has(color));
+  if (!available) throw new Error(`Cannot add another agent: all ${AGENT_COLOR_PALETTE.length} identity colors are in use.`);
+  return available;
 }
 
 /** Short human label for an agent's permission/sandbox posture, surfaced in the UI. */
@@ -19,13 +39,13 @@ export function describeAgentMode(descriptor: AgentDescriptor): string {
   return `permission: ${descriptor.permissionMode ?? 'default'}`;
 }
 
-export function participantFromDescriptor(descriptor: AgentDescriptor, colorIndex: number): Participant {
+export function participantFromDescriptor(descriptor: AgentDescriptor, color: ParticipantColor): Participant {
   return {
     id: descriptor.id,
     kind: descriptor.kind,
     label: descriptor.label,
     specialty: descriptor.specialty,
-    color: pickAgentColor(colorIndex),
+    color,
     status: 'starting',
     mode: describeAgentMode(descriptor),
     cwd: descriptor.cwd,

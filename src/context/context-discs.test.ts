@@ -15,26 +15,29 @@ describe('computeContextDiscs', () => {
     expect(count(discs, 'available')).toBe(100);
   });
 
-  it('fills in order system -> files -> messages -> available', () => {
-    // window 100k, tokensPerDisc = 1000 => 1 / 2 / 3 used, 94 available
-    const discs = computeContextDiscs({ system: 1000, files: 2000, messages: 3000 }, 100_000);
+  it('fills in order system -> memory -> files -> messages -> available', () => {
+    // window 100k, tokensPerDisc = 1000 => 1 / 1 / 2 / 3 used, 93 available
+    const discs = computeContextDiscs({ system: 1000, memory: 1000, files: 2000, messages: 3000 }, 100_000);
     expect(discs.slice(0, 1).every((d) => d === 'system')).toBe(true);
-    expect(discs.slice(1, 3).every((d) => d === 'files')).toBe(true);
-    expect(discs.slice(3, 6).every((d) => d === 'messages')).toBe(true);
-    expect(discs.slice(6).every((d) => d === 'available')).toBe(true);
+    expect(discs.slice(1, 2).every((d) => d === 'memory')).toBe(true);
+    expect(discs.slice(2, 4).every((d) => d === 'files')).toBe(true);
+    expect(discs.slice(4, 7).every((d) => d === 'messages')).toBe(true);
+    expect(discs.slice(7).every((d) => d === 'available')).toBe(true);
     expect(count(discs, 'system')).toBe(1);
+    expect(count(discs, 'memory')).toBe(1);
     expect(count(discs, 'files')).toBe(2);
     expect(count(discs, 'messages')).toBe(3);
-    expect(count(discs, 'available')).toBe(94);
+    expect(count(discs, 'available')).toBe(93);
   });
 
   it('gives any non-zero used bucket at least one disc', () => {
     // tiny buckets that would round to 0 discs each (tokensPerDisc = 1000)
-    const discs = computeContextDiscs({ system: 10, files: 10, messages: 10 }, 100_000);
+    const discs = computeContextDiscs({ system: 10, memory: 10, files: 10, messages: 10 }, 100_000);
     expect(count(discs, 'system')).toBe(1);
+    expect(count(discs, 'memory')).toBe(1);
     expect(count(discs, 'files')).toBe(1);
     expect(count(discs, 'messages')).toBe(1);
-    expect(count(discs, 'available')).toBe(97);
+    expect(count(discs, 'available')).toBe(96);
   });
 
   it('clips to `total` when usage overflows the window (no available)', () => {
