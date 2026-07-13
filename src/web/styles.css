@@ -352,6 +352,27 @@ nav button.active,
 .roomRailText small { color: #74858f; font-size: 10px; }
 .roomRailKind { color: #738792; font-size: 9px; text-transform: uppercase; }
 
+.currentTasks {
+  display: grid;
+  flex: 0 1 38%;
+  min-height: 88px;
+  gap: 8px;
+  overflow: hidden;
+  border-top: 1px solid #24313a;
+  padding-top: 12px;
+}
+.currentTasks > header { display: flex; align-items: center; justify-content: space-between; gap: 7px; }
+.currentTasks > header h3 { margin: 0; color: #9fb0bb; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.taskActivityStatus { border-radius: 999px; padding: 2px 6px; background: #1c2730; color: #8fa4ae; font-size: 9px; }
+.taskActivityStatus.stale { color: #facc15; }
+.taskActivityStatus.unavailable { color: #f87171; }
+.currentTaskList { display: grid; gap: 5px; min-height: 0; overflow: auto; scrollbar-width: thin; }
+.currentTaskRow { display: grid; gap: 3px; border-left: 2px solid #355866; border-radius: 0 5px 5px 0; background: #111b21; padding: 6px 7px; }
+.currentTaskRow strong { overflow: hidden; color: #dce8ee; font-size: 11px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.currentTaskRow small { display: flex; min-width: 0; justify-content: space-between; gap: 6px; color: #74858f; font-size: 9px; }
+.currentTaskRow small span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.currentTaskList > p { margin: 0; color: #74858f; font-size: 10px; line-height: 1.4; }
+
 .agentContextPopover {
   position: fixed;
   z-index: 60;
@@ -1269,6 +1290,15 @@ nav button.active,
   .squirlDependency::after { left: -9px; }
   .squirlDependency .healthLabel,
   .squirlDependency small { display: none; }
+  .currentTasks { flex-basis: 30%; min-height: 72px; }
+  .currentTasks > header { justify-content: center; }
+  .currentTasks > header h3 { font-size: 9px; text-align: center; }
+  .taskActivityStatus { display: none; }
+  .currentTaskRow { padding: 5px 3px; }
+  .currentTaskRow strong { display: -webkit-box; font-size: 9px; line-height: 1.25; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+  .currentTaskRow small { justify-content: center; }
+  .currentTaskRow small span:last-child { display: none; }
+  .currentTaskList > p { font-size: 8px; text-align: center; }
 }
 
 .chip {
@@ -1905,6 +1935,11 @@ nav button.active,
 .appShell[data-theme='light'] .roomRailText strong { color: #26343c; }
 .appShell[data-theme='light'] .roomRailText small,
 .appShell[data-theme='light'] .roomRailKind { color: #60737d; }
+.appShell[data-theme='light'] .currentTasks { border-color: #cbd5da; }
+.appShell[data-theme='light'] .currentTaskRow { border-color: #9eb7c0; background: #e7eef1; }
+.appShell[data-theme='light'] .currentTaskRow strong { color: #26343c; }
+.appShell[data-theme='light'] .currentTaskRow small,
+.appShell[data-theme='light'] .currentTaskList > p { color: #60737d; }
 .appShell[data-theme='light'] .agentContextPopover { border-color: #aebfc6; background: #fff; color: #243039; box-shadow: 0 14px 40px rgba(35, 55, 64, 0.22); }
 .appShell[data-theme='light'] .agentContextMeta strong { color: #2d414a; }
 .appShell[data-theme='light'] .agentContextLoading,

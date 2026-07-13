@@ -322,6 +322,61 @@ describe('SquirlRuntime agents', () => {
       'tell cc to make a plan for agent directories',
     ]);
   });
+
+  it('keeps a durable stale snapshot when refresh is unavailable and expires it only after a reliable refresh', async () => {
+    writeFileSync(join(testHome, '.squirl', 'task-activity.json'), JSON.stringify({
+      version: 1,
+      generatedAt: '2026-07-13T16:00:00.000Z',
+      sourceWatermark: 'old',
+      tasks: [{ id: 'task-1', title: 'Previous reliable task', lastActiveAt: '2026-07-13T16:30:00.000Z', participantIds: ['codex'], evidenceIds: ['u1'] }],
+    }), 'utf-8');
+    const runtime = await loadRuntime();
+    const internals = runtime as unknown as { taskRefreshFailed: boolean; taskSourceDirty: boolean; taskRefreshRunning: boolean };
+    internals.taskRefreshRunning = false;
+    internals.taskRefreshFailed = true;
+    internals.taskSourceDirty = true;
+    expect(runtime.getTaskActivityState(Date.parse('2026-07-13T18:00:00.000Z'))).toMatchObject({ status: 'stale', tasks: [{ title: 'Previous reliable task' }] });
+
+    internals.taskRefreshFailed = false;
+    internals.taskSourceDirty = false;
+    expect(runtime.getTaskActivityState(Date.parse('2026-07-13T18:00:00.000Z'))).toMatchObject({ status: 'ready', tasks: [] });
+  });
+
+  it('coalesces task refreshes and emits a streamed task snapshot', async () => {
+    const recent = new Date().toISOString();
+    writeJsonl(join(historyDir, 'current.jsonl'), [entry('task-user', 'user', 'build inferred task activity', recent)]);
+    const runtime = await loadRuntime();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    let classifications = 0;
+    const events: any[] = [];
+    const internals = runtime as unknown as {
+      config: any;
+      embedder: any;
+      vectorStore: any;
+      taskMetaLLM: any;
+      taskActivityEmit: (event: any) => void;
+      markTaskActivityChanged: () => void;
+    };
+    internals.config.index = { enabled: true, store: 'null', embedder: 'local', recallK: 4 };
+    internals.embedder = { name: 'fake', dimensions: 1, embed: async () => [[1]] };
+    internals.vectorStore = { query: async () => [{
+      id: 'memory-1', score: 1,
+      turnPair: { id: 'memory-1', source: 'squirl', conversationId: 'history', timestamp: recent, userText: 'task activity', assistantText: 'sidebar' },
+    }] };
+    internals.taskMetaLLM = { complete: async () => {
+      classifications += 1;
+      return JSON.stringify({ confidence: 'high', tasks: [{ title: 'Build inferred task activity', evidenceIds: ['task-user'] }] });
+    } };
+    internals.taskActivityEmit = (event) => events.push(event);
+    internals.markTaskActivityChanged();
+    internals.markTaskActivityChanged();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(classifications).toBe(1);
+    expect(runtime.getTaskActivityState()).toMatchObject({ status: 'ready', tasks: [{ title: 'Build inferred task activity' }] });
+    expect(events).toContainEqual(expect.objectContaining({ type: 'task-activity', taskActivity: expect.objectContaining({ status: 'ready' }) }));
+  });
 });
 
 describe('SquirlRuntime context window', () => {

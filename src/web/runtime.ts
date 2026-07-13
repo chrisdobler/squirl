@@ -22,6 +22,7 @@ import { IngestQueue } from '../search/ingest-queue.js';
 import { StatusEmitter } from '../search/status.js';
 import { MemoryPipeline } from '../search/memory-pipeline.js';
 import { createMetaLLM } from '../search/meta-llm.js';
+import type { MetaLLM } from '../search/meta-extract.js';
 import { recall } from '../search/recall.js';
 import { isVectorStoreError } from '../search/stores/chroma.js';
 import { executeEvalRun, evalConfigFromSquirl, answerModelFromSquirl, judgeFromSquirl } from '../search/eval/run.js';
@@ -44,6 +45,10 @@ import type { QueryPipelineStatus } from '../pipeline-status.js';
 import type { VectorStore } from '../search/types.js';
 import type { AppState, ChatEvent, ContextFileSummary, ImportRequest, ImportResult, ModelDetectionResult, RuntimeStatus, ToolApprovalRequest } from './types.js';
 import { boundedToolOutput } from '../tool-activity.js';
+import { buildRecentTaskEvidence, TASK_ACTIVITY_WINDOW_MS, taskEvidenceWatermark } from '../tasks/evidence.js';
+import { classifyCurrentTasks } from '../tasks/classifier.js';
+import { loadTaskActivitySnapshot, saveTaskActivitySnapshot } from '../tasks/store.js';
+import type { TaskActivitySnapshot, TaskActivityState } from '../tasks/types.js';
 
 interface PendingApproval {
   request: ToolApprovalRequest;
@@ -181,6 +186,14 @@ export class SquirlRuntime extends EventEmitter {
   private healthReport: HealthReport;
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private healthChecking = false;
+  private taskMetaLLM: MetaLLM | null = null;
+  private taskActivitySnapshot: TaskActivitySnapshot | null;
+  private taskRefreshRunning = false;
+  private taskRefreshQueued = false;
+  private taskRefreshScheduled = false;
+  private taskRefreshFailed = true;
+  private taskSourceDirty = true;
+  private taskActivityEmit: ((event: ChatEvent) => void) | null = null;
 
   constructor(workingDir = process.cwd()) {
     super();
@@ -190,6 +203,7 @@ export class SquirlRuntime extends EventEmitter {
     this.messages = loadHistory();
     this.selectedModel = defaultModelFromConfig(this.config);
     this.healthReport = unknownReport(this.config, this.selectedModel);
+    this.taskActivitySnapshot = loadTaskActivitySnapshot();
     this.orchestrator = new Orchestrator(workingDir);
     this.participantContextPreviews = loadParticipantContextPreviews(workingDir);
     this.coordinator = new GroupChatCoordinator({
@@ -202,7 +216,10 @@ export class SquirlRuntime extends EventEmitter {
     });
     this.coordinator.onEvent((event) => this.handleAgentEvent(event));
     this.syncIdentityContext();
-    void this.initializeIndex().then(() => this.refreshHealth());
+    void this.initializeIndex().then(() => {
+      void this.refreshHealth();
+      this.scheduleTaskActivityRefresh();
+    });
     void this.hydrateSelectedLocalModel();
     void this.startDefaultAgents();
     this.startEvalMonitor();
@@ -221,6 +238,23 @@ export class SquirlRuntime extends EventEmitter {
       })),
       participants: this.coordinator.listParticipants(),
       health: this.healthReport,
+      taskActivity: this.getTaskActivityState(),
+    };
+  }
+
+  getTaskActivityState(now = Date.now()): TaskActivityState {
+    const snapshot = this.taskActivitySnapshot;
+    if (!snapshot) {
+      return { tasks: [], generatedAt: null, status: this.taskRefreshRunning ? 'refreshing' : 'unavailable' };
+    }
+    if (this.taskRefreshFailed || this.taskSourceDirty) {
+      return { tasks: snapshot.tasks, generatedAt: snapshot.generatedAt, status: this.taskRefreshRunning ? 'refreshing' : 'stale' };
+    }
+    const cutoff = now - TASK_ACTIVITY_WINDOW_MS;
+    return {
+      tasks: snapshot.tasks.filter((task) => Date.parse(task.lastActiveAt) >= cutoff),
+      generatedAt: snapshot.generatedAt,
+      status: this.taskRefreshRunning ? 'refreshing' : 'ready',
     };
   }
 
@@ -272,6 +306,7 @@ export class SquirlRuntime extends EventEmitter {
     this.startEvalMonitor(); // pick up monitor config changes
     this.healthReport = unknownReport(this.config, this.selectedModel); // targets may have changed
     void this.refreshHealth();
+    this.markTaskActivityChanged();
     this.configSignature = '';
     return this.getState();
   }
@@ -518,6 +553,7 @@ export class SquirlRuntime extends EventEmitter {
     this.streamStart = Date.now();
     this.streamTokens = 0;
     this.abortController = new AbortController();
+    this.taskActivityEmit = emit;
     emit({ type: 'status', status: this.getStatus() });
 
     try {
@@ -526,6 +562,7 @@ export class SquirlRuntime extends EventEmitter {
         this.messages = [...this.messages, userMsg];
         appendMessage(userMsg);
         this.historySignature = historySignature();
+        this.markTaskActivityChanged(emit);
         emit({ type: 'message', message: userMsg });
         for (const id of delegation.unavailableTargetIds) {
           emit({ type: 'toast', level: 'error', message: `Agent @${id} is not connected. Open Agents and connect it before delegating work.` });
@@ -567,6 +604,7 @@ export class SquirlRuntime extends EventEmitter {
         this.messages = [...this.messages, userMsg];
         appendMessage(userMsg);
         this.historySignature = historySignature();
+        this.markTaskActivityChanged(emit);
         emit({ type: 'message', message: userMsg });
         this.activeEmit = emit;
         try {
@@ -590,6 +628,7 @@ export class SquirlRuntime extends EventEmitter {
             if (message.role !== 'assistant') {
               appendMessage(message);
               this.historySignature = historySignature();
+              if (message.role === 'user') this.markTaskActivityChanged(emit);
             }
             emit({ type: 'message', message });
           },
@@ -612,6 +651,7 @@ export class SquirlRuntime extends EventEmitter {
               this.messages = [...this.messages.slice(0, -1), finalized];
               appendMessage(finalized);
               this.historySignature = historySignature();
+              this.markTaskActivityChanged(emit);
               emit({ type: 'assistant-final', message: finalized });
               // A finalized-but-empty reply (no error, no tokens) otherwise renders as a silent blank
               // bubble. Surface it so "no response" always says why.
@@ -627,6 +667,7 @@ export class SquirlRuntime extends EventEmitter {
               this.messages = [...this.messages.slice(0, -1), failed];
               appendMessage(failed);
               this.historySignature = historySignature();
+              this.markTaskActivityChanged(emit);
               emit({ type: 'assistant-final', message: failed });
             } else {
               emit({ type: 'error', message: error.message });
@@ -680,6 +721,7 @@ export class SquirlRuntime extends EventEmitter {
       this.abortController = null;
       emit({ type: 'status', status: this.getStatus() });
       emit({ type: 'done' });
+      this.taskActivityEmit = null;
     }
   }
 
@@ -693,6 +735,65 @@ export class SquirlRuntime extends EventEmitter {
       displayName: this.config.userProfile?.displayName,
       participants: this.coordinator.listParticipants().map(({ id, label, status, specialty }) => ({ id, label, status, specialty })),
     });
+  }
+
+  private markTaskActivityChanged(emit?: (event: ChatEvent) => void): void {
+    this.taskSourceDirty = true;
+    if (emit) this.taskActivityEmit = emit;
+    this.scheduleTaskActivityRefresh();
+  }
+
+  private scheduleTaskActivityRefresh(): void {
+    this.taskRefreshQueued = true;
+    if (this.taskRefreshRunning || this.taskRefreshScheduled) return;
+    this.taskRefreshScheduled = true;
+    queueMicrotask(() => {
+      this.taskRefreshScheduled = false;
+      void this.refreshTaskActivity();
+    });
+  }
+
+  private emitTaskActivity(): void {
+    this.taskActivityEmit?.({ type: 'task-activity', taskActivity: this.getTaskActivityState() });
+  }
+
+  private async refreshTaskActivity(): Promise<void> {
+    if (this.taskRefreshRunning) return;
+    this.taskRefreshRunning = true;
+    this.emitTaskActivity();
+    try {
+      while (this.taskRefreshQueued) {
+        this.taskRefreshQueued = false;
+        const llm = this.taskMetaLLM;
+        const embedder = this.embedder;
+        const vectorStore = this.vectorStore;
+        if (!this.config.index?.enabled || !llm || !embedder || !vectorStore) {
+          throw new Error('Semantic memory is unavailable for task classification.');
+        }
+        const historyEntries = getAllHistoryFiles().flatMap((file) => readEntries(file)).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+        const evidence = buildRecentTaskEvidence(historyEntries);
+        const snapshot = await classifyCurrentTasks({
+          evidence,
+          llm,
+          embedder,
+          vectorStore,
+          previous: this.taskActivitySnapshot,
+          recallK: this.config.index.recallK ?? 8,
+        });
+        snapshot.sourceWatermark = taskEvidenceWatermark(evidence);
+        saveTaskActivitySnapshot(snapshot);
+        this.taskActivitySnapshot = snapshot;
+        this.taskRefreshFailed = false;
+        this.taskSourceDirty = false;
+        this.emitTaskActivity();
+      }
+    } catch {
+      this.taskRefreshFailed = true;
+    } finally {
+      this.taskRefreshRunning = false;
+      this.emitTaskActivity();
+      if (this.taskRefreshQueued) this.scheduleTaskActivityRefresh();
+    }
   }
 
   /** Map the coordinator's AgentEvents onto the existing ChatEvent stream + this.messages. */
@@ -717,6 +818,7 @@ export class SquirlRuntime extends EventEmitter {
         this.messages = this.messages.map((m) => (m.id === event.messageId ? finalized : m));
         appendMessage(finalized);
         this.historySignature = historySignature();
+        this.markTaskActivityChanged(emit ?? undefined);
         emit?.({ type: 'assistant-final', message: finalized });
         break;
       }
@@ -1027,18 +1129,19 @@ export class SquirlRuntime extends EventEmitter {
 
   private refreshSharedState(): void {
     this.refreshConfigFromDisk();
-    this.refreshHistoryFromDisk();
+    if (this.refreshHistoryFromDisk()) this.markTaskActivityChanged();
   }
 
   private async refreshSharedStateAsync(): Promise<void> {
     const configChanged = this.refreshConfigFromDisk();
-    this.refreshHistoryFromDisk();
+    const historyChanged = this.refreshHistoryFromDisk();
     if (configChanged) {
       await this.initializeIndex();
       await this.hydrateSelectedLocalModel();
     } else {
       await this.hydrateSelectedLocalModel();
     }
+    if (configChanged || historyChanged) this.markTaskActivityChanged();
   }
 
   private refreshConfigFromDisk(): boolean {
@@ -1073,6 +1176,7 @@ export class SquirlRuntime extends EventEmitter {
     this.embedder = null;
     this.vectorStore = null;
     this.ingestQueue = null;
+    this.taskMetaLLM = null;
     this.embedderDisplay = '';
     if (!this.config.index?.enabled) return;
 
@@ -1116,12 +1220,17 @@ export class SquirlRuntime extends EventEmitter {
       this.ingestQueue = new IngestQueue(this.embedder, this.vectorStore, this.statusEmitter, embedderMaxTokens);
 
       const metaProvider = this.config.index.metaProvider ?? this.config.defaultProvider ?? 'openai';
-      const metaModel = this.config.index.metaModel ?? (metaProvider === 'local' ? (this.config.defaultModel ?? 'default') : 'gpt-4o-mini');
+      const metaModel = this.config.index.metaModel ?? (metaProvider === 'local'
+        ? (this.config.defaultModel ?? 'default')
+        : metaProvider === 'anthropic'
+          ? 'claude-haiku-4-5-20251001'
+          : 'gpt-4o-mini');
       const metaLLM = createMetaLLM({
         provider: metaProvider,
         model: metaModel,
         ...(metaProvider === 'local' ? { baseUrl: this.config.localBaseUrl } : {}),
       });
+      this.taskMetaLLM = metaLLM;
       this.orchestrator.setMemoryPipeline(new MemoryPipeline(metaLLM, this.embedder, this.vectorStore, {
         recallK: this.config.index.recallK ?? 10,
       }));

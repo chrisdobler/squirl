@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { Participant } from '../agents/types.js';
 import { PARTICIPANT_COLOR_VALUE, roomMembers } from '../agents/participants.js';
 import type { HealthEntry, ParticipantContextPreview } from './types.js';
+import type { TaskActivityState } from '../tasks/types.js';
 import { ContextLegend, ContextMatrix } from './ContextMatrix.js';
 import { ParticipantIdentity } from './ParticipantIdentity.js';
 
@@ -193,5 +194,32 @@ export function RoomSidebarRoster({ participants, healthEntries, squirlDependenc
       })}
     </div>
     {activeParticipant && <div id="agent-context-preview"><ContextPreviewCard participant={activeParticipant} preview={preview} loading={loading} position={position} onPointerEnter={keepOpen} onPointerLeave={() => close(160)} /></div>}
+  </section>;
+}
+
+function relativeActivity(timestamp: string, now: number): string {
+  const elapsed = Math.max(0, now - Date.parse(timestamp));
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 1) return 'now';
+  if (minutes < 60) return `${minutes}m ago`;
+  return `${Math.floor(minutes / 60)}h ago`;
+}
+
+export function CurrentTasks({ activity }: { activity: TaskActivityState }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const statusLabel = activity.status === 'refreshing' ? 'updating' : activity.status === 'stale' ? 'stale' : activity.status === 'unavailable' ? 'unavailable' : '';
+  return <section className="currentTasks" aria-label="Current tasks">
+    <header><h3>Current tasks</h3>{statusLabel && <span className={`taskActivityStatus ${activity.status}`}>{statusLabel}</span>}</header>
+    <div className="currentTaskList">
+      {activity.tasks.map((task) => <div className="currentTaskRow" key={task.id} aria-label={`${task.title}, ${relativeActivity(task.lastActiveAt, now)}${task.participantIds.length ? `, ${task.participantIds.map((id) => `@${id}`).join(', ')}` : ''}`}>
+        <strong title={task.title}>{task.title}</strong>
+        <small><span>{relativeActivity(task.lastActiveAt, now)}</span>{task.participantIds.length > 0 && <span>{task.participantIds.map((id) => `@${id}`).join(' ')}</span>}</small>
+      </div>)}
+      {activity.tasks.length === 0 && <p>{activity.status === 'unavailable' ? 'Waiting for a reliable task snapshot.' : activity.status === 'refreshing' ? 'Classifying recent work…' : 'No task activity in the last hour.'}</p>}
+    </div>
   </section>;
 }

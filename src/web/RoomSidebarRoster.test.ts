@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { Participant } from '../agents/types.js';
 import { ContextMatrix } from './ContextMatrix.js';
-import { ContextPreviewCard, RoomSidebarRoster, sidebarDestination } from './RoomSidebarRoster.js';
+import { ContextPreviewCard, CurrentTasks, RoomSidebarRoster, sidebarDestination } from './RoomSidebarRoster.js';
 import type { ParticipantContextPreview } from './types.js';
 
 const healthEntries = [
@@ -21,6 +21,19 @@ const participants: Participant[] = [
 ];
 
 describe('RoomSidebarRoster', () => {
+  it('renders a non-interactive current-task list with stale state and participant context', () => {
+    const html = renderToStaticMarkup(React.createElement(CurrentTasks, { activity: {
+      status: 'stale', generatedAt: '2026-07-13T18:00:00.000Z',
+      tasks: [{ id: 'task-1', title: 'Build inferred task feed', lastActiveAt: new Date(Date.now() - 120_000).toISOString(), participantIds: ['codex'], evidenceIds: ['u1'] }],
+    } }));
+    expect(html).toContain('Current tasks');
+    expect(html).toContain('Build inferred task feed');
+    expect(html).toContain('@codex');
+    expect(html).toContain('stale');
+    expect(html).not.toContain('<button');
+    expect(html).not.toContain('<a');
+  });
+
   it('renders every room agent, excludes the user, and exposes compact-width classes', () => {
     const html = renderToStaticMarkup(React.createElement(RoomSidebarRoster, {
       participants,

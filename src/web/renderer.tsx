@@ -17,7 +17,7 @@ import { restoredChatScrollTop, type ChatViewportSnapshot } from './chat-viewpor
 import { groupMessageTurns } from '../tool-activity.js';
 import { ToolActivityView } from './ToolActivityView.js';
 import { chatActivityLabel } from './chat-activity.js';
-import { RoomSidebarRoster } from './RoomSidebarRoster.js';
+import { CurrentTasks, RoomSidebarRoster } from './RoomSidebarRoster.js';
 import { defaultUiState, type UiStatePatch, type UiStateV1 } from './ui-state.js';
 import { ParticipantIdentity } from './ParticipantIdentity.js';
 import './styles.css';
@@ -992,6 +992,7 @@ function App() {
         if (event.type === 'agent-status') {
           setState((prev) => prev ? { ...prev, participants: prev.participants.map((p) => p.id === event.participantId ? { ...p, status: event.status as Participant['status'] } : p) } : prev);
         }
+        if (event.type === 'task-activity') setState((prev) => prev ? { ...prev, taskActivity: event.taskActivity } : prev);
         if (event.type === 'tool-approval') setApproval(event.request);
         if (event.type === 'open-command') openCommandSurface(event.surface);
         if (event.type === 'toast') pushToast(event.message);
@@ -1309,6 +1310,7 @@ function App() {
             await api<{ preview: ParticipantContextPreview }>(`/api/participants/${encodeURIComponent(participantId)}/context-preview`, { signal })
           ).preview}
         />
+        <CurrentTasks activity={state.taskActivity} />
         <div className="telemetry">
           <span>model</span><strong>{status.modelDisplay}</strong>
           <span>context</span><strong>{formatTokens(status.tokenCount)} / {status.contextWindow == null ? '?' : formatTokens(status.contextWindow)}</strong>

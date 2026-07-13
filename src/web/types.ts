@@ -4,10 +4,12 @@ import type { Message } from '../types.js';
 import type { QueryPipelineStatus } from '../pipeline-status.js';
 import type { LocalBackend } from '../api.js';
 import type { Participant } from '../agents/types.js';
+import type { TaskActivityState } from '../tasks/types.js';
 import type { CommandDescriptor, CommandSurface } from '../commands/registry.js';
 import type { HealthReport, HealthEntry, HealthState } from './health.js';
 export type { ContextSnapshot, ContextSnapshotSection, ContextSnapshotDisc } from '../context/context-snapshot.js';
 export type { ParticipantContextPreview, ContextPreviewBuckets, ContextPreviewFidelity, ContextPreviewMatrixMode, ContextPreviewSource } from '../agents/context-preview.js';
+export type { TaskActivityItem, TaskActivityState, TaskActivityStatus } from '../tasks/types.js';
 
 export type { HealthReport, HealthEntry, HealthState };
 
@@ -43,6 +45,7 @@ export interface AppState {
   commands: CommandDescriptor[];
   participants: Participant[];
   health: HealthReport;
+  taskActivity: TaskActivityState;
 }
 
 export interface ChatRequest {
@@ -58,6 +61,7 @@ export type ChatEvent =
   | { type: 'assistant-final'; message: Message }
   | { type: 'status'; status: RuntimeStatus }
   | { type: 'agent-status'; participantId: string; status: string }
+  | { type: 'task-activity'; taskActivity: TaskActivityState }
   | { type: 'tool-approval'; request: ToolApprovalRequest }
   | { type: 'open-command'; surface: CommandSurface }
   | { type: 'toast'; level: 'info' | 'error'; message: string }

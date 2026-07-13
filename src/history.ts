@@ -3,7 +3,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 import type { Message } from './types.js';
 
-interface LogEntry {
+export interface LogEntry {
   timestamp: string;
   message: Message;
 }
