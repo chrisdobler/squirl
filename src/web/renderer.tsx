@@ -1221,7 +1221,17 @@ function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [rewindCandidates, rewindConfirming, selectedRewindCandidate]);
 
-  if (!state || !uiState) return <main className="appShell" data-theme={theme}><div className="emptyState"><h2>Loading Squirl…</h2></div></main>;
+  if (!state || !uiState) return (
+    <main className="appShell loadingScreen" data-theme={theme}>
+      <div className="emptyState" role="status" aria-label="Loading Squirl">
+        <svg className="loadingAcorn" viewBox="0 0 16 16" aria-hidden="true">
+          <path className="squirlAcornStem" d="M9.2 3.9c.1-1.2.8-2 2-2.6" />
+          <path className="squirlAcornCap" d="M3.2 6.6c.6-2.4 2.6-3.8 5.3-3.8 2.6 0 4.5 1.4 5.1 3.8-2.9 1.3-7.4 1.3-10.4 0Z" />
+          <path className="squirlAcornNut" d="M4.2 7.5c.5 3.9 2.1 6.4 4.3 6.4s3.8-2.5 4.2-6.4c-2.5.8-6 .8-8.5 0Z" />
+        </svg>
+      </div>
+    </main>
+  );
 
   return (
     <main className="appShell" data-theme={theme}>
