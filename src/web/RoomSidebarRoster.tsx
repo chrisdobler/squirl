@@ -123,6 +123,7 @@ export function RoomSidebarRoster({ participants, loadPreview }: {
           type="button"
           className={`roomRailAgent${activeId === participant.id ? ' active' : ''}`}
           key={participant.id}
+          aria-label={`${participant.label} @${participant.id} · ${participant.status ?? 'ready'} ${participant.kind === 'local-llm' ? 'local' : participant.kind === 'claude-code' ? 'Claude' : 'Codex'}`}
           aria-describedby={activeId === participant.id ? 'agent-context-preview' : undefined}
           onPointerEnter={(event) => open(participant, event.currentTarget, 180)}
           onPointerLeave={() => close()}

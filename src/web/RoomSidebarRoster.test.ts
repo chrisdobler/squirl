@@ -25,6 +25,7 @@ describe('RoomSidebarRoster', () => {
     expect(html).not.toContain('@user');
     expect(html).toContain('roomRailIdentity');
     expect(html).toContain('roomRailText');
+    expect(html).toContain('aria-label="squirl @squirl · ready local"');
   });
 
   it('renders sanitized context metadata and an accessible matrix card', () => {
