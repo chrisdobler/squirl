@@ -39,6 +39,7 @@ This is Squirl's consolidated architecture decision record. It records decisions
 | [ADR-015](#adr-015--dependency-health-is-probed-server-side-and-published-with-app-state) | Dependency health is server-side cached app state | Accepted | 2026-06-29 |
 | [ADR-016](#adr-016--architecture-documentation-lives-with-the-code) | Architecture documentation lives with the code | Accepted | 2026-07-10 |
 | [ADR-017](#adr-017--participant-turns-are-queued-independently-and-web-events-are-persistent) | Participant turns use independent queues and persistent events | Accepted | 2026-07-13 |
+| [ADR-018](#adr-018--agent-permissions-use-one-session-scoped-approval-broker) | Agent permissions use one session-scoped approval broker | Accepted | 2026-07-14 |
 
 ---
 
@@ -438,3 +439,27 @@ Each participant owns an in-memory FIFO with at most one active turn, while diff
 ### Evidence
 
 `src/agents/turn-scheduler.ts`, `src/web/runtime.ts`, `src/web/server.ts`, `src/web/renderer.tsx`, and `src/app.tsx`.
+
+## ADR-018 — Agent permissions use one session-scoped approval broker
+
+**Status:** Accepted
+**Date:** 2026-07-14
+
+### Context
+
+Headless Claude, Codex, and PI sessions have different permission protocols. Without a bidirectional host integration, operations that would prompt in their native interfaces are denied or may run with an overly broad static posture.
+
+### Decision
+
+Squirl owns one provider-neutral approval queue with allow-once, narrowly scoped allow-for-session, and deny outcomes. Claude integrates through the Agent SDK, Codex through persistent App Server JSON-RPC, and PI through a bundled blocking extension over its existing RPC UI channel. Agent profiles persist the default posture, but individual grants live only inside the current adapter process.
+
+### Consequences
+
+- Browser reconnects restore pending prompts from runtime state; stale responses are idempotent.
+- Stop, interrupt, and reconnect fail pending requests closed and clear session grants.
+- Dangerous no-prompt configurations require explicit confirmation and remain excluded from shortcuts.
+- Provider suggestions that would persist settings, change modes, or broaden policy are not accepted.
+
+### Evidence
+
+`src/agents/permissions.ts`, the three agent adapters, `src/agents/pi-permission-gate.ts`, and the shared web/TUI interaction renderers.

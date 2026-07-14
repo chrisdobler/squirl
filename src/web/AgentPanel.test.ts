@@ -13,7 +13,8 @@ const codex: Participant = {
 describe('AgentPanel', () => {
   it('cycles safe Claude and Codex modes without entering dangerous access', () => {
     expect(nextClaudePermissionMode('default')).toBe('acceptEdits');
-    expect(nextClaudePermissionMode('acceptEdits')).toBe('plan');
+    expect(nextClaudePermissionMode('acceptEdits')).toBe('auto');
+    expect(nextClaudePermissionMode('auto')).toBe('plan');
     expect(nextClaudePermissionMode('plan')).toBe('default');
     expect(nextClaudePermissionMode('bypassPermissions')).toBe('default');
     expect(nextCodexSandbox('read-only')).toBe('workspace-write');
@@ -83,7 +84,7 @@ describe('AgentPanel', () => {
     expect(html).toContain('value="opus" selected');
     expect(html).toContain('Permission mode');
     expect(html).toContain('value="acceptEdits" selected');
-    expect(html).toContain('Shift+Tab cycles Manual, Accept edits, and Plan');
+    expect(html).toContain('Shift+Tab cycles the four safe modes');
     expect(html).not.toContain('placeholder="CLI default"');
   });
 
@@ -100,6 +101,7 @@ describe('AgentPanel', () => {
     expect(html).toContain('PI Agent');
     expect(html).toContain('value="minimal" selected');
     expect(html).toContain('coding (unsandboxed)');
-    expect(html).toContain('PI does not provide permission prompts or a sandbox');
+    expect(html).toContain('Approval behavior');
+    expect(html).toContain('Session grants are cleared on reconnect');
   });
 });

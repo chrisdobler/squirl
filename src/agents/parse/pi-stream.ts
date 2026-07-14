@@ -74,6 +74,19 @@ export function createPiParser(opts: PiParserOptions): StreamParser {
       title: typeof obj.title === 'string' ? obj.title : undefined,
       message: typeof obj.message === 'string' ? obj.message : undefined,
     };
+    const permissionEnvelope = [common.title, common.message].find((value) => value?.startsWith('SQUIRL_PERMISSION:'));
+    if (method === 'select' && permissionEnvelope) {
+      try {
+        const metadata = JSON.parse(permissionEnvelope.slice('SQUIRL_PERMISSION:'.length)) as {
+          toolName?: string; input?: unknown; resource?: string; sessionScope?: { key: string; label: string };
+        };
+        if (metadata.toolName) return {
+          id, method: 'permission', title: `PI wants to use ${metadata.toolName}`,
+          toolName: metadata.toolName, input: metadata.input, resource: metadata.resource,
+          sessionScope: metadata.sessionScope,
+        };
+      } catch { /* Fall through to the ordinary select UI. */ }
+    }
     if (method === 'select') {
       return { ...common, method, options: Array.isArray(obj.options) ? obj.options.filter((item): item is string => typeof item === 'string') : [] };
     }

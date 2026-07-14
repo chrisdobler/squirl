@@ -9,6 +9,14 @@ function fixture(name: string): string[] {
 }
 
 describe('PI RPC parser', () => {
+  it('promotes Squirl permission-gate selects into provider-neutral permission requests', () => {
+    const parser = createPiParser({ participantId: 'pi', newMessageId: () => 'm1', onSettled: vi.fn() });
+    const metadata = { toolName: 'bash', input: '{"command":"curl example.com"}', resource: 'curl example.com', sessionScope: { key: 'bash:curl example.com', label: 'Always allow this exact command for this session' } };
+    expect(parser.push(JSON.stringify({ type: 'extension_ui_request', id: 'p1', method: 'select', title: `SQUIRL_PERMISSION:${JSON.stringify(metadata)}`, options: ['Allow once', metadata.sessionScope.label, 'Deny'] }))).toEqual([
+      { type: 'interaction-request', participantId: 'pi', request: { id: 'p1', method: 'permission', title: 'PI wants to use bash', ...metadata } },
+    ]);
+  });
+
   it('maps state, streamed text, tools, authoritative stats, and settled completion', () => {
     const settled = vi.fn();
     let id = 0;

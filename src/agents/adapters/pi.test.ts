@@ -21,7 +21,8 @@ describe('PiAdapter', () => {
   it('starts persistent RPC with full coding access by default', async () => {
     const { agent, transport } = await startedAgent({ model: 'openai/gpt-test', effort: 'minimal' });
     expect(transport.lastSpawn.spec).toMatchObject({ command: 'pi', cwd: '/repo' });
-    expect(transport.lastSpawn.spec.args).toEqual(['--mode', 'rpc', '--model', 'openai/gpt-test', '--thinking', 'minimal']);
+    expect(transport.lastSpawn.spec.args).toEqual(expect.arrayContaining(['--mode', 'rpc', '--model', 'openai/gpt-test', '--thinking', 'minimal', '--extension']));
+    expect(transport.lastSpawn.spec.env).toMatchObject({ SQUIRL_PI_APPROVAL_MODE: 'acceptEdits' });
     expect(agent.status).toBe('ready');
     expect(agent.descriptor.sessionId).toBe('session-1');
   });

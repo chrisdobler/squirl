@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import { SquirlRuntime } from './runtime.js';
 import type { ChatEvent, EvalEvent, EvalRunRequest } from './types.js';
-import type { AgentKind, ClaudePermissionMode, CodexSandbox, PiToolMode } from '../agents/types.js';
+import type { AgentInteractionResponse, AgentKind, ClaudePermissionMode, CodexApprovalPolicy, CodexSandbox, PiApprovalMode, PiToolMode } from '../agents/types.js';
 import type { EffortLevel } from '../types.js';
 import type { UiStatePatch } from './ui-state.js';
 import { UiStateStore } from './ui-state-store.js';
@@ -304,12 +304,13 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
       }
 
       if (url.pathname === '/api/agents/interactions/respond' && req.method === 'POST') {
-        const body = await readBody(req) as { participantId?: string; id?: string; value?: string; confirmed?: boolean; cancelled?: boolean };
-        if (!body.participantId || !body.id) throw new Error('Missing PI interaction participant or id');
+        const body = await readBody(req) as { participantId?: string; id?: string; value?: string; confirmed?: boolean; cancelled?: boolean; decision?: AgentInteractionResponse['decision'] };
+        if (!body.participantId || !body.id) throw new Error('Missing agent interaction participant or id');
         await runtime.respondToAgentInteraction(body.participantId, body.id, {
           ...(body.value !== undefined ? { value: body.value } : {}),
           ...(body.confirmed !== undefined ? { confirmed: body.confirmed } : {}),
           ...(body.cancelled !== undefined ? { cancelled: body.cancelled } : {}),
+          ...(body.decision !== undefined ? { decision: body.decision } : {}),
         });
         sendJson(res, 200, { ok: true });
         return;
@@ -338,7 +339,7 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
       }
 
       if (url.pathname === '/api/agents/update' && req.method === 'POST') {
-        const body = await readBody(req) as { id?: string; name?: string; model?: string | null; effort?: EffortLevel | null; cwd?: string; permissionMode?: ClaudePermissionMode; sandbox?: CodexSandbox; piToolMode?: PiToolMode };
+        const body = await readBody(req) as { id?: string; name?: string; model?: string | null; effort?: EffortLevel | null; cwd?: string; permissionMode?: ClaudePermissionMode; sandbox?: CodexSandbox; approvalPolicy?: CodexApprovalPolicy; piToolMode?: PiToolMode; piApprovalMode?: PiApprovalMode };
         if (!body.id) throw new Error('Missing agent id');
         const result = await runtime.updateAgent(body.id, {
           ...(body.name !== undefined ? { name: body.name } : {}),
@@ -347,7 +348,9 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
           ...(body.cwd !== undefined ? { cwd: body.cwd } : {}),
           ...(body.permissionMode !== undefined ? { permissionMode: body.permissionMode } : {}),
           ...(body.sandbox !== undefined ? { sandbox: body.sandbox } : {}),
+          ...(body.approvalPolicy !== undefined ? { approvalPolicy: body.approvalPolicy } : {}),
           ...(body.piToolMode !== undefined ? { piToolMode: body.piToolMode } : {}),
+          ...(body.piApprovalMode !== undefined ? { piApprovalMode: body.piApprovalMode } : {}),
         });
         if (!result.ok) throw new Error(result.error);
         sendJson(res, 200, { state: runtime.getState(), agent: result });
@@ -368,9 +371,9 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
       }
 
       if (url.pathname === '/api/agents/add' && req.method === 'POST') {
-        const body = await readBody(req) as { kind?: AgentKind; id?: string; model?: string; effort?: EffortLevel; cwd?: string; permissionMode?: ClaudePermissionMode; sandbox?: CodexSandbox; piToolMode?: PiToolMode };
+        const body = await readBody(req) as { kind?: AgentKind; id?: string; model?: string; effort?: EffortLevel; cwd?: string; permissionMode?: ClaudePermissionMode; sandbox?: CodexSandbox; approvalPolicy?: CodexApprovalPolicy; piToolMode?: PiToolMode; piApprovalMode?: PiApprovalMode };
         if (body.kind !== 'claude-code' && body.kind !== 'codex' && body.kind !== 'pi') throw new Error('Agent kind must be claude-code, codex, or pi');
-        const result = await runtime.addAgent(body.kind, { id: body.id, model: body.model, effort: body.effort, cwd: body.cwd, permissionMode: body.permissionMode, sandbox: body.sandbox, piToolMode: body.piToolMode });
+        const result = await runtime.addAgent(body.kind, { id: body.id, model: body.model, effort: body.effort, cwd: body.cwd, permissionMode: body.permissionMode, sandbox: body.sandbox, approvalPolicy: body.approvalPolicy, piToolMode: body.piToolMode, piApprovalMode: body.piApprovalMode });
         if (!result.ok) throw new Error(result.error);
         sendJson(res, 200, { state: runtime.getState(), agent: result });
         return;

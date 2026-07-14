@@ -1,4 +1,4 @@
-import type { AgentDescriptor, AgentKind, ClaudePermissionMode, CodexSandbox, PiToolMode } from './types.js';
+import type { AgentDescriptor, AgentKind, ClaudePermissionMode, CodexApprovalPolicy, CodexSandbox, PiApprovalMode, PiToolMode } from './types.js';
 import type { EffortLevel } from '../types.js';
 
 export interface BuildDescriptorParams {
@@ -12,7 +12,9 @@ export interface BuildDescriptorParams {
   bin?: string;
   permissionMode?: ClaudePermissionMode;
   sandbox?: CodexSandbox;
+  approvalPolicy?: CodexApprovalPolicy;
   piToolMode?: PiToolMode;
+  piApprovalMode?: PiApprovalMode;
 }
 
 /** Default room handle per agent kind. */
@@ -42,6 +44,8 @@ export function buildAgentDescriptor(params: BuildDescriptorParams): AgentDescri
     effort: params.effort,
     permissionMode: params.kind === 'claude-code' ? params.permissionMode ?? 'acceptEdits' : undefined,
     sandbox: params.kind === 'codex' ? params.sandbox ?? 'workspace-write' : undefined,
+    approvalPolicy: params.kind === 'codex' ? params.approvalPolicy ?? 'on-request' : undefined,
     piToolMode: params.kind === 'pi' ? params.piToolMode ?? 'coding' : undefined,
+    piApprovalMode: params.kind === 'pi' ? params.piApprovalMode ?? 'acceptEdits' : undefined,
   };
 }

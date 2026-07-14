@@ -30,7 +30,7 @@ describe('participants', () => {
     expect(cc.color).not.toBe(USER_PARTICIPANT.color);
     expect(cc.color).toBe('magenta');
     expect(cc.mode).toBe('permission: acceptEdits');
-    expect(codex.mode).toBe('sandbox: workspace-write');
+    expect(codex.mode).toBe('sandbox: workspace-write, approval: on-request');
   });
 
   it('maps every participant identity to the shared RGB value used by both UIs', () => {

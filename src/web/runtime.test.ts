@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { Participant } from '../agents/types.js';
@@ -13,6 +13,7 @@ let mockDetectedModels: Array<{ id: string; contextWindow?: number }> = [];
 let mockAssistantContent = 'ok';
 let preparedHandoffs: Array<{ target: any; originalRequest: string; task: string }> = [];
 let mockDelegationClassification = '{"decision":"not_delegate","confidence":"high","targetIds":[],"task":""}';
+let mockCodexBin = '';
 
 // Use timestamps relative to "now" so fixture entries stay inside history.ts's 24h
 // rollover window regardless of the calendar date the suite runs on (otherwise rollover
@@ -91,6 +92,29 @@ vi.mock('../search/meta-llm.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../agents/codex-models.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../agents/codex-models.js')>();
+  return { ...actual, resolveCodexBinary: () => mockCodexBin || actual.resolveCodexBinary() };
+});
+
+function installFakeCodex(): void {
+  mockCodexBin = join(testHome, 'fake-codex.cjs');
+  writeFileSync(mockCodexBin, `#!/usr/bin/env node
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin });
+const send = (value) => process.stdout.write(JSON.stringify(value) + '\\n');
+rl.on('line', (line) => {
+  const message = JSON.parse(line);
+  if (message.method === 'initialize') send({ id: message.id, result: {} });
+  else if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'session-1' }, model: message.params.model || 'gpt-test' } });
+  else if (message.method === 'thread/resume') send({ id: message.id, result: { thread: { id: message.params.threadId }, model: message.params.model || 'gpt-test' } });
+  else if (message.method === 'turn/start') { send({ id: message.id, result: { turn: { id: 'turn-1' } } }); send({ method: 'turn/started', params: { threadId: message.params.threadId, turn: { id: 'turn-1' } } }); }
+  else if (message.method === 'turn/interrupt') send({ id: message.id, result: {} });
+});
+`);
+  chmodSync(mockCodexBin, 0o755);
+}
+
 function writeJsonl(filePath: string, entries: Array<{ timestamp: string; message: any }>) {
   writeFileSync(filePath, entries.map((entry) => JSON.stringify(entry)).join('\n') + '\n', 'utf-8');
 }
@@ -105,6 +129,7 @@ async function loadRuntime() {
   capturedModel = null;
   preparedHandoffs = [];
   mockDelegationClassification = '{"decision":"not_delegate","confidence":"high","targetIds":[],"task":""}';
+  mkdirSync('/tmp/squirl-web-runtime-test', { recursive: true });
   const { SquirlRuntime } = await import('./runtime.js');
   return new SquirlRuntime('/tmp/squirl-web-runtime-test');
 }
@@ -258,7 +283,8 @@ describe('SquirlRuntime agents', () => {
     testHome = join(tmpdir(), `squirl-web-runtime-agents-${process.pid}-${testCounter}`);
     historyDir = join(testHome, '.squirl', 'history');
     mkdirSync(historyDir, { recursive: true });
-    writeFileSync(join(testHome, '.squirl', 'config.json'), JSON.stringify({ defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6' }) + '\n', 'utf-8');
+    installFakeCodex();
+    writeFileSync(join(testHome, '.squirl', 'config.json'), JSON.stringify({ defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6', agents: { codexBin: mockCodexBin } }) + '\n', 'utf-8');
     writeJsonl(join(historyDir, 'current.jsonl'), []);
   });
 
@@ -272,6 +298,22 @@ describe('SquirlRuntime agents', () => {
     expect(runtime.listAgents()).toEqual([]);
   });
 
+  it('rehydrates queued agent permission prompts and handles duplicate responses idempotently', async () => {
+    const runtime = await loadRuntime();
+    const respond = vi.fn(async () => undefined);
+    const internals = runtime as unknown as { handleAgentEvent: (event: unknown) => void; coordinator: { respondToInteraction: typeof respond } };
+    internals.coordinator.respondToInteraction = respond;
+    const request = { id: 'approval-1', method: 'permission', title: 'Run command?', toolName: 'Bash', sessionScope: { key: 'cmd', label: 'Always allow this command for this session' } };
+    internals.handleAgentEvent({ type: 'interaction-request', participantId: 'codex', request });
+    internals.handleAgentEvent({ type: 'interaction-request', participantId: 'codex', request });
+    expect(runtime.getState().agentInteractions).toEqual([{ participantId: 'codex', request }]);
+
+    await runtime.respondToAgentInteraction('codex', 'approval-1', { decision: 'allow-session' });
+    await runtime.respondToAgentInteraction('codex', 'approval-1', { decision: 'deny' });
+    expect(respond).toHaveBeenCalledOnce();
+    expect(runtime.getState().agentInteractions).toEqual([]);
+  });
+
   it('adds and removes a codex agent with bounded write access by default', async () => {
     // Codex start() spawns nothing (per-turn model), so no real subprocess is launched here.
     const runtime = await loadRuntime();
@@ -282,7 +324,7 @@ describe('SquirlRuntime agents', () => {
 
     const listed = runtime.listAgents();
     expect(listed.map((a) => a.id)).toEqual(['codex']);
-    expect(listed[0]!.mode).toBe('sandbox: workspace-write');
+    expect(listed[0]!.mode).toBe('sandbox: workspace-write, approval: on-request');
 
     expect(await runtime.stopAgent('codex')).toBe(true);
     expect(runtime.listAgents()).toEqual([]);
@@ -408,7 +450,7 @@ describe('SquirlRuntime agents', () => {
     expect(updated).toEqual({ ok: true, id: 'review-builder', label: 'review-builder' });
     let saved = JSON.parse(readFileSync(join(testHome, '.squirl', 'config.json'), 'utf-8')).agents.defaults[0];
     expect(saved).toMatchObject({ profileId: before.profileId, id: 'review-builder', model: 'new-model', effort: 'high', cwd: projectDir, sandbox: 'danger-full-access' });
-    expect((runtime as unknown as { coordinator: { getDescriptor: (id: string) => { sessionId?: string; sandbox?: string } | undefined } }).coordinator.getDescriptor('review-builder')).toMatchObject({ sandbox: 'danger-full-access', sessionId: undefined });
+    expect((runtime as unknown as { coordinator: { getDescriptor: (id: string) => { sessionId?: string; sandbox?: string } | undefined } }).coordinator.getDescriptor('review-builder')).toMatchObject({ sandbox: 'danger-full-access', sessionId: 'session-1' });
 
     expect(await runtime.updateAgent('review-builder', { model: null, effort: null })).toMatchObject({ ok: true, id: 'review-builder' });
     saved = JSON.parse(readFileSync(join(testHome, '.squirl', 'config.json'), 'utf-8')).agents.defaults[0];
@@ -451,11 +493,12 @@ describe('SquirlRuntime agents', () => {
     writeFileSync(join(testHome, '.squirl', 'config.json'), JSON.stringify({
       defaultProvider: 'anthropic',
       defaultModel: 'claude-sonnet-4-6',
-      agents: { defaults: [{ kind: 'codex', id: 'codex-builder' }] },
+      agents: { codexBin: mockCodexBin, defaults: [{ kind: 'codex', id: 'codex-builder' }] },
     }) + '\n', 'utf-8');
     const runtime = await loadRuntime();
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await vi.waitFor(() => expect(runtime.listAgents().map((agent) => agent.id)).toEqual(['codex-builder']));
     expect(runtime.listAgents().map((agent) => agent.id)).toEqual(['codex-builder']);
+    await vi.waitFor(() => expect(JSON.parse(readFileSync(join(testHome, '.squirl', 'config.json'), 'utf-8')).agents.defaults[0].profileId).toBeTruthy());
     const saved = JSON.parse(readFileSync(join(testHome, '.squirl', 'config.json'), 'utf-8'));
     expect(saved.agents.defaults[0]).toMatchObject({ id: 'codex-builder', label: 'codex-builder', reconnect: true });
     expect(saved.agents.defaults[0].profileId).toBeTruthy();

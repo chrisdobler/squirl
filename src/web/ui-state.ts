@@ -1,4 +1,4 @@
-import type { AgentKind, ClaudePermissionMode, CodexSandbox, PiToolMode } from '../agents/types.js';
+import type { AgentKind, ClaudePermissionMode, CodexApprovalPolicy, CodexSandbox, PiApprovalMode, PiToolMode } from '../agents/types.js';
 import type { CommandSurface } from '../commands/registry.js';
 import type { EffortLevel } from '../types.js';
 import { DEFAULT_SIDEBAR_TASKS_RATIO, clampSidebarTasksRatio } from './sidebar-task-resize.js';
@@ -23,7 +23,7 @@ export interface UiStateV1 {
   eval: { hiddenMetrics: string[]; layer: 1 | 2 | 3; mode: 'frozen' | 'live'; label: string };
   memory: { importPath: string; recallQuery: string };
   model: { localUrl: string; manualModel: string };
-  agent: { kind: AgentKind; id: string; model: string; effort: EffortLevel | ''; cwd: string; permissionMode: ClaudePermissionMode; sandbox: CodexSandbox; piToolMode: PiToolMode };
+  agent: { kind: AgentKind; id: string; model: string; effort: EffortLevel | ''; cwd: string; permissionMode: ClaudePermissionMode; sandbox: CodexSandbox; approvalPolicy: CodexApprovalPolicy; piToolMode: PiToolMode; piApprovalMode: PiApprovalMode };
 }
 
 export type UiStatePatch = Partial<Omit<UiStateV1, 'version' | 'sidebar' | 'chat' | 'context' | 'eval' | 'memory' | 'model' | 'agent'>> & {
@@ -47,7 +47,7 @@ export function defaultUiState(): UiStateV1 {
     eval: { hiddenMetrics: [], layer: 1, mode: 'frozen', label: '' },
     memory: { importPath: '', recallQuery: '' },
     model: { localUrl: 'http://localhost:8000/v1', manualModel: '' },
-    agent: { kind: 'claude-code', id: '', model: '', effort: '', cwd: '', permissionMode: 'acceptEdits', sandbox: 'workspace-write', piToolMode: 'coding' },
+    agent: { kind: 'claude-code', id: '', model: '', effort: '', cwd: '', permissionMode: 'acceptEdits', sandbox: 'workspace-write', approvalPolicy: 'on-request', piToolMode: 'coding', piApprovalMode: 'acceptEdits' },
   };
 }
 
@@ -107,9 +107,11 @@ export function normalizeUiState(value: unknown): UiStateV1 {
       id: string(agent.id, ''), model: string(agent.model, ''),
       effort: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(String(agent.effort)) ? agent.effort as EffortLevel : '',
       cwd: string(agent.cwd, ''),
-      permissionMode: agent.permissionMode === 'default' || agent.permissionMode === 'plan' || agent.permissionMode === 'bypassPermissions' ? agent.permissionMode : 'acceptEdits',
+      permissionMode: agent.permissionMode === 'default' || agent.permissionMode === 'auto' || agent.permissionMode === 'plan' || agent.permissionMode === 'bypassPermissions' ? agent.permissionMode : 'acceptEdits',
       sandbox: agent.sandbox === 'read-only' || agent.sandbox === 'danger-full-access' ? agent.sandbox : 'workspace-write',
+      approvalPolicy: agent.approvalPolicy === 'untrusted' || agent.approvalPolicy === 'never' ? agent.approvalPolicy : 'on-request',
       piToolMode: agent.piToolMode === 'read-only' ? 'read-only' : 'coding',
+      piApprovalMode: agent.piApprovalMode === 'manual' || agent.piApprovalMode === 'never' ? agent.piApprovalMode : 'acceptEdits',
     },
   };
 }

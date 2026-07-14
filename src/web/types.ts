@@ -48,6 +48,8 @@ export interface AppState {
   health: HealthReport;
   taskActivity: TaskActivityState;
   work: ParticipantWorkState;
+  /** Runtime-only pending agent prompts, included so reconnecting clients can rehydrate them. */
+  agentInteractions: Array<{ participantId: string; request: AgentInteractionRequest }>;
 }
 
 export interface ChatRequest {

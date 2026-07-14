@@ -13,15 +13,17 @@ export type AgentKind = 'claude-code' | 'codex' | 'pi';
 export type TransportKind = 'local' | 'ssh';
 
 export type PiToolMode = 'coding' | 'read-only';
+export type PiApprovalMode = 'manual' | 'acceptEdits' | 'never';
 
 /** Lifecycle state of a single agent session. */
 export type AgentStatus = 'starting' | 'ready' | 'busy' | 'stopped' | 'error';
 
 /** Claude Code permission modes (subset we care about). */
-export type ClaudePermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
+export type ClaudePermissionMode = 'default' | 'acceptEdits' | 'auto' | 'plan' | 'bypassPermissions';
 
 /** Codex sandbox policies. */
 export type CodexSandbox = 'read-only' | 'workspace-write' | 'danger-full-access';
+export type CodexApprovalPolicy = 'on-request' | 'untrusted' | 'never';
 
 /** Colors used to visually distinguish participants in both UIs. */
 export type ParticipantColor =
@@ -55,8 +57,12 @@ export interface AgentDescriptor {
   bare?: boolean;
   /** Codex only. Defaults to 'workspace-write'. */
   sandbox?: CodexSandbox;
+  /** Codex only. Defaults to 'on-request'. */
+  approvalPolicy?: CodexApprovalPolicy;
   /** PI only. Defaults to 'coding'; PI itself does not provide a sandbox or permission prompts. */
   piToolMode?: PiToolMode;
+  /** PI only. Defaults to 'acceptEdits'. */
+  piApprovalMode?: PiApprovalMode;
   /** Resume target: a Claude UUID, Codex thread id, or PI session id/path. */
   sessionId?: string;
   /** Future transport config; unused while transport === 'local'. */
@@ -112,12 +118,23 @@ export type AgentEvent =
   | { type: 'interaction-editor-prefill'; participantId: string; text: string };
 
 export type AgentInteractionRequest =
+  | {
+      id: string;
+      method: 'permission';
+      title: string;
+      message?: string;
+      toolName: string;
+      input?: unknown;
+      resource?: string;
+      sessionScope?: { key: string; label: string };
+    }
   | { id: string; method: 'select'; title?: string; message?: string; options: string[] }
   | { id: string; method: 'confirm'; title?: string; message?: string }
   | { id: string; method: 'input'; title?: string; message?: string; placeholder?: string }
   | { id: string; method: 'editor'; title?: string; message?: string; prefill?: string };
 
 export interface AgentInteractionResponse {
+  decision?: 'allow-once' | 'allow-session' | 'deny';
   value?: string;
   confirmed?: boolean;
   cancelled?: boolean;

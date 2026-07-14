@@ -35,7 +35,7 @@ import { buildAgentDescriptor } from '../agents/factory.js';
 import { SQUIRL_PARTICIPANT } from '../agents/participants.js';
 import { materializeProfile, nextAvailableAgentId, profileFromDescriptor, removeAgentProfile, upsertAgentProfile, validateAgentHandle } from '../agents/profiles.js';
 import { delegationConfirmationResponse, delegationConfirmationText, recoverPendingDelegation, resolveDelegationIntent, type DelegationAgent, type DelegationIntent } from '../agents/delegation.js';
-import type { AgentEvent, AgentInteractionResponse, AgentKind, ClaudePermissionMode, CodexSandbox, Participant, PiToolMode } from '../agents/types.js';
+import type { AgentEvent, AgentInteractionRequest, AgentInteractionResponse, AgentKind, ClaudePermissionMode, CodexApprovalPolicy, CodexSandbox, Participant, PiApprovalMode, PiToolMode } from '../agents/types.js';
 import { contextPreviewFromSnapshot, inspectParticipantContext, unavailableContextPreview, type ParticipantContextPreview } from '../agents/context-preview.js';
 import { loadParticipantContextPreviews, saveParticipantContextPreviews } from '../agents/context-preview-store.js';
 import type { AddAgentResult, AgentSummary } from '../commands/registry.js';
@@ -72,11 +72,15 @@ export interface UpdateAgentOptions {
   cwd?: string;
   permissionMode?: ClaudePermissionMode;
   sandbox?: CodexSandbox;
+  approvalPolicy?: CodexApprovalPolicy;
   piToolMode?: PiToolMode;
+  piApprovalMode?: PiApprovalMode;
 }
 
 const CODEX_SANDBOXES = new Set<CodexSandbox>(['read-only', 'workspace-write', 'danger-full-access']);
-const CLAUDE_PERMISSION_MODES = new Set<ClaudePermissionMode>(['default', 'acceptEdits', 'plan', 'bypassPermissions']);
+const CODEX_APPROVAL_POLICIES = new Set<CodexApprovalPolicy>(['on-request', 'untrusted', 'never']);
+const PI_APPROVAL_MODES = new Set<PiApprovalMode>(['manual', 'acceptEdits', 'never']);
+const CLAUDE_PERMISSION_MODES = new Set<ClaudePermissionMode>(['default', 'acceptEdits', 'auto', 'plan', 'bypassPermissions']);
 
 function defaultModelFromConfig(config?: SquirlConfig): SelectedModel {
   const provider = config?.defaultProvider ?? 'anthropic';
@@ -198,6 +202,7 @@ export class SquirlRuntime extends EventEmitter {
   private embedderDisplay = '';
   private pendingApprovals = new Map<string, PendingApproval>();
   private pendingTools = new Map<string, { messageId: string; input: unknown }>();
+  private agentInteractions: Array<{ participantId: string; request: AgentInteractionRequest }> = [];
   private historySignature = '';
   private configSignature = '';
   private coordinator: GroupChatCoordinator;
@@ -264,7 +269,7 @@ export class SquirlRuntime extends EventEmitter {
       (turn, context) => this.executeScheduledTurn(turn, context),
       (participantId) => {
         if (participantId === SQUIRL_PARTICIPANT.id) return true;
-        return this.coordinator.getDescriptor(participantId)?.kind !== 'claude-code';
+        return Boolean(this.coordinator.getDescriptor(participantId));
       },
       (error, turn) => this.publish({
         type: 'toast', level: 'error',
@@ -302,6 +307,7 @@ export class SquirlRuntime extends EventEmitter {
       health: this.healthReport,
       taskActivity: this.getTaskActivityState(),
       work: this.workState,
+      agentInteractions: this.agentInteractions,
     };
   }
 
@@ -609,7 +615,10 @@ export class SquirlRuntime extends EventEmitter {
   }
 
   async respondToAgentInteraction(participantId: string, id: string, response: AgentInteractionResponse): Promise<void> {
+    const exists = this.agentInteractions.some((item) => item.participantId === participantId && item.request.id === id);
+    if (!exists) return;
     await this.coordinator.respondToInteraction(participantId, id, response);
+    this.agentInteractions = this.agentInteractions.filter((item) => item.participantId !== participantId || item.request.id !== id);
   }
 
   cancel(participantId = SQUIRL_PARTICIPANT.id): boolean {
@@ -1243,6 +1252,9 @@ export class SquirlRuntime extends EventEmitter {
         break;
       }
       case 'interaction-request': {
+        if (!this.agentInteractions.some((item) => item.participantId === event.participantId && item.request.id === event.request.id)) {
+          this.agentInteractions = [...this.agentInteractions, { participantId: event.participantId, request: event.request }];
+        }
         emit?.({ type: 'agent-interaction', participantId: event.participantId, request: event.request });
         break;
       }
@@ -1301,13 +1313,19 @@ export class SquirlRuntime extends EventEmitter {
     }, signal).then(() => undefined);
   }
 
-  async addAgent(kind: AgentKind, opts?: { id?: string; model?: string; effort?: import('../types.js').EffortLevel; cwd?: string; permissionMode?: ClaudePermissionMode; sandbox?: CodexSandbox; piToolMode?: PiToolMode }): Promise<AddAgentResult> {
+  async addAgent(kind: AgentKind, opts?: { id?: string; model?: string; effort?: import('../types.js').EffortLevel; cwd?: string; permissionMode?: ClaudePermissionMode; sandbox?: CodexSandbox; approvalPolicy?: CodexApprovalPolicy; piToolMode?: PiToolMode; piApprovalMode?: PiApprovalMode }): Promise<AddAgentResult> {
     try {
       if (opts?.permissionMode !== undefined && (kind !== 'claude-code' || !CLAUDE_PERMISSION_MODES.has(opts.permissionMode))) {
         throw new Error(kind === 'claude-code' ? `Unknown Claude permission mode "${String(opts.permissionMode)}".` : 'Claude permission mode is only supported by Claude Code agents.');
       }
       if (opts?.sandbox !== undefined && (kind !== 'codex' || !CODEX_SANDBOXES.has(opts.sandbox))) {
         throw new Error(kind === 'codex' ? `Unknown Codex sandbox "${String(opts.sandbox)}".` : 'Codex sandbox is only supported by Codex agents.');
+      }
+      if (opts?.approvalPolicy !== undefined && (kind !== 'codex' || !CODEX_APPROVAL_POLICIES.has(opts.approvalPolicy))) {
+        throw new Error(kind === 'codex' ? `Unknown Codex approval policy "${String(opts.approvalPolicy)}".` : 'Codex approval policy is only supported by Codex agents.');
+      }
+      if (opts?.piApprovalMode !== undefined && (kind !== 'pi' || !PI_APPROVAL_MODES.has(opts.piApprovalMode))) {
+        throw new Error(kind === 'pi' ? `Unknown PI approval mode "${String(opts.piApprovalMode)}".` : 'PI approval mode is only supported by PI agents.');
       }
       const existingIds = this.listAgents().map((agent) => agent.id);
       const id = opts?.id
@@ -1325,7 +1343,9 @@ export class SquirlRuntime extends EventEmitter {
         bin: kind === 'claude-code' ? this.config.agents?.claudeBin : kind === 'codex' ? resolveCodexBinary(this.config.agents?.codexBin) : resolvePiBinary(this.config.agents?.piBin),
         permissionMode: opts?.permissionMode ?? this.config.agents?.defaultClaudePermissionMode ?? 'acceptEdits',
         sandbox: opts?.sandbox ?? this.config.agents?.defaultCodexSandbox ?? 'workspace-write',
+        approvalPolicy: opts?.approvalPolicy ?? this.config.agents?.defaultCodexApprovalPolicy ?? 'on-request',
         piToolMode: opts?.piToolMode ?? this.config.agents?.defaultPiToolMode,
+        piApprovalMode: opts?.piApprovalMode ?? this.config.agents?.defaultPiApprovalMode ?? 'acceptEdits',
       });
       const participant = await this.coordinator.addAgent(descriptor);
       this.config = upsertAgentProfile(this.config, profileFromDescriptor(descriptor));
@@ -1339,6 +1359,7 @@ export class SquirlRuntime extends EventEmitter {
   async stopAgent(id: string): Promise<boolean> {
     if (!this.coordinator.hasAgent(id)) return false;
     await this.coordinator.removeAgent(id);
+    this.agentInteractions = this.agentInteractions.filter((item) => item.participantId !== id);
     this.config = removeAgentProfile(this.config, id);
     if (this.participantContextPreviews[id]) {
       const { [id]: _removed, ...remaining } = this.participantContextPreviews;
@@ -1365,6 +1386,8 @@ export class SquirlRuntime extends EventEmitter {
       if (updates.permissionMode !== undefined && !CLAUDE_PERMISSION_MODES.has(updates.permissionMode)) {
         throw new Error(`Unknown Claude permission mode "${String(updates.permissionMode)}".`);
       }
+      if (updates.approvalPolicy !== undefined && !CODEX_APPROVAL_POLICIES.has(updates.approvalPolicy)) throw new Error(`Unknown Codex approval policy "${String(updates.approvalPolicy)}".`);
+      if (updates.piApprovalMode !== undefined && !PI_APPROVAL_MODES.has(updates.piApprovalMode)) throw new Error(`Unknown PI approval mode "${String(updates.piApprovalMode)}".`);
       const nextId = validateAgentHandle(updates.name ?? id, this.listAgents().map((agent) => agent.id), id);
       const oldDescriptor = this.coordinator.getDescriptor(id);
       if (!oldDescriptor) throw new Error(`No agent "@${id}".`);
@@ -1374,6 +1397,8 @@ export class SquirlRuntime extends EventEmitter {
       if (updates.permissionMode !== undefined && oldDescriptor.kind !== 'claude-code') {
         throw new Error('Claude permission mode is only supported by Claude Code agents.');
       }
+      if (updates.approvalPolicy !== undefined && oldDescriptor.kind !== 'codex') throw new Error('Codex approval policy is only supported by Codex agents.');
+      if (updates.piApprovalMode !== undefined && oldDescriptor.kind !== 'pi') throw new Error('PI approval mode is only supported by PI agents.');
       const oldProfile = this.config.agents?.defaults?.find((profile) => profile.id?.toLowerCase() === id.toLowerCase());
 
       const nextModel = updates.model === undefined
@@ -1386,8 +1411,14 @@ export class SquirlRuntime extends EventEmitter {
       const nextPiToolMode = oldDescriptor.kind === 'pi'
         ? updates.piToolMode ?? oldDescriptor.piToolMode ?? 'coding'
         : undefined;
+      const nextPiApprovalMode = oldDescriptor.kind === 'pi'
+        ? updates.piApprovalMode ?? oldDescriptor.piApprovalMode ?? 'acceptEdits'
+        : undefined;
       const nextSandbox = oldDescriptor.kind === 'codex'
         ? updates.sandbox ?? oldDescriptor.sandbox ?? 'workspace-write'
+        : undefined;
+      const nextApprovalPolicy = oldDescriptor.kind === 'codex'
+        ? updates.approvalPolicy ?? oldDescriptor.approvalPolicy ?? 'on-request'
         : undefined;
       const nextPermissionMode = oldDescriptor.kind === 'claude-code'
         ? updates.permissionMode ?? oldDescriptor.permissionMode ?? 'acceptEdits'
@@ -1400,7 +1431,7 @@ export class SquirlRuntime extends EventEmitter {
         if (!statSync(nextCwd).isDirectory()) throw new Error(`Working directory is not a directory: ${nextCwd}`);
       }
 
-      const launchSettingsChanged = nextModel !== oldDescriptor.model || nextEffort !== oldDescriptor.effort || nextCwd !== oldDescriptor.cwd || nextPermissionMode !== oldDescriptor.permissionMode || nextSandbox !== oldDescriptor.sandbox || nextPiToolMode !== oldDescriptor.piToolMode;
+      const launchSettingsChanged = nextModel !== oldDescriptor.model || nextEffort !== oldDescriptor.effort || nextCwd !== oldDescriptor.cwd || nextPermissionMode !== oldDescriptor.permissionMode || nextSandbox !== oldDescriptor.sandbox || nextApprovalPolicy !== oldDescriptor.approvalPolicy || nextPiToolMode !== oldDescriptor.piToolMode || nextPiApprovalMode !== oldDescriptor.piApprovalMode;
       const identityChanged = nextId !== id || nextId !== oldDescriptor.label;
       if (!launchSettingsChanged && !identityChanged) return { ok: true, id, label: oldDescriptor.label };
 
@@ -1416,7 +1447,9 @@ export class SquirlRuntime extends EventEmitter {
         effort: nextEffort,
         permissionMode: nextPermissionMode,
         sandbox: nextSandbox,
+        approvalPolicy: nextApprovalPolicy,
         piToolMode: nextPiToolMode,
+        piApprovalMode: nextPiApprovalMode,
         ...(launchSettingsChanged ? { sessionId: undefined } : {}),
       };
       const participant = await this.coordinator.replaceAgent(id, replacement);
@@ -1462,7 +1495,9 @@ export class SquirlRuntime extends EventEmitter {
           bin: profile.bin ?? (profile.kind === 'claude-code' ? this.config.agents?.claudeBin : profile.kind === 'codex' ? resolveCodexBinary(this.config.agents?.codexBin) : resolvePiBinary(this.config.agents?.piBin)),
           permissionMode: profile.permissionMode ?? this.config.agents?.defaultClaudePermissionMode ?? 'acceptEdits',
           sandbox: profile.sandbox ?? this.config.agents?.defaultCodexSandbox ?? 'workspace-write',
+          approvalPolicy: profile.approvalPolicy ?? this.config.agents?.defaultCodexApprovalPolicy ?? 'on-request',
           piToolMode: profile.piToolMode ?? this.config.agents?.defaultPiToolMode,
+          piApprovalMode: profile.piApprovalMode ?? this.config.agents?.defaultPiApprovalMode ?? 'acceptEdits',
         });
         await this.coordinator.addAgent(descriptor);
         migrated.push(profileFromDescriptor(descriptor, profile.profileId));

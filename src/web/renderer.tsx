@@ -5,7 +5,7 @@ import type { SelectedModel } from '../components/ModelPicker.js';
 import type { EffortLevel, Message } from '../types.js';
 import type { AppState, ChatAccepted, ChatEvent, ContextFileSummary, ParticipantContextPreview, RuntimeStatus, ToolApprovalRequest, EvalEvent, EvalRunRequest, HistoryEntry, JudgeSummary } from './types.js';
 import type { AgentKind, Participant } from '../agents/types.js';
-import type { AgentInteractionRequest, AgentInteractionResponse, ClaudePermissionMode, CodexSandbox, PiToolMode } from '../agents/types.js';
+import type { AgentInteractionRequest, AgentInteractionResponse, ClaudePermissionMode, CodexApprovalPolicy, CodexSandbox, PiApprovalMode, PiToolMode } from '../agents/types.js';
 import type { CommandDescriptor, CommandSurface } from '../commands/registry.js';
 import { PARTICIPANT_COLOR_VALUE, SQUIRL_PARTICIPANT, USER_PARTICIPANT, addressedParticipantLabel, buildRegistry, resolveParticipant, roomMembers } from '../agents/participants.js';
 import { EvalDashboard } from './EvalDashboard.js';
@@ -274,8 +274,16 @@ function SettingsPanel({
         <select value={draft.agents?.defaultClaudePermissionMode ?? 'acceptEdits'} onChange={(event) => updateAgents({ defaultClaudePermissionMode: event.target.value as NonNullable<SquirlConfig['agents']>['defaultClaudePermissionMode'] })}>
           <option value="default">default (asks before edits/commands)</option>
           <option value="acceptEdits">acceptEdits</option>
+          <option value="auto">auto</option>
           <option value="plan">plan</option>
           <option value="bypassPermissions">bypassPermissions (dangerous)</option>
+        </select>
+      </label>
+
+      <label>
+        Default Codex approval policy
+        <select value={draft.agents?.defaultCodexApprovalPolicy ?? 'on-request'} onChange={(event) => updateAgents({ defaultCodexApprovalPolicy: event.target.value as CodexApprovalPolicy })}>
+          <option value="on-request">on-request</option><option value="untrusted">untrusted only</option><option value="never">never ask</option>
         </select>
       </label>
 
@@ -285,6 +293,13 @@ function SettingsPanel({
           <option value="read-only">read-only</option>
           <option value="workspace-write">workspace-write</option>
           <option value="danger-full-access">danger-full-access (dangerous)</option>
+        </select>
+      </label>
+
+      <label>
+        Default PI approval behavior
+        <select value={draft.agents?.defaultPiApprovalMode ?? 'acceptEdits'} onChange={(event) => updateAgents({ defaultPiApprovalMode: event.target.value as PiApprovalMode })}>
+          <option value="manual">manual</option><option value="acceptEdits">accept edits</option><option value="never">never ask</option>
         </select>
       </label>
 
@@ -502,7 +517,9 @@ interface AgentEditValues {
   cwd?: string;
   permissionMode?: ClaudePermissionMode;
   sandbox?: CodexSandbox;
+  approvalPolicy?: CodexApprovalPolicy;
   piToolMode?: PiToolMode;
+  piApprovalMode?: PiApprovalMode;
 }
 
 function agentKindLabel(kind: Participant['kind']): string {
@@ -514,7 +531,8 @@ function agentKindLabel(kind: Participant['kind']): string {
 
 export function nextClaudePermissionMode(mode: ClaudePermissionMode): ClaudePermissionMode {
   if (mode === 'default') return 'acceptEdits';
-  if (mode === 'acceptEdits') return 'plan';
+  if (mode === 'acceptEdits') return 'auto';
+  if (mode === 'auto') return 'plan';
   return 'default';
 }
 
@@ -531,6 +549,7 @@ function agentModeLabel(kind: Participant['kind'], permissionMode?: ClaudePermis
     if (permissionMode === 'plan') return 'Plan';
     if (permissionMode === 'bypassPermissions') return 'Bypass permissions';
     if (permissionMode === 'default') return 'Manual';
+    if (permissionMode === 'auto') return 'Auto';
     return 'Accept edits';
   }
   if (kind === 'codex') {
@@ -556,12 +575,17 @@ export function AgentEditForm({ participant, profile, defaultCwd, agentModels, a
   const [cwd, setCwd] = useState(profile?.cwd ?? participant.cwd ?? defaultCwd);
   const [permissionMode, setPermissionMode] = useState<ClaudePermissionMode>(profile?.permissionMode ?? 'acceptEdits');
   const [sandbox, setSandbox] = useState<CodexSandbox>(profile?.sandbox ?? 'workspace-write');
+  const [approvalPolicy, setApprovalPolicy] = useState<CodexApprovalPolicy>(profile?.approvalPolicy ?? 'on-request');
   const [piToolMode, setPiToolMode] = useState<PiToolMode>(profile?.piToolMode ?? 'coding');
+  const [piApprovalMode, setPiApprovalMode] = useState<PiApprovalMode>(profile?.piApprovalMode ?? 'acceptEdits');
   const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const kindLabel = agentKindLabel(participant.kind);
 
   const save = async () => {
+    if (participant.kind === 'claude-code' && permissionMode === 'bypassPermissions' && !window.confirm('Bypass permissions gives Claude unrestricted tool access. Continue?')) return;
+    if (participant.kind === 'codex' && sandbox === 'danger-full-access' && approvalPolicy === 'never' && !window.confirm('This gives Codex full machine access without approval prompts. Continue?')) return;
+    if (participant.kind === 'pi' && piToolMode === 'coding' && piApprovalMode === 'never' && !window.confirm('This lets PI run coding tools without approval prompts or a sandbox. Continue?')) return;
     setSaving(true);
     try {
       await onSave({
@@ -570,8 +594,8 @@ export function AgentEditForm({ participant, profile, defaultCwd, agentModels, a
         effort: effort || null,
         cwd: cwd.trim() || defaultCwd,
         ...(participant.kind === 'claude-code' ? { permissionMode } : {}),
-        ...(participant.kind === 'codex' ? { sandbox } : {}),
-        ...(participant.kind === 'pi' ? { piToolMode } : {}),
+        ...(participant.kind === 'codex' ? { sandbox, approvalPolicy } : {}),
+        ...(participant.kind === 'pi' ? { piToolMode, piApprovalMode } : {}),
       });
     } finally {
       setSaving(false);
@@ -585,9 +609,9 @@ export function AgentEditForm({ participant, profile, defaultCwd, agentModels, a
       <label>Room name<input value={name} onChange={(event) => setName(event.target.value)} required /></label>
       <label>Model<select value={model} disabled={agentModelsLoading} onChange={(event) => setModel(event.target.value)}><option value="">CLI default</option>{model && !agentModels.some((option) => option.id === model) && <option value={model}>{model}</option>}{agentModels.map((option) => <option key={option.id} value={option.id}>{option.label} ({option.id})</option>)}</select></label>
       <label>{participant.kind === 'pi' ? 'Thinking' : 'Effort'}<select value={effort} onChange={(event) => setEffort(event.target.value as EffortLevel | '')}><option value="">CLI default</option>{participant.kind === 'pi' && <><option value="off">off</option><option value="minimal">minimal</option></>}<option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
-      {participant.kind === 'claude-code' && <label>Permission mode<select value={permissionMode} onChange={(event) => setPermissionMode(event.target.value as ClaudePermissionMode)}><option value="default">Manual — ask before writes and commands</option><option value="acceptEdits">Accept edits — write files automatically</option><option value="plan">Plan — read only</option><option value="bypassPermissions">Bypass permissions — dangerous</option></select><small>Shift+Tab cycles Manual, Accept edits, and Plan from the composer.</small></label>}
-      {participant.kind === 'codex' && <label>File access<select value={sandbox} onChange={(event) => setSandbox(event.target.value as CodexSandbox)}><option value="read-only">Read only</option><option value="workspace-write">Workspace write — selected project only</option><option value="danger-full-access">Full machine access — dangerous</option></select><small>Controls the sandbox used when Codex reconnects.</small></label>}
-      {participant.kind === 'pi' && <label>Tool access<select value={piToolMode} onChange={(event) => setPiToolMode(event.target.value as PiToolMode)}><option value="coding">coding (unsandboxed)</option><option value="read-only">read-only</option></select><small>PI does not provide permission prompts or a sandbox.</small></label>}
+      {participant.kind === 'claude-code' && <label>Permission mode<select value={permissionMode} onChange={(event) => setPermissionMode(event.target.value as ClaudePermissionMode)}><option value="default">Manual — ask before writes and commands</option><option value="acceptEdits">Accept edits — write files automatically</option><option value="auto">Auto — Claude evaluates tool risk</option><option value="plan">Plan — read only</option><option value="bypassPermissions">Bypass permissions — dangerous</option></select><small>Shift+Tab cycles the four safe modes from the composer.</small></label>}
+      {participant.kind === 'codex' && <><label>File access<select value={sandbox} onChange={(event) => setSandbox(event.target.value as CodexSandbox)}><option value="read-only">Read only</option><option value="workspace-write">Workspace write — selected project only</option><option value="danger-full-access">Full machine access — dangerous</option></select></label><label>Approval policy<select value={approvalPolicy} onChange={(event) => setApprovalPolicy(event.target.value as CodexApprovalPolicy)}><option value="on-request">On request</option><option value="untrusted">Untrusted only</option><option value="never">Never ask</option></select></label></>}
+      {participant.kind === 'pi' && <><label>Tool access<select value={piToolMode} onChange={(event) => setPiToolMode(event.target.value as PiToolMode)}><option value="coding">coding (unsandboxed)</option><option value="read-only">read-only</option></select></label><label>Approval behavior<select value={piApprovalMode} disabled={piToolMode === 'read-only'} onChange={(event) => setPiApprovalMode(event.target.value as PiApprovalMode)}><option value="manual">Manual</option><option value="acceptEdits">Accept edits</option><option value="never">Never ask</option></select><small>Session grants are cleared on reconnect.</small></label></>}
     </div>
     {directoryPickerOpen && <DirectoryPicker initialPath={cwd || defaultCwd} workspacePath={defaultCwd} onChoose={(path) => { setCwd(path); setDirectoryPickerOpen(false); }} onClose={() => setDirectoryPickerOpen(false)} />}
     <footer><button type="button" onClick={onCancel} disabled={saving}>Cancel</button><button className="primary" type="submit" disabled={saving || !name.trim()}>{saving ? 'Saving…' : 'Save & reconnect'}</button></footer>
@@ -599,7 +623,7 @@ export function AgentPanel({ participants, profiles, selectedAgentId, defaultCwd
   profiles: AgentProfile[];
   selectedAgentId: string | null;
   defaultCwd: string;
-  onAdd: (kind: AgentKind, options: { id?: string; model?: string; effort?: EffortLevel; cwd?: string; permissionMode?: ClaudePermissionMode; sandbox?: CodexSandbox; piToolMode?: PiToolMode }) => Promise<void>;
+  onAdd: (kind: AgentKind, options: { id?: string; model?: string; effort?: EffortLevel; cwd?: string; permissionMode?: ClaudePermissionMode; sandbox?: CodexSandbox; approvalPolicy?: CodexApprovalPolicy; piToolMode?: PiToolMode; piApprovalMode?: PiApprovalMode }) => Promise<void>;
   onUpdate: (id: string, values: AgentEditValues) => Promise<{ id: string }>;
   onStop: (id: string) => Promise<void>;
   initialState: UiStateV1['agent']; onStateChange: (state: UiStateV1['agent']) => void;
@@ -611,7 +635,9 @@ export function AgentPanel({ participants, profiles, selectedAgentId, defaultCwd
   const [cwd, setCwd] = useState(initialState.cwd || defaultCwd);
   const [permissionMode, setPermissionMode] = useState<ClaudePermissionMode>(initialState.permissionMode);
   const [sandbox, setSandbox] = useState<CodexSandbox>(initialState.sandbox);
+  const [approvalPolicy, setApprovalPolicy] = useState<CodexApprovalPolicy>(initialState.approvalPolicy);
   const [piToolMode, setPiToolMode] = useState<PiToolMode>(initialState.piToolMode);
+  const [piApprovalMode, setPiApprovalMode] = useState<PiApprovalMode>(initialState.piApprovalMode);
   const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const [codexModels, setCodexModels] = useState<Array<{ id: string; label: string }>>([]);
@@ -626,7 +652,7 @@ export function AgentPanel({ participants, profiles, selectedAgentId, defaultCwd
   const [editingId, setEditingId] = useState<string | null>(null);
   const agents = participants.filter((participant) => participant.kind === 'claude-code' || participant.kind === 'codex' || participant.kind === 'pi');
   const editingParticipant = agents.find((participant) => participant.id === editingId);
-  useEffect(() => onStateChange({ kind, id, model, effort, cwd, permissionMode, sandbox, piToolMode }), [kind, id, model, effort, cwd, permissionMode, sandbox, piToolMode, onStateChange]);
+  useEffect(() => onStateChange({ kind, id, model, effort, cwd, permissionMode, sandbox, approvalPolicy, piToolMode, piApprovalMode }), [kind, id, model, effort, cwd, permissionMode, sandbox, approvalPolicy, piToolMode, piApprovalMode, onStateChange]);
   useEffect(() => {
     if (kind !== 'codex' && editingParticipant?.kind !== 'codex') return;
     let cancelled = false;
@@ -676,6 +702,9 @@ export function AgentPanel({ participants, profiles, selectedAgentId, defaultCwd
   }, [selectedAgentId]);
 
   const add = async () => {
+    if (kind === 'claude-code' && permissionMode === 'bypassPermissions' && !window.confirm('Bypass permissions gives Claude unrestricted tool access. Continue?')) return;
+    if (kind === 'codex' && sandbox === 'danger-full-access' && approvalPolicy === 'never' && !window.confirm('This gives Codex full machine access without approval prompts. Continue?')) return;
+    if (kind === 'pi' && piToolMode === 'coding' && piApprovalMode === 'never' && !window.confirm('This lets PI run coding tools without approval prompts or a sandbox. Continue?')) return;
     setAdding(true);
     try {
       await onAdd(kind, {
@@ -684,8 +713,8 @@ export function AgentPanel({ participants, profiles, selectedAgentId, defaultCwd
         ...(effort ? { effort } : {}),
         cwd: cwd.trim() || defaultCwd,
         ...(kind === 'claude-code' ? { permissionMode } : {}),
-        ...(kind === 'codex' ? { sandbox } : {}),
-        ...(kind === 'pi' ? { piToolMode } : {}),
+        ...(kind === 'codex' ? { sandbox, approvalPolicy } : {}),
+        ...(kind === 'pi' ? { piToolMode, piApprovalMode } : {}),
       });
       setId('');
     } catch {
@@ -712,9 +741,9 @@ export function AgentPanel({ participants, profiles, selectedAgentId, defaultCwd
           {(kind === 'codex' ? codexModels : kind === 'claude-code' ? claudeModels : piModels).map((option) => <option key={option.id} value={option.id}>{option.label} ({option.id})</option>)}
         </select>{(kind === 'codex' ? codexModelsError : kind === 'claude-code' ? claudeModelsError : piModelsError) && <small className="directoryError">{kind === 'codex' ? codexModelsError : kind === 'claude-code' ? claudeModelsError : piModelsError}</small>}</label>
         <label>{kind === 'pi' ? 'Thinking' : 'Effort'}<select value={effort} onChange={(event) => setEffort(event.target.value as EffortLevel | '')}><option value="">CLI default</option>{kind === 'pi' && <><option value="off">off</option><option value="minimal">minimal</option></>}<option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
-        {kind === 'claude-code' && <label>Permission mode<select value={permissionMode} onChange={(event) => setPermissionMode(event.target.value as ClaudePermissionMode)}><option value="default">Manual — ask before writes and commands</option><option value="acceptEdits">Accept edits — write files automatically</option><option value="plan">Plan — read only</option><option value="bypassPermissions">Bypass permissions — dangerous</option></select><small>Shift+Tab cycles the three safe modes after the agent joins.</small></label>}
-        {kind === 'codex' && <label>File access<select value={sandbox} onChange={(event) => setSandbox(event.target.value as CodexSandbox)}><option value="read-only">Read only</option><option value="workspace-write">Workspace write — selected project only</option><option value="danger-full-access">Full machine access — dangerous</option></select><small>Workspace write is limited to the selected project.</small></label>}
-        {kind === 'pi' && <label>Tool access<select value={piToolMode} onChange={(event) => setPiToolMode(event.target.value as PiToolMode)}><option value="coding">coding (unsandboxed)</option><option value="read-only">read-only</option></select><small>PI has no native permission prompts or sandbox.</small></label>}
+        {kind === 'claude-code' && <label>Permission mode<select value={permissionMode} onChange={(event) => setPermissionMode(event.target.value as ClaudePermissionMode)}><option value="default">Manual — ask before writes and commands</option><option value="acceptEdits">Accept edits — write files automatically</option><option value="auto">Auto — Claude evaluates tool risk</option><option value="plan">Plan — read only</option><option value="bypassPermissions">Bypass permissions — dangerous</option></select><small>Shift+Tab cycles the four safe modes after the agent joins.</small></label>}
+        {kind === 'codex' && <><label>File access<select value={sandbox} onChange={(event) => setSandbox(event.target.value as CodexSandbox)}><option value="read-only">Read only</option><option value="workspace-write">Workspace write — selected project only</option><option value="danger-full-access">Full machine access — dangerous</option></select></label><label>Approval policy<select value={approvalPolicy} onChange={(event) => setApprovalPolicy(event.target.value as CodexApprovalPolicy)}><option value="on-request">On request</option><option value="untrusted">Untrusted only</option><option value="never">Never ask</option></select></label></>}
+        {kind === 'pi' && <><label>Tool access<select value={piToolMode} onChange={(event) => setPiToolMode(event.target.value as PiToolMode)}><option value="coding">coding (unsandboxed)</option><option value="read-only">read-only</option></select></label><label>Approval behavior<select value={piApprovalMode} disabled={piToolMode === 'read-only'} onChange={(event) => setPiApprovalMode(event.target.value as PiApprovalMode)}><option value="manual">Manual</option><option value="acceptEdits">Accept edits</option><option value="never">Never ask</option></select><small>Session grants are cleared on reconnect.</small></label></>}
       </div>
       {directoryPickerOpen && <DirectoryPicker initialPath={cwd || defaultCwd} workspacePath={defaultCwd} onChoose={(path) => { setCwd(path); setDirectoryPickerOpen(false); }} onClose={() => setDirectoryPickerOpen(false)} />}
       <button className="primary agentAddButton" disabled={adding || (kind === 'codex' && (codexModelsLoading || !model))} onClick={() => void add()}>{adding ? 'Adding…' : `Add ${agentKindLabel(kind)}`}</button>
@@ -871,13 +900,21 @@ function AgentInteractionModal({ participantId, request, onRespond }: {
   const [value, setValue] = useState(request.method === 'editor' ? request.prefill ?? '' : '');
   return <div className="modalShade">
     <div className="modal agentInteractionModal">
-      <h2>{request.title || `PI request from @${participantId}`}</h2>
+      <h2>{request.title || `Request from @${participantId}`}</h2>
       {request.message && <p>{request.message}</p>}
+      {request.method === 'permission' && <>
+        {request.resource && <pre>{request.resource}</pre>}
+        {request.input != null && <pre>{typeof request.input === 'string' ? request.input : JSON.stringify(request.input, null, 2)}</pre>}
+      </>}
       {request.method === 'select' && <div className="interactionChoices">{request.options.map((option) => <button key={option} onClick={() => void onRespond({ value: option })}>{option}</button>)}</div>}
       {request.method === 'input' && <input autoFocus value={value} placeholder={request.placeholder} onChange={(event) => setValue(event.target.value)} />}
       {request.method === 'editor' && <textarea autoFocus value={value} onChange={(event) => setValue(event.target.value)} />}
       <footer>
-        <button onClick={() => void onRespond({ cancelled: true })}>Cancel</button>
+        {request.method === 'permission' ? <>
+          <button onClick={() => void onRespond({ decision: 'deny' })}>Deny</button>
+          <button className="primary" onClick={() => void onRespond({ decision: 'allow-once' })}>Allow once</button>
+          {request.sessionScope && <button className="danger" onClick={() => void onRespond({ decision: 'allow-session' })}>{request.sessionScope.label}</button>}
+        </> : <button onClick={() => void onRespond({ cancelled: true })}>Cancel</button>}
         {request.method === 'confirm' && <><button onClick={() => void onRespond({ confirmed: false })}>No</button><button className="primary" onClick={() => void onRespond({ confirmed: true })}>Yes</button></>}
         {(request.method === 'input' || request.method === 'editor') && <button className="primary" onClick={() => void onRespond({ value })}>Submit</button>}
       </footer>
@@ -1235,7 +1272,10 @@ function App() {
   };
 
   const handleChatEvent = (event: ChatEvent) => {
-    if (event.type === 'state') setState(event.state);
+    if (event.type === 'state') {
+      setState(event.state);
+      setAgentInteractions(event.state.agentInteractions ?? []);
+    }
     if (event.type === 'message') setState((prev) => prev ? {
       ...prev,
       messages: prev.messages.some((message) => message.id === event.message.id)
@@ -1265,7 +1305,7 @@ function App() {
     }
     if (event.type === 'task-activity') setState((prev) => prev ? { ...prev, taskActivity: event.taskActivity } : prev);
     if (event.type === 'tool-approval') setApproval(event.request);
-    if (event.type === 'agent-interaction') setAgentInteractions((current) => [...current, { participantId: event.participantId, request: event.request }]);
+    if (event.type === 'agent-interaction') setAgentInteractions((current) => current.some((item) => item.participantId === event.participantId && item.request.id === event.request.id) ? current : [...current, { participantId: event.participantId, request: event.request }]);
     if (event.type === 'agent-editor-prefill') {
       setRecipientId(event.participantId);
       setInput(event.text);
@@ -1307,11 +1347,16 @@ function App() {
   };
 
   const saveConfig = async (config: SquirlConfig) => {
+    const agents = config.agents;
+    const dangerous = agents?.defaultClaudePermissionMode === 'bypassPermissions'
+      || (agents?.defaultCodexSandbox === 'danger-full-access' && agents?.defaultCodexApprovalPolicy === 'never')
+      || ((agents?.defaultPiToolMode ?? 'coding') === 'coding' && agents?.defaultPiApprovalMode === 'never');
+    if (dangerous && !window.confirm('These defaults can run tools with broad access and no approval prompts. Save them anyway?')) return;
     setState(await api<AppState>('/api/config', { method: 'POST', body: JSON.stringify(config) }));
     pushToast('Settings saved.');
   };
 
-  const addAgent = async (kind: AgentKind, options: { id?: string; model?: string; effort?: EffortLevel; cwd?: string; permissionMode?: ClaudePermissionMode; sandbox?: CodexSandbox; piToolMode?: PiToolMode }) => {
+  const addAgent = async (kind: AgentKind, options: { id?: string; model?: string; effort?: EffortLevel; cwd?: string; permissionMode?: ClaudePermissionMode; sandbox?: CodexSandbox; approvalPolicy?: CodexApprovalPolicy; piToolMode?: PiToolMode; piApprovalMode?: PiApprovalMode }) => {
     try {
       const response = await api<{ state: AppState; agent: { id: string; label: string } }>('/api/agents/add', {
         method: 'POST',

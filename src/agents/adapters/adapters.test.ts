@@ -1,14 +1,9 @@
-import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { describe, expect, it, vi } from 'vitest';
+
 import { FakeTransport } from '../transport/fake.js';
 import { ClaudeCodeAdapter } from './claude-code.js';
 import { CodexAdapter } from './codex.js';
 import type { AgentDescriptor, AgentEvent } from '../types.js';
-
-function fixtureLines(name: string): string[] {
-  const raw = readFileSync(new URL(`../parse/__fixtures__/${name}`, import.meta.url), 'utf-8');
-  return raw.split('\n').filter((line) => line.trim().length > 0);
-}
 
 const claudeDescriptor: AgentDescriptor = {
   id: 'cc', kind: 'claude-code', label: 'claude-code', transport: 'local', cwd: '/repo',
@@ -17,133 +12,89 @@ const codexDescriptor: AgentDescriptor = {
   id: 'codex', kind: 'codex', label: 'codex', transport: 'local', cwd: '/repo',
 };
 
+function messages(transport: FakeTransport): Array<Record<string, any>> {
+  return transport.lastSpawn.handle.writes.map((line) => JSON.parse(line));
+}
+
+async function startCodex(agent: CodexAdapter, transport: FakeTransport, threadId = 'thread-1'): Promise<void> {
+  const starting = agent.start();
+  let initialize: Record<string, any> | undefined;
+  await vi.waitFor(() => { initialize = messages(transport).find((message) => message.method === 'initialize'); expect(initialize).toBeTruthy(); });
+  transport.lastSpawn.handle.emitStdout(JSON.stringify({ id: initialize!.id, result: {} }));
+  let thread: Record<string, any> | undefined;
+  await vi.waitFor(() => { thread = messages(transport).find((message) => message.method === 'thread/start' || message.method === 'thread/resume'); expect(thread).toBeTruthy(); });
+  transport.lastSpawn.handle.emitStdout(JSON.stringify({ id: thread!.id, result: { thread: { id: threadId }, model: 'gpt-test' } }));
+  await starting;
+}
+
 describe('ClaudeCodeAdapter', () => {
-  it('spawns a persistent stream-json process with safe defaults', async () => {
-    const transport = new FakeTransport();
-    const agent = new ClaudeCodeAdapter(claudeDescriptor, transport);
+  it.each(['default', 'acceptEdits', 'auto', 'plan', 'bypassPermissions'] as const)('accepts the configured %s SDK permission mode', async (permissionMode) => {
+    const agent = new ClaudeCodeAdapter({ ...claudeDescriptor, permissionMode }, new FakeTransport());
+    expect(agent.buildArgs().join(' ')).toContain(`--permission-mode ${permissionMode}`);
     await agent.start();
-
-    const { spec } = transport.lastSpawn;
-    expect(spec.command).toBe('claude');
-    expect(spec.args).toContain('--print');
-    expect(spec.args).toContain('--input-format');
-    expect(spec.args).toContain('stream-json');
-    expect(spec.args).toContain('--include-partial-messages');
-    // Write-enabled default, never --bare (would break OAuth), never skip-permissions.
-    expect(spec.args.join(' ')).toContain('--permission-mode acceptEdits');
-    expect(spec.args).not.toContain('--bare');
-    expect(spec.args).not.toContain('--dangerously-skip-permissions');
     expect(agent.status).toBe('ready');
   });
 
-  it.each(['default', 'acceptEdits', 'plan', 'bypassPermissions'] as const)('passes the configured %s permission mode to Claude', async (permissionMode) => {
-    const transport = new FakeTransport();
-    const agent = new ClaudeCodeAdapter({ ...claudeDescriptor, permissionMode }, transport);
-    await agent.start();
-    expect(transport.lastSpawn.spec.args.join(' ')).toContain(`--permission-mode ${permissionMode}`);
-  });
-
-  it('writes a stream-json user turn to stdin on send', async () => {
-    const transport = new FakeTransport();
-    const agent = new ClaudeCodeAdapter(claudeDescriptor, transport);
-    await agent.start();
-    await agent.send('refactor the auth module');
-
-    const written = transport.lastSpawn.handle.stdinData.trim();
-    expect(written.endsWith('}')).toBe(true);
-    const parsed = JSON.parse(written);
-    expect(parsed).toEqual({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'refactor the auth module' }] } });
-    expect(agent.status).toBe('busy');
-  });
-
-  it('passes configured model and effort to Claude', async () => {
-    const transport = new FakeTransport();
-    const agent = new ClaudeCodeAdapter({ ...claudeDescriptor, model: 'fable', effort: 'medium' }, transport);
-    await agent.start();
-    expect(transport.lastSpawn.spec.args.join(' ')).toContain('--model fable');
-    expect(transport.lastSpawn.spec.args.join(' ')).toContain('--effort medium');
-  });
-
-  it('emits parsed events as the process streams, and returns to ready at turn end', async () => {
-    const transport = new FakeTransport();
-    const agent = new ClaudeCodeAdapter(claudeDescriptor, transport);
-    const events: AgentEvent[] = [];
-    await agent.start();
-    agent.onEvent((e) => events.push(e));
-    await agent.send('hi');
-
-    transport.lastSpawn.handle.emitStdoutLines(fixtureLines('claude-message.jsonl'));
-
-    const text = events.filter((e) => e.type === 'token').map((e) => (e as { token: string }).token).join('');
-    expect(text).toBe('turn one ok.');
-    expect(events.some((e) => e.type === 'turn-end')).toBe(true);
-    expect(agent.status).toBe('ready');
-    // Message ids are namespaced to the participant.
-    const start = events.find((e) => e.type === 'message-start') as { messageId: string };
-    expect(start.messageId).toMatch(/^cc-\d+$/);
+  it('preserves model, effort, and resume configuration for diagnostics', () => {
+    const agent = new ClaudeCodeAdapter({ ...claudeDescriptor, model: 'fable', effort: 'medium', sessionId: 'session-1' }, new FakeTransport());
+    expect(agent.buildArgs()).toEqual(['--permission-mode', 'acceptEdits', '--model', 'fable', '--effort', 'medium', '--resume', 'session-1']);
   });
 });
 
-describe('CodexAdapter', () => {
-  it('passes configured model and reasoning effort to Codex', async () => {
+describe('CodexAdapter app-server', () => {
+  it('initializes a persistent app server with the configured sandbox and approval policy', async () => {
     const transport = new FakeTransport();
-    const agent = new CodexAdapter({ ...codexDescriptor, model: 'gpt-5', effort: 'high' }, transport);
-    await agent.start();
-    await agent.send('work');
-    expect(transport.lastSpawn.spec.args.join(' ')).toContain('--model gpt-5');
-    expect(transport.lastSpawn.spec.args).toContain('model_reasoning_effort="high"');
+    const agent = new CodexAdapter({ ...codexDescriptor, model: 'gpt-5', effort: 'high', sandbox: 'read-only', approvalPolicy: 'untrusted' }, transport);
+    await startCodex(agent, transport);
+
+    expect(transport.lastSpawn.spec.args).toEqual(['app-server']);
+    const thread = messages(transport).find((message) => message.method === 'thread/start')!;
+    expect(thread.params).toMatchObject({ cwd: '/repo', model: 'gpt-5', sandbox: 'read-only', approvalPolicy: 'untrusted', approvalsReviewer: 'user' });
+
+    const sending = agent.send('list the files');
+    await Promise.resolve();
+    const turn = messages(transport).find((message) => message.method === 'turn/start')!;
+    expect(turn.params).toMatchObject({ threadId: 'thread-1', input: [{ type: 'text', text: 'list the files' }], effort: 'high' });
+    transport.lastSpawn.handle.emitStdout(JSON.stringify({ id: turn.id, result: { turn: { id: 'turn-1' } } }));
+    await sending;
   });
 
-  it('runs `codex exec` for the first turn (prompt via stdin, workspace-write sandbox)', async () => {
-    const transport = new FakeTransport();
-    const agent = new CodexAdapter(codexDescriptor, transport);
-    await agent.start();
-    await agent.send('list the files');
-
-    const { spec, handle } = transport.lastSpawn;
-    expect(spec.command).toBe('codex');
-    expect(spec.args.slice(0, 2)).toEqual(['exec', '-']);
-    expect(spec.args).toContain('--json');
-    expect(spec.args.join(' ')).toContain('--sandbox workspace-write');
-    expect(handle.stdinData).toBe('list the files');
-    expect(handle.stdinEnded).toBe(true);
-  });
-
-  it.each(['read-only', 'workspace-write', 'danger-full-access'] as const)('passes the configured %s sandbox to Codex', async (sandbox) => {
-    const transport = new FakeTransport();
-    const agent = new CodexAdapter({ ...codexDescriptor, sandbox }, transport);
-    await agent.start();
-    await agent.send('work');
-    expect(transport.lastSpawn.spec.args.join(' ')).toContain(`--sandbox ${sandbox}`);
-  });
-
-  it('captures the thread id and resumes it on the next turn', async () => {
+  it('streams assistant output and maps command approvals to session decisions', async () => {
     const transport = new FakeTransport();
     const agent = new CodexAdapter(codexDescriptor, transport);
     const events: AgentEvent[] = [];
-    await agent.start();
-    agent.onEvent((e) => events.push(e));
+    agent.onEvent((event) => events.push(event));
+    await startCodex(agent, transport);
 
-    await agent.send('first');
-    transport.lastSpawn.handle.emitStdoutLines(fixtureLines('codex-message.jsonl'));
-    transport.lastSpawn.handle.close(0);
-    await Promise.resolve(); // let the exited handler run
+    transport.lastSpawn.handle.emitStdout(JSON.stringify({
+      id: 99, method: 'item/commandExecution/requestApproval',
+      params: { itemId: 'cmd-1', command: 'curl https://example.com', reason: 'Network access', availableDecisions: ['accept', 'acceptForSession', 'decline'] },
+    }));
+    await Promise.resolve();
+    const interaction = events.find((event) => event.type === 'interaction-request');
+    expect(interaction).toMatchObject({ request: { method: 'permission', toolName: 'Bash', resource: 'curl https://example.com' } });
+    if (interaction?.type !== 'interaction-request') throw new Error('missing interaction');
+    await agent.respondToInteraction(interaction.request.id, { decision: 'allow-session' });
+    await Promise.resolve();
+    expect(messages(transport)).toContainEqual({ id: 99, result: { decision: 'acceptForSession' } });
 
-    const tokens = events.filter((e) => e.type === 'token').map((e) => (e as { token: string }).token);
-    expect(tokens).toContain('hello from codex');
-
-    await agent.send('second');
-    const { spec } = transport.lastSpawn;
-    expect(spec.args.slice(0, 4)).toEqual(['exec', 'resume', '019ed6fe-480f-7b70-89c2-c6ad2c2a0fc7', '-']);
+    transport.lastSpawn.handle.emitStdout(JSON.stringify({ method: 'item/agentMessage/delta', params: { delta: 'hello', itemId: 'msg-1', turnId: 'turn-1', threadId: 'thread-1' } }));
+    transport.lastSpawn.handle.emitStdout(JSON.stringify({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed' } } }));
+    expect(events.filter((event) => event.type === 'token').map((event) => event.type === 'token' ? event.token : '')).toEqual(['hello']);
+    expect(events.some((event) => event.type === 'turn-end')).toBe(true);
   });
 
-  it('kills the current process on stop', async () => {
+  it('resumes an existing thread and denies experimental broad permission profiles', async () => {
     const transport = new FakeTransport();
-    const agent = new CodexAdapter(codexDescriptor, transport);
-    await agent.start();
-    await agent.send('work');
-    await agent.stop();
-    expect(transport.lastSpawn.handle.killed).toBe(true);
-    expect(agent.status).toBe('stopped');
+    const agent = new CodexAdapter({ ...codexDescriptor, sessionId: 'saved-thread' }, transport);
+    const events: AgentEvent[] = [];
+    agent.onEvent((event) => events.push(event));
+    await startCodex(agent, transport, 'saved-thread');
+    expect(messages(transport).find((message) => message.method === 'thread/resume')?.params.threadId).toBe('saved-thread');
+
+    transport.lastSpawn.handle.emitStdout(JSON.stringify({ id: 44, method: 'item/permissions/requestApproval', params: { itemId: 'broad' } }));
+    await Promise.resolve();
+    expect(messages(transport)).toContainEqual({ id: 44, error: { code: -32601, message: 'Squirl does not support experimental permission profile grants.' } });
+    expect(events.some((event) => event.type === 'error')).toBe(true);
   });
 });

@@ -99,7 +99,7 @@ const ApprovalPrompt: React.FC<{ command: string; onRespond: (approved: boolean)
   );
 };
 
-const PiInteractionPrompt: React.FC<{
+const AgentInteractionPrompt: React.FC<{
   participantId: string;
   request: AgentInteractionRequest;
   onRespond: (response: AgentInteractionResponse) => void;
@@ -108,6 +108,9 @@ const PiInteractionPrompt: React.FC<{
   const [selected, setSelected] = useState(0);
   useInput((input, key) => {
     if (key.escape) onRespond({ cancelled: true });
+    else if (request.method === 'permission' && (input === 'd' || input === 'D')) onRespond({ decision: 'deny' });
+    else if (request.method === 'permission' && (input === 'o' || input === 'O')) onRespond({ decision: 'allow-once' });
+    else if (request.method === 'permission' && request.sessionScope && (input === 's' || input === 'S')) onRespond({ decision: 'allow-session' });
     else if (request.method === 'confirm' && (input === 'y' || input === 'Y')) onRespond({ confirmed: true });
     else if (request.method === 'confirm' && (input === 'n' || input === 'N')) onRespond({ confirmed: false });
     else if (request.method === 'select' && key.upArrow) setSelected((index) => Math.max(0, index - 1));
@@ -115,8 +118,12 @@ const PiInteractionPrompt: React.FC<{
     else if (request.method === 'select' && key.return && request.options[selected]) onRespond({ value: request.options[selected] });
   });
   return <Box flexDirection="column" borderStyle="single" borderTop borderBottom borderLeft={false} borderRight={false} paddingX={1}>
-    <Text color="magenta" bold>{request.title || `PI request from @${participantId}`}</Text>
+    <Text color="magenta" bold>{request.title || `Request from @${participantId}`}</Text>
     {request.message && <Text>{request.message}</Text>}
+    {request.method === 'permission' && <>
+      {request.resource && <Text color="yellow">{request.resource}</Text>}
+      <Text dimColor>o allow once · {request.sessionScope ? 's allow for session · ' : ''}d deny</Text>
+    </>}
     {request.method === 'confirm' && <Text dimColor>y yes · n no · esc cancel</Text>}
     {request.method === 'select' && request.options.map((option, index) => <Text key={option} color={index === selected ? 'cyan' : undefined}>{index === selected ? '› ' : '  '}{option}</Text>)}
     {(request.method === 'input' || request.method === 'editor') && <Box><Text color="cyan">{'› '}</Text><TextInput value={value} onChange={setValue} onSubmit={() => onRespond({ value })} placeholder={request.method === 'input' ? request.placeholder : undefined} focus /></Box>}
@@ -270,7 +277,7 @@ export const App: React.FC<AppProps> = ({
   if (!schedulerRef.current) {
     schedulerRef.current = new ParticipantTurnScheduler(
       (turn, context) => scheduledTurnRunnerRef.current(turn, context),
-      (participantId) => participantId === SQUIRL_PARTICIPANT.id || coordinatorRef.current?.getDescriptor(participantId)?.kind !== 'claude-code',
+      (participantId) => participantId === SQUIRL_PARTICIPANT.id || Boolean(coordinatorRef.current?.getDescriptor(participantId)),
       (error, turn) => addToast(`@${turn.participantId} failed: ${error instanceof Error ? error.message : String(error)}`),
     );
   }
@@ -841,7 +848,9 @@ export const App: React.FC<AppProps> = ({
         bin: kind === 'claude-code' ? configRef.current.agents?.claudeBin : kind === 'codex' ? resolveCodexBinary(configRef.current.agents?.codexBin) : resolvePiBinary(configRef.current.agents?.piBin),
         permissionMode: configRef.current.agents?.defaultClaudePermissionMode ?? 'acceptEdits',
         sandbox: configRef.current.agents?.defaultCodexSandbox ?? 'workspace-write',
+        approvalPolicy: configRef.current.agents?.defaultCodexApprovalPolicy ?? 'on-request',
         piToolMode: configRef.current.agents?.defaultPiToolMode,
+        piApprovalMode: configRef.current.agents?.defaultPiApprovalMode ?? 'acceptEdits',
       });
       const participant = await coordinatorRef.current!.addAgent(descriptor);
       setParticipants(coordinatorRef.current!.listParticipants());
@@ -956,7 +965,9 @@ export const App: React.FC<AppProps> = ({
             bin: profile.bin ?? (profile.kind === 'claude-code' ? configRef.current.agents?.claudeBin : profile.kind === 'codex' ? resolveCodexBinary(configRef.current.agents?.codexBin) : resolvePiBinary(configRef.current.agents?.piBin)),
             permissionMode: profile.permissionMode ?? configRef.current.agents?.defaultClaudePermissionMode ?? 'acceptEdits',
             sandbox: profile.sandbox ?? configRef.current.agents?.defaultCodexSandbox ?? 'workspace-write',
+            approvalPolicy: profile.approvalPolicy ?? configRef.current.agents?.defaultCodexApprovalPolicy ?? 'on-request',
             piToolMode: profile.piToolMode ?? configRef.current.agents?.defaultPiToolMode,
+            piApprovalMode: profile.piApprovalMode ?? configRef.current.agents?.defaultPiApprovalMode ?? 'acceptEdits',
           });
           await coordinatorRef.current!.addAgent(descriptor);
           migrated.push(profileFromDescriptor(descriptor, profile.profileId));
@@ -1270,7 +1281,7 @@ export const App: React.FC<AppProps> = ({
       {pendingApproval ? (
         <ApprovalPrompt command={pendingApproval.command} onRespond={(approved) => { pendingApproval.resolve(approved); setPendingApproval(null); }} />
       ) : agentInteractions[0] ? (
-        <PiInteractionPrompt participantId={agentInteractions[0].participantId} request={agentInteractions[0].request} onRespond={(response) => {
+        <AgentInteractionPrompt participantId={agentInteractions[0].participantId} request={agentInteractions[0].request} onRespond={(response) => {
           const current = agentInteractions[0];
           if (!current) return;
           void coordinatorRef.current?.respondToInteraction(current.participantId, current.request.id, response)

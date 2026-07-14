@@ -1,13 +1,15 @@
 // PI adapter: one persistent `pi --mode rpc` process per room participant.
 
 import { createPiParser } from '../parse/pi-stream.js';
-import type { AgentDescriptor, AgentInteractionResponse, AgentTransport, SpawnHandle, StreamParser } from '../types.js';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import type { AgentDescriptor, AgentInteractionRequest, AgentInteractionResponse, AgentTransport, SpawnHandle, StreamParser } from '../types.js';
 import { BaseAgentSession } from './base.js';
 
 export class PiAdapter extends BaseAgentSession {
   private handle: SpawnHandle | null = null;
   private parser: StreamParser;
-  private pendingInteractions = new Set<string>();
+  private pendingInteractions = new Map<string, AgentInteractionRequest>();
   private startupResolve: (() => void) | null = null;
   private startupReject: ((error: Error) => void) | null = null;
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
@@ -29,6 +31,11 @@ export class PiAdapter extends BaseAgentSession {
     if (d.effort) args.push('--thinking', d.effort);
     if (d.sessionId) args.push('--session', d.sessionId);
     if (d.piToolMode === 'read-only') args.push('--tools', 'read,grep,find,ls');
+    if (d.piToolMode !== 'read-only') {
+      const compiled = fileURLToPath(new URL('../pi-permission-gate.js', import.meta.url));
+      const source = fileURLToPath(new URL('../pi-permission-gate.ts', import.meta.url));
+      args.push('--extension', existsSync(compiled) ? compiled : source);
+    }
     return args;
   }
 
@@ -42,6 +49,7 @@ export class PiAdapter extends BaseAgentSession {
       command: this.descriptor.bin ?? 'pi',
       args: this.buildArgs(),
       cwd: this.descriptor.cwd,
+      env: { SQUIRL_PI_APPROVAL_MODE: this.descriptor.piApprovalMode ?? 'acceptEdits' },
     });
     this.handle = handle;
     const startup = new Promise<void>((resolve, reject) => {
@@ -52,7 +60,7 @@ export class PiAdapter extends BaseAgentSession {
     handle.onStderr((line) => { stderr = `${stderr}\n${line}`.trim().slice(-4000); });
     handle.onStdout((line) => {
       for (const event of this.parser.push(line)) {
-        if (event.type === 'interaction-request') this.pendingInteractions.add(event.request.id);
+        if (event.type === 'interaction-request') this.pendingInteractions.set(event.request.id, event.request);
         if (event.type === 'session-status' && event.sessionId) this.descriptor.sessionId = event.sessionId;
         if (event.type === 'session-status' && event.status === 'ready') {
           if (this.startupTimer) clearTimeout(this.startupTimer);
@@ -107,13 +115,21 @@ export class PiAdapter extends BaseAgentSession {
   }
 
   async respondToInteraction(id: string, response: AgentInteractionResponse): Promise<void> {
-    if (!this.pendingInteractions.has(id)) throw new Error(`No pending PI interaction "${id}"`);
+    const request = this.pendingInteractions.get(id);
+    if (!request) return;
     this.pendingInteractions.delete(id);
-    this.write({ type: 'extension_ui_response', id, ...response });
+    const value = response.decision === 'allow-once'
+      ? 'Allow once'
+      : response.decision === 'allow-session'
+        ? request.method === 'permission' ? request.sessionScope?.label : undefined
+        : response.decision === 'deny'
+          ? 'Deny'
+          : response.value;
+    this.write({ type: 'extension_ui_response', id, ...response, ...(value !== undefined ? { value } : {}) });
   }
 
   async stop(): Promise<void> {
-    for (const id of this.pendingInteractions) this.write({ type: 'extension_ui_response', id, cancelled: true });
+    for (const id of this.pendingInteractions.keys()) this.write({ type: 'extension_ui_response', id, cancelled: true });
     this.pendingInteractions.clear();
     if (this.startupTimer) clearTimeout(this.startupTimer);
     this.startupTimer = null;
