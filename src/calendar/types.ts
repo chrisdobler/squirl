@@ -34,6 +34,7 @@ export interface GoogleCalendarTokens {
 export interface TaskCalendarSyncEntry {
   taskId: string;
   title: string;
+  summary?: string;
   calendarId: string;
   eventId: string;
   startAt: string;

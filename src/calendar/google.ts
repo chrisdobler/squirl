@@ -109,9 +109,10 @@ export class GoogleCalendarClient {
     return value;
   }
 
-  async createTaskEvent(calendarId: string, task: { taskId: string; title: string; startAt: string; endAt: string }): Promise<string> {
+  async createTaskEvent(calendarId: string, task: { taskId: string; title: string; summary?: string; startAt: string; endAt: string }): Promise<string> {
     const value = await this.mutate('POST', `/calendars/${encodeURIComponent(calendarId)}/events`, {
       summary: task.title,
+      description: task.summary?.trim() ?? '',
       start: { dateTime: task.startAt },
       end: { dateTime: task.endAt },
       extendedProperties: { private: { squirlManaged: 'true', squirlTaskId: task.taskId } },
@@ -120,9 +121,10 @@ export class GoogleCalendarClient {
     return value.id;
   }
 
-  async updateTaskEvent(calendarId: string, eventId: string, task: { taskId: string; title: string; startAt: string; endAt: string }): Promise<void> {
+  async updateTaskEvent(calendarId: string, eventId: string, task: { taskId: string; title: string; summary?: string; startAt: string; endAt: string }): Promise<void> {
     await this.mutate('PATCH', `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`, {
       summary: task.title,
+      description: task.summary?.trim() ?? '',
       start: { dateTime: task.startAt },
       end: { dateTime: task.endAt },
       extendedProperties: { private: { squirlManaged: 'true', squirlTaskId: task.taskId } },

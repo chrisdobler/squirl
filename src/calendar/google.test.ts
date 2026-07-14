@@ -1,8 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { GoogleCalendarClient } from './google.js';
 import type { GoogleCalendarTokens } from './types.js';
 
 describe('GoogleCalendarClient', () => {
+  it('writes the task summary into Google Calendar event notes', async () => {
+    const request = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => new Response(JSON.stringify({ id: 'event-1' }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    const tokens: GoogleCalendarTokens = { version: 1, accessToken: 'access', refreshToken: 'refresh', expiresAt: '2099-01-01T00:00:00Z' };
+    const client = new GoogleCalendarClient(() => 'client', () => 'client-secret', () => tokens, () => undefined, request as typeof fetch);
+
+    await client.createTaskEvent('primary', { taskId: 'task-1', title: 'Build Squirl', summary: 'Sync summaries to event notes.', startAt: '2026-07-13T18:00:00Z', endAt: '2026-07-13T18:30:00Z' });
+
+    expect(JSON.parse(String(request.mock.calls[0]?.[1]?.body))).toMatchObject({ summary: 'Build Squirl', description: 'Sync summaries to event notes.' });
+  });
+
   it('uses PKCE, validates state, and stores the refresh credential', async () => {
     let tokens: GoogleCalendarTokens | null = null;
     const requests: Array<{ url: string; init?: RequestInit }> = [];

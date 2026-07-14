@@ -7,23 +7,30 @@ describe('syncInferredTaskEvents', () => {
     const updateTaskEvent = vi.fn(async () => undefined);
     const save = vi.fn();
     const first = await syncInferredTaskEvents({
-      snapshot: { version: 2, generatedAt: '2026-07-13T18:00:00Z', sourceWatermark: 'a', tasks: [{ id: 'task-1', title: 'Build Squirl', lastActiveAt: '2026-07-13T18:00:00Z', participantIds: [], evidenceIds: [] }] },
+      snapshot: { version: 2, generatedAt: '2026-07-13T18:00:00Z', sourceWatermark: 'a', tasks: [{ id: 'task-1', title: 'Build Squirl', summary: 'Wire active tasks into the calendar.', lastActiveAt: '2026-07-13T18:00:00Z', participantIds: [], evidenceIds: [] }] },
       state: { version: 1, entries: [] }, calendarId: 'primary', client: { createTaskEvent, updateTaskEvent }, save,
       now: Date.parse('2026-07-13T18:05:00Z'),
       activeHorizonMs: 60_000,
     });
-    expect(createTaskEvent).toHaveBeenCalledWith('primary', expect.objectContaining({ startAt: '2026-07-13T18:00:00Z', endAt: '2026-07-13T18:06:00.000Z' }));
+    expect(createTaskEvent).toHaveBeenCalledWith('primary', expect.objectContaining({ summary: 'Wire active tasks into the calendar.', startAt: '2026-07-13T18:00:00Z', endAt: '2026-07-13T18:06:00.000Z' }));
     const idle = await syncInferredTaskEvents({
-      snapshot: { version: 2, generatedAt: '2026-07-13T18:07:00Z', sourceWatermark: 'a', tasks: [{ id: 'task-1', title: 'Build Squirl', lastActiveAt: '2026-07-13T18:00:00Z', participantIds: [], evidenceIds: [] }] },
+      snapshot: { version: 2, generatedAt: '2026-07-13T18:07:00Z', sourceWatermark: 'a', tasks: [{ id: 'task-1', title: 'Build Squirl', summary: 'Wire active tasks into the calendar.', lastActiveAt: '2026-07-13T18:00:00Z', participantIds: [], evidenceIds: [] }] },
       state: first, calendarId: 'primary', client: { createTaskEvent, updateTaskEvent }, save,
       now: Date.parse('2026-07-13T18:07:00Z'),
       activeHorizonMs: 60_000,
     });
     expect(idle.entries[0]).toMatchObject({ endAt: '2026-07-13T18:06:00.000Z', lastActiveAt: '2026-07-13T18:00:00Z' });
     expect(updateTaskEvent).not.toHaveBeenCalled();
+    const summarized = await syncInferredTaskEvents({
+      snapshot: { version: 3, generatedAt: '2026-07-13T18:08:00Z', sourceWatermark: 'a', tasks: [{ id: 'task-1', title: 'Build Squirl', summary: 'Sync the current task summary into calendar notes.', lastActiveAt: '2026-07-13T18:00:00Z', participantIds: [], evidenceIds: [] }] },
+      state: idle, calendarId: 'primary', client: { createTaskEvent, updateTaskEvent }, save,
+      now: Date.parse('2026-07-13T18:08:00Z'),
+      activeHorizonMs: 60_000,
+    });
+    expect(updateTaskEvent).toHaveBeenLastCalledWith('primary', 'event-1', expect.objectContaining({ summary: 'Sync the current task summary into calendar notes.', endAt: '2026-07-13T18:06:00.000Z' }));
     const rolling = await syncInferredTaskEvents({
       snapshot: { version: 3, generatedAt: '2026-07-13T18:10:00Z', sourceWatermark: 'b', tasks: [{ id: 'task-1', title: 'Improve Squirl task visibility', lastActiveAt: '2026-07-13T18:09:00Z', participantIds: [], evidenceIds: [] }] },
-      state: idle, calendarId: 'primary', client: { createTaskEvent, updateTaskEvent }, save,
+      state: summarized, calendarId: 'primary', client: { createTaskEvent, updateTaskEvent }, save,
       now: Date.parse('2026-07-13T18:10:00Z'),
       activeHorizonMs: 60_000,
     });
