@@ -9,5 +9,6 @@ interface Window {
   squirlDesktop?: {
     version: () => Promise<string>;
     selectPath: (options?: { directories?: boolean }) => Promise<string | null>;
+    openExternal: (url: string) => Promise<void>;
   };
 }

@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { SquirlConfig } from '../config.js';
+import type { AgentProfile, SquirlConfig } from '../config.js';
 import type { SelectedModel } from '../components/ModelPicker.js';
 import type { EffortLevel, Message } from '../types.js';
-import type { AppState, ChatEvent, ContextFileSummary, ParticipantContextPreview, RuntimeStatus, ToolApprovalRequest, EvalEvent, EvalRunRequest, HistoryEntry, JudgeSummary } from './types.js';
+import type { AppState, ChatAccepted, ChatEvent, ContextFileSummary, ParticipantContextPreview, RuntimeStatus, ToolApprovalRequest, EvalEvent, EvalRunRequest, HistoryEntry, JudgeSummary } from './types.js';
 import type { AgentKind, Participant } from '../agents/types.js';
+import type { AgentInteractionRequest, AgentInteractionResponse, ClaudePermissionMode, CodexSandbox, PiToolMode } from '../agents/types.js';
 import type { CommandDescriptor, CommandSurface } from '../commands/registry.js';
 import { PARTICIPANT_COLOR_VALUE, SQUIRL_PARTICIPANT, USER_PARTICIPANT, addressedParticipantLabel, buildRegistry, resolveParticipant, roomMembers } from '../agents/participants.js';
 import { EvalDashboard } from './EvalDashboard.js';
@@ -16,13 +17,17 @@ import { parseMemoryLookup } from './memory-lookup.js';
 import { restoredChatScrollTop, type ChatViewportSnapshot } from './chat-viewport.js';
 import { groupMessageTurns } from '../tool-activity.js';
 import { ToolActivityView } from './ToolActivityView.js';
-import { chatActivityLabel } from './chat-activity.js';
+import { participantActivityLabel } from './chat-activity.js';
 import { CurrentTasks, RoomSidebarRoster } from './RoomSidebarRoster.js';
 import { defaultUiState, type UiStatePatch, type UiStateV1 } from './ui-state.js';
 import { ParticipantIdentity } from './ParticipantIdentity.js';
+import { AcornIcon } from './ParticipantIcon.js';
+import { PresentationOverview } from './PresentationOverview.js';
+import type { TaskActivityState } from '../tasks/types.js';
+import { consumeChatEventStream } from './chat-stream.js';
 import './styles.css';
 
-const API_BASE = import.meta.env.VITE_SQUIRL_API_BASE || window.location.origin;
+const API_BASE = import.meta.env.VITE_SQUIRL_API_BASE || (typeof window === 'undefined' ? '' : window.location.origin);
 
 const PROVIDERS = [
   { id: 'anthropic', label: 'Anthropic', models: ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'] },
@@ -84,6 +89,8 @@ function SettingsPanel({
   onDetectLocal: (url: string) => Promise<void>;
 }) {
   const [draft, setDraft] = useState<SquirlConfig>(state.config);
+  const [calendarBusy, setCalendarBusy] = useState(false);
+  const [calendarError, setCalendarError] = useState('');
   useEffect(() => setDraft(state.config), [state.config]);
 
   const updateIndex = (patch: Partial<NonNullable<SquirlConfig['index']>>) => {
@@ -147,6 +154,36 @@ function SettingsPanel({
         Mouse scroll lines
         <input type="number" min="1" max="30" value={draft.mouseScrollLines ?? 5} onChange={(event) => setDraft({ ...draft, mouseScrollLines: Number(event.target.value) })} />
       </label>
+
+      <div className="divider" />
+      <div className="calendarSettingsCard">
+        <h3>Google Calendar</h3>
+        <p className="hint">Squirl reads selected calendars and, when enabled below, writes only its own inferred-task events. OAuth credentials stay outside app state.</p>
+        <label className="check"><input type="checkbox" checked={draft.calendar?.enabled ?? false} onChange={(event) => setDraft({ ...draft, calendar: { ...draft.calendar, enabled: event.target.checked, refreshMinutes: 5 } })}/>Enable calendar tasks</label>
+        <label>Installed-app OAuth client ID<input value={draft.calendar?.googleClientId ?? ''} onChange={(event) => setDraft({ ...draft, calendar: { ...draft.calendar, googleClientId: event.target.value, refreshMinutes: 5 } })} placeholder="…apps.googleusercontent.com" /></label>
+        <div className="inline">
+          {(!state.taskActivity.calendar.connected || (draft.calendar?.syncInferredTasks && !state.taskActivity.calendar.canWrite)) ? <button disabled={calendarBusy || (!draft.calendar?.googleClientId?.trim() && !state.taskActivity.calendar.clientConfigured)} onClick={() => {
+            setCalendarBusy(true); setCalendarError('');
+            const next = { ...draft, calendar: { ...draft.calendar, enabled: true, refreshMinutes: 5 } };
+            void onSave(next).then(async () => {
+              const result = await api<{ authorizationUrl: string }>('/api/calendar/oauth/start');
+              if (window.squirlDesktop) await window.squirlDesktop.openExternal(result.authorizationUrl);
+              else window.location.assign(result.authorizationUrl);
+            }).catch((error) => setCalendarError(error instanceof Error ? error.message : String(error))).finally(() => setCalendarBusy(false));
+          }}>{calendarBusy ? 'Connecting…' : state.taskActivity.calendar.connected ? 'Reconnect for task sync' : 'Sign in with Google'}</button> : <><span className="calendarConnected">Signed in{state.taskActivity.calendar.profile ? ` · ${state.taskActivity.calendar.profile.email}` : ''}</span><button disabled={calendarBusy} onClick={() => { setCalendarBusy(true); void api('/api/calendar/disconnect', { method: 'POST' }).finally(() => setCalendarBusy(false)); }}>Sign out</button><button disabled={calendarBusy} onClick={() => { setCalendarBusy(true); void api('/api/calendar/refresh', { method: 'POST' }).catch((error) => setCalendarError(error instanceof Error ? error.message : String(error))).finally(() => setCalendarBusy(false)); }}>Refresh now</button></>}
+        </div>
+        {calendarError && <p className="errorText">{calendarError}</p>}
+        {state.taskActivity.calendar.connected && <fieldset className="calendarChoices"><legend>Included calendars</legend>{state.taskActivity.calendar.calendars.map((calendar) => <label className="check" key={calendar.id}><input type="checkbox" checked={(draft.calendar?.selectedCalendarIds ?? state.taskActivity.calendar.calendars.filter((item) => item.selected).map((item) => item.id)).includes(calendar.id)} onChange={(event) => {
+          const selected = new Set(draft.calendar?.selectedCalendarIds ?? state.taskActivity.calendar.calendars.filter((item) => item.selected).map((item) => item.id));
+          if (event.target.checked) selected.add(calendar.id); else selected.delete(calendar.id);
+          const ids = [...selected]; setDraft({ ...draft, calendar: { ...draft.calendar, enabled: true, selectedCalendarIds: ids, refreshMinutes: 5 } });
+          void api('/api/calendar/selection', { method: 'POST', body: JSON.stringify({ calendarIds: ids }) });
+        }}/>{calendar.summary}{calendar.primary ? ' (primary)' : ''}</label>)}</fieldset>}
+        {state.taskActivity.calendar.connected && <>
+          <label className="check"><input type="checkbox" checked={draft.calendar?.syncInferredTasks ?? false} onChange={(event) => setDraft({ ...draft, calendar: { ...draft.calendar, enabled: true, syncInferredTasks: event.target.checked, refreshMinutes: 5 } })}/>Add inferred active tasks to Google Calendar</label>
+          {draft.calendar?.syncInferredTasks && <label>Task event calendar<select value={draft.calendar.taskWriteCalendarId ?? state.taskActivity.calendar.calendars.find((calendar) => calendar.primary)?.id ?? ''} onChange={(event) => setDraft({ ...draft, calendar: { ...draft.calendar, taskWriteCalendarId: event.target.value } })}>{state.taskActivity.calendar.calendars.map((calendar) => <option key={calendar.id} value={calendar.id}>{calendar.summary}{calendar.primary ? ' (primary)' : ''}</option>)}</select></label>}
+        </>}
+      </div>
 
       <div className="divider" />
 
@@ -220,7 +257,7 @@ function SettingsPanel({
       <div className="divider" />
 
       <h3>Remote agents</h3>
-      <p className="hint">Use the Agents command surface to add Claude Code or Codex CLI, choose its model and effort, and connect it to the room.</p>
+      <p className="hint">Use the Agents command surface to add Claude Code, Codex CLI, or PI, choose its model and effort, and connect it to the room.</p>
 
       <label className="check">
         <input type="checkbox" checked={draft.agents?.autoHandoff ?? false} onChange={(event) => updateAgents({ autoHandoff: event.target.checked })} />
@@ -234,7 +271,7 @@ function SettingsPanel({
 
       <label>
         Default Claude permission mode
-        <select value={draft.agents?.defaultClaudePermissionMode ?? 'default'} onChange={(event) => updateAgents({ defaultClaudePermissionMode: event.target.value as NonNullable<SquirlConfig['agents']>['defaultClaudePermissionMode'] })}>
+        <select value={draft.agents?.defaultClaudePermissionMode ?? 'acceptEdits'} onChange={(event) => updateAgents({ defaultClaudePermissionMode: event.target.value as NonNullable<SquirlConfig['agents']>['defaultClaudePermissionMode'] })}>
           <option value="default">default (asks before edits/commands)</option>
           <option value="acceptEdits">acceptEdits</option>
           <option value="plan">plan</option>
@@ -244,10 +281,18 @@ function SettingsPanel({
 
       <label>
         Default Codex sandbox
-        <select value={draft.agents?.defaultCodexSandbox ?? 'read-only'} onChange={(event) => updateAgents({ defaultCodexSandbox: event.target.value as NonNullable<SquirlConfig['agents']>['defaultCodexSandbox'] })}>
+        <select value={draft.agents?.defaultCodexSandbox ?? 'workspace-write'} onChange={(event) => updateAgents({ defaultCodexSandbox: event.target.value as NonNullable<SquirlConfig['agents']>['defaultCodexSandbox'] })}>
           <option value="read-only">read-only</option>
           <option value="workspace-write">workspace-write</option>
           <option value="danger-full-access">danger-full-access (dangerous)</option>
+        </select>
+      </label>
+
+      <label>
+        Default PI tool mode
+        <select value={draft.agents?.defaultPiToolMode ?? 'coding'} onChange={(event) => updateAgents({ defaultPiToolMode: event.target.value as PiToolMode })}>
+          <option value="coding">coding (unsandboxed read, bash, edit, write)</option>
+          <option value="read-only">read-only (read, grep, find, ls)</option>
         </select>
       </label>
 
@@ -259,6 +304,11 @@ function SettingsPanel({
       <label>
         codex binary
         <input value={draft.agents?.codexBin ?? ''} onChange={(event) => updateAgents({ codexBin: event.target.value || undefined })} placeholder="codex" />
+      </label>
+
+      <label>
+        pi binary
+        <input value={draft.agents?.piBin ?? ''} onChange={(event) => updateAgents({ piBin: event.target.value || undefined })} placeholder="pi" />
       </label>
     </section>
   );
@@ -445,10 +495,112 @@ function DirectoryPicker({ initialPath, workspacePath, onChoose, onClose }: {
   </div>;
 }
 
-function AgentPanel({ participants, defaultCwd, onAdd, onStop, initialState, onStateChange }: {
-  participants: Participant[];
+interface AgentEditValues {
+  name?: string;
+  model?: string | null;
+  effort?: EffortLevel | null;
+  cwd?: string;
+  permissionMode?: ClaudePermissionMode;
+  sandbox?: CodexSandbox;
+  piToolMode?: PiToolMode;
+}
+
+function agentKindLabel(kind: Participant['kind']): string {
+  if (kind === 'claude-code') return 'Claude Code';
+  if (kind === 'codex') return 'Codex CLI';
+  if (kind === 'pi') return 'PI Agent';
+  return kind;
+}
+
+export function nextClaudePermissionMode(mode: ClaudePermissionMode): ClaudePermissionMode {
+  if (mode === 'default') return 'acceptEdits';
+  if (mode === 'acceptEdits') return 'plan';
+  return 'default';
+}
+
+export function nextCodexSandbox(sandbox: CodexSandbox): CodexSandbox {
+  return sandbox === 'read-only' ? 'workspace-write' : 'read-only';
+}
+
+export function isAgentModeCycleShortcut(event: Pick<KeyboardEvent, 'key' | 'shiftKey' | 'altKey' | 'ctrlKey' | 'metaKey'>): boolean {
+  return event.key === 'Tab' && event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
+}
+
+function agentModeLabel(kind: Participant['kind'], permissionMode?: ClaudePermissionMode, sandbox?: CodexSandbox): string | null {
+  if (kind === 'claude-code') {
+    if (permissionMode === 'plan') return 'Plan';
+    if (permissionMode === 'bypassPermissions') return 'Bypass permissions';
+    if (permissionMode === 'default') return 'Manual';
+    return 'Accept edits';
+  }
+  if (kind === 'codex') {
+    if (sandbox === 'read-only') return 'Read only';
+    if (sandbox === 'danger-full-access') return 'Full access';
+    return 'Workspace write';
+  }
+  return null;
+}
+
+export function AgentEditForm({ participant, profile, defaultCwd, agentModels, agentModelsLoading, onSave, onCancel }: {
+  participant: Participant;
+  profile?: AgentProfile;
   defaultCwd: string;
-  onAdd: (kind: AgentKind, options: { id?: string; model?: string; effort?: EffortLevel; cwd?: string }) => Promise<void>;
+  agentModels: Array<{ id: string; label: string }>;
+  agentModelsLoading: boolean;
+  onSave: (values: AgentEditValues) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState(participant.id);
+  const [model, setModel] = useState(profile?.model ?? '');
+  const [effort, setEffort] = useState<EffortLevel | ''>(profile?.effort ?? '');
+  const [cwd, setCwd] = useState(profile?.cwd ?? participant.cwd ?? defaultCwd);
+  const [permissionMode, setPermissionMode] = useState<ClaudePermissionMode>(profile?.permissionMode ?? 'acceptEdits');
+  const [sandbox, setSandbox] = useState<CodexSandbox>(profile?.sandbox ?? 'workspace-write');
+  const [piToolMode, setPiToolMode] = useState<PiToolMode>(profile?.piToolMode ?? 'coding');
+  const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const kindLabel = agentKindLabel(participant.kind);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await onSave({
+        name: name.trim(),
+        model: model.trim() || null,
+        effort: effort || null,
+        cwd: cwd.trim() || defaultCwd,
+        ...(participant.kind === 'claude-code' ? { permissionMode } : {}),
+        ...(participant.kind === 'codex' ? { sandbox } : {}),
+        ...(participant.kind === 'pi' ? { piToolMode } : {}),
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return <form className="agentEditForm" onSubmit={(event) => { event.preventDefault(); void save().catch(() => undefined); }}>
+    <header><strong>Edit @{participant.id}</strong><span>{kindLabel} · reconnects when saved</span></header>
+    <div className="agentFields">
+      <label className="agentCwdField">Project / working directory<div className="agentCwdInput"><input value={cwd} onChange={(event) => setCwd(event.target.value)} spellCheck={false} /><button type="button" onClick={() => setDirectoryPickerOpen(true)}>Browse…</button></div></label>
+      <label>Room name<input value={name} onChange={(event) => setName(event.target.value)} required /></label>
+      <label>Model<select value={model} disabled={agentModelsLoading} onChange={(event) => setModel(event.target.value)}><option value="">CLI default</option>{model && !agentModels.some((option) => option.id === model) && <option value={model}>{model}</option>}{agentModels.map((option) => <option key={option.id} value={option.id}>{option.label} ({option.id})</option>)}</select></label>
+      <label>{participant.kind === 'pi' ? 'Thinking' : 'Effort'}<select value={effort} onChange={(event) => setEffort(event.target.value as EffortLevel | '')}><option value="">CLI default</option>{participant.kind === 'pi' && <><option value="off">off</option><option value="minimal">minimal</option></>}<option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
+      {participant.kind === 'claude-code' && <label>Permission mode<select value={permissionMode} onChange={(event) => setPermissionMode(event.target.value as ClaudePermissionMode)}><option value="default">Manual — ask before writes and commands</option><option value="acceptEdits">Accept edits — write files automatically</option><option value="plan">Plan — read only</option><option value="bypassPermissions">Bypass permissions — dangerous</option></select><small>Shift+Tab cycles Manual, Accept edits, and Plan from the composer.</small></label>}
+      {participant.kind === 'codex' && <label>File access<select value={sandbox} onChange={(event) => setSandbox(event.target.value as CodexSandbox)}><option value="read-only">Read only</option><option value="workspace-write">Workspace write — selected project only</option><option value="danger-full-access">Full machine access — dangerous</option></select><small>Controls the sandbox used when Codex reconnects.</small></label>}
+      {participant.kind === 'pi' && <label>Tool access<select value={piToolMode} onChange={(event) => setPiToolMode(event.target.value as PiToolMode)}><option value="coding">coding (unsandboxed)</option><option value="read-only">read-only</option></select><small>PI does not provide permission prompts or a sandbox.</small></label>}
+    </div>
+    {directoryPickerOpen && <DirectoryPicker initialPath={cwd || defaultCwd} workspacePath={defaultCwd} onChoose={(path) => { setCwd(path); setDirectoryPickerOpen(false); }} onClose={() => setDirectoryPickerOpen(false)} />}
+    <footer><button type="button" onClick={onCancel} disabled={saving}>Cancel</button><button className="primary" type="submit" disabled={saving || !name.trim()}>{saving ? 'Saving…' : 'Save & reconnect'}</button></footer>
+  </form>;
+}
+
+export function AgentPanel({ participants, profiles, selectedAgentId, defaultCwd, onAdd, onUpdate, onStop, initialState, onStateChange }: {
+  participants: Participant[];
+  profiles: AgentProfile[];
+  selectedAgentId: string | null;
+  defaultCwd: string;
+  onAdd: (kind: AgentKind, options: { id?: string; model?: string; effort?: EffortLevel; cwd?: string; permissionMode?: ClaudePermissionMode; sandbox?: CodexSandbox; piToolMode?: PiToolMode }) => Promise<void>;
+  onUpdate: (id: string, values: AgentEditValues) => Promise<{ id: string }>;
   onStop: (id: string) => Promise<void>;
   initialState: UiStateV1['agent']; onStateChange: (state: UiStateV1['agent']) => void;
 }) {
@@ -457,15 +609,26 @@ function AgentPanel({ participants, defaultCwd, onAdd, onStop, initialState, onS
   const [model, setModel] = useState(initialState.model);
   const [effort, setEffort] = useState<EffortLevel | ''>(initialState.effort);
   const [cwd, setCwd] = useState(initialState.cwd || defaultCwd);
+  const [permissionMode, setPermissionMode] = useState<ClaudePermissionMode>(initialState.permissionMode);
+  const [sandbox, setSandbox] = useState<CodexSandbox>(initialState.sandbox);
+  const [piToolMode, setPiToolMode] = useState<PiToolMode>(initialState.piToolMode);
   const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const [codexModels, setCodexModels] = useState<Array<{ id: string; label: string }>>([]);
   const [codexModelsLoading, setCodexModelsLoading] = useState(false);
   const [codexModelsError, setCodexModelsError] = useState('');
-  const agents = participants.filter((participant) => participant.kind === 'claude-code' || participant.kind === 'codex');
-  useEffect(() => onStateChange({ kind, id, model, effort, cwd }), [kind, id, model, effort, cwd, onStateChange]);
+  const [claudeModels, setClaudeModels] = useState<Array<{ id: string; label: string }>>([]);
+  const [claudeModelsLoading, setClaudeModelsLoading] = useState(false);
+  const [claudeModelsError, setClaudeModelsError] = useState('');
+  const [piModels, setPiModels] = useState<Array<{ id: string; label: string }>>([]);
+  const [piModelsLoading, setPiModelsLoading] = useState(false);
+  const [piModelsError, setPiModelsError] = useState('');
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const agents = participants.filter((participant) => participant.kind === 'claude-code' || participant.kind === 'codex' || participant.kind === 'pi');
+  const editingParticipant = agents.find((participant) => participant.id === editingId);
+  useEffect(() => onStateChange({ kind, id, model, effort, cwd, permissionMode, sandbox, piToolMode }), [kind, id, model, effort, cwd, permissionMode, sandbox, piToolMode, onStateChange]);
   useEffect(() => {
-    if (kind !== 'codex') return;
+    if (kind !== 'codex' && editingParticipant?.kind !== 'codex') return;
     let cancelled = false;
     setCodexModelsLoading(true);
     setCodexModelsError('');
@@ -482,7 +645,35 @@ function AgentPanel({ participants, defaultCwd, onAdd, onStop, initialState, onS
       })
       .finally(() => { if (!cancelled) setCodexModelsLoading(false); });
     return () => { cancelled = true; };
-  }, [kind]);
+  }, [kind, editingParticipant?.kind]);
+  useEffect(() => {
+    if (kind !== 'pi' && editingParticipant?.kind !== 'pi') return;
+    let cancelled = false;
+    setPiModelsLoading(true);
+    setPiModelsError('');
+    void api<{ models: Array<{ id: string; label: string }> }>('/api/agents/models?kind=pi')
+      .then((result) => { if (!cancelled) setPiModels(result.models); })
+      .catch((error) => { if (!cancelled) setPiModelsError(error instanceof Error ? error.message : String(error)); })
+      .finally(() => { if (!cancelled) setPiModelsLoading(false); });
+    return () => { cancelled = true; };
+  }, [kind, editingParticipant?.kind]);
+  useEffect(() => {
+    if (kind !== 'claude-code' && editingParticipant?.kind !== 'claude-code') return;
+    let cancelled = false;
+    setClaudeModelsLoading(true);
+    setClaudeModelsError('');
+    void api<{ models: Array<{ id: string; label: string }> }>('/api/agents/models?kind=claude-code')
+      .then((result) => { if (!cancelled) setClaudeModels(result.models); })
+      .catch((error) => {
+        if (!cancelled) setClaudeModelsError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => { if (!cancelled) setClaudeModelsLoading(false); });
+    return () => { cancelled = true; };
+  }, [kind, editingParticipant?.kind]);
+  useEffect(() => {
+    if (!selectedAgentId) return;
+    document.getElementById(`agent-row-${selectedAgentId}`)?.scrollIntoView({ block: 'nearest' });
+  }, [selectedAgentId]);
 
   const add = async () => {
     setAdding(true);
@@ -492,6 +683,9 @@ function AgentPanel({ participants, defaultCwd, onAdd, onStop, initialState, onS
         ...(model.trim() ? { model: model.trim() } : {}),
         ...(effort ? { effort } : {}),
         cwd: cwd.trim() || defaultCwd,
+        ...(kind === 'claude-code' ? { permissionMode } : {}),
+        ...(kind === 'codex' ? { sandbox } : {}),
+        ...(kind === 'pi' ? { piToolMode } : {}),
       });
       setId('');
     } catch {
@@ -508,31 +702,47 @@ function AgentPanel({ participants, defaultCwd, onAdd, onStop, initialState, onS
       <div className="agentKindChoices">
         <button className={kind === 'claude-code' ? 'selected' : ''} onClick={() => { setKind('claude-code'); setModel(''); }}><strong>Claude Code</strong><span>Use the local <code>claude</code> CLI</span></button>
         <button className={kind === 'codex' ? 'selected' : ''} onClick={() => { setKind('codex'); setModel(''); }}><strong>Codex CLI</strong><span>Use the local <code>codex</code> CLI</span></button>
+        <button className={kind === 'pi' ? 'selected' : ''} onClick={() => { setKind('pi'); setModel(''); }}><strong>PI Agent</strong><span>Use the local <code>pi</code> CLI over RPC</span></button>
       </div>
       <div className="agentFields">
         <label className="agentCwdField">Project / working directory<div className="agentCwdInput"><input value={cwd} onChange={(event) => setCwd(event.target.value)} placeholder={defaultCwd} spellCheck={false} /><button type="button" onClick={() => setDirectoryPickerOpen(true)}>Browse…</button></div><small>Choose a folder, or enter an absolute, <code>~/…</code>, or workspace-relative path.</small></label>
-        <label>Room name<input value={id} onChange={(event) => setId(event.target.value)} placeholder={kind === 'claude-code' ? 'cc' : 'codex'} /></label>
-        {kind === 'codex'
-          ? <label>Model<select value={model} disabled={codexModelsLoading || codexModels.length === 0} onChange={(event) => setModel(event.target.value)}>
-              {codexModelsLoading && <option value="">Loading Codex models…</option>}
-              {!codexModelsLoading && codexModels.length === 0 && <option value="">No Codex models available</option>}
-              {codexModels.map((option) => <option key={option.id} value={option.id}>{option.label} ({option.id})</option>)}
-            </select>{codexModelsError && <small className="directoryError">{codexModelsError}</small>}</label>
-          : <label>Model<input value={model} onChange={(event) => setModel(event.target.value)} placeholder="fable (optional)" /></label>}
-        <label>Effort<select value={effort} onChange={(event) => setEffort(event.target.value as EffortLevel | '')}><option value="">CLI default</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
+        <label>Room name<input value={id} onChange={(event) => setId(event.target.value)} placeholder={kind === 'claude-code' ? 'cc' : kind === 'codex' ? 'codex' : 'pi'} /></label>
+        <label>Model<select value={model} disabled={kind === 'codex' ? codexModelsLoading || codexModels.length === 0 : kind === 'claude-code' ? claudeModelsLoading || claudeModels.length === 0 : piModelsLoading} onChange={(event) => setModel(event.target.value)}>
+          <option value="">{(kind === 'codex' ? codexModelsLoading : kind === 'claude-code' ? claudeModelsLoading : piModelsLoading) ? `Loading ${kind === 'codex' ? 'Codex' : kind === 'claude-code' ? 'Claude' : 'PI'} models…` : 'CLI default'}</option>
+          {(kind === 'codex' ? codexModels : kind === 'claude-code' ? claudeModels : piModels).map((option) => <option key={option.id} value={option.id}>{option.label} ({option.id})</option>)}
+        </select>{(kind === 'codex' ? codexModelsError : kind === 'claude-code' ? claudeModelsError : piModelsError) && <small className="directoryError">{kind === 'codex' ? codexModelsError : kind === 'claude-code' ? claudeModelsError : piModelsError}</small>}</label>
+        <label>{kind === 'pi' ? 'Thinking' : 'Effort'}<select value={effort} onChange={(event) => setEffort(event.target.value as EffortLevel | '')}><option value="">CLI default</option>{kind === 'pi' && <><option value="off">off</option><option value="minimal">minimal</option></>}<option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
+        {kind === 'claude-code' && <label>Permission mode<select value={permissionMode} onChange={(event) => setPermissionMode(event.target.value as ClaudePermissionMode)}><option value="default">Manual — ask before writes and commands</option><option value="acceptEdits">Accept edits — write files automatically</option><option value="plan">Plan — read only</option><option value="bypassPermissions">Bypass permissions — dangerous</option></select><small>Shift+Tab cycles the three safe modes after the agent joins.</small></label>}
+        {kind === 'codex' && <label>File access<select value={sandbox} onChange={(event) => setSandbox(event.target.value as CodexSandbox)}><option value="read-only">Read only</option><option value="workspace-write">Workspace write — selected project only</option><option value="danger-full-access">Full machine access — dangerous</option></select><small>Workspace write is limited to the selected project.</small></label>}
+        {kind === 'pi' && <label>Tool access<select value={piToolMode} onChange={(event) => setPiToolMode(event.target.value as PiToolMode)}><option value="coding">coding (unsandboxed)</option><option value="read-only">read-only</option></select><small>PI has no native permission prompts or sandbox.</small></label>}
       </div>
       {directoryPickerOpen && <DirectoryPicker initialPath={cwd || defaultCwd} workspacePath={defaultCwd} onChoose={(path) => { setCwd(path); setDirectoryPickerOpen(false); }} onClose={() => setDirectoryPickerOpen(false)} />}
-      <button className="primary agentAddButton" disabled={adding || (kind === 'codex' && (codexModelsLoading || !model))} onClick={() => void add()}>{adding ? 'Adding…' : `Add ${kind === 'claude-code' ? 'Claude Code' : 'Codex CLI'}`}</button>
+      <button className="primary agentAddButton" disabled={adding || (kind === 'codex' && (codexModelsLoading || !model))} onClick={() => void add()}>{adding ? 'Adding…' : `Add ${agentKindLabel(kind)}`}</button>
     </section>
     <section className="connectedAgents">
       <h3>Connected agents</h3>
       {agents.length === 0 && <p className="muted">No CLI agents are connected.</p>}
-      {agents.map((participant) => <div className="rosterRow" key={participant.id}>
-        <ParticipantIdentity participant={participant} text={participant.label} className="rosterName" />
-        <code>@{participant.id}</code>
-        <span className="rosterMeta" title={participant.cwd}>{participant.kind === 'claude-code' ? 'Claude Code' : 'Codex CLI'} · {participant.status ?? 'ready'}{participant.cwd ? ` · ${participant.cwd}` : ''}</span>
-        <button onClick={() => void onStop(participant.id).catch(() => {})}>Stop</button>
-      </div>)}
+      {agents.map((participant) => {
+        const profile = profiles.find((candidate) => candidate.id?.toLowerCase() === participant.id.toLowerCase());
+        return <div className={`agentRosterItem${selectedAgentId === participant.id ? ' selected' : ''}`} id={`agent-row-${participant.id}`} key={participant.id}>
+          <div className="rosterRow">
+            <ParticipantIdentity participant={participant} text={participant.label} className="rosterName" />
+            <code>@{participant.id}</code>
+            <span className="rosterMeta" title={participant.cwd}>{agentKindLabel(participant.kind)} · {participant.status ?? 'ready'}{participant.cwd ? ` · ${participant.cwd}` : ''}</span>
+            <button onClick={() => setEditingId((current) => current === participant.id ? null : participant.id)}>{editingId === participant.id ? 'Close edit' : 'Edit'}</button>
+            <button onClick={() => void onStop(participant.id).catch(() => {})}>Stop</button>
+          </div>
+          {editingId === participant.id && <AgentEditForm
+            participant={participant}
+            profile={profile}
+            defaultCwd={defaultCwd}
+            agentModels={participant.kind === 'codex' ? codexModels : participant.kind === 'pi' ? piModels : claudeModels}
+            agentModelsLoading={participant.kind === 'codex' ? codexModelsLoading : participant.kind === 'pi' ? piModelsLoading : claudeModelsLoading}
+            onCancel={() => setEditingId(null)}
+            onSave={async (values) => { await onUpdate(participant.id, values); setEditingId(null); }}
+          />}
+        </div>;
+      })}
     </section>
   </div>;
 }
@@ -563,11 +773,7 @@ function MessageView({ message, showThinking, registry, rewindCandidate, rewindS
       {showMeta && <div className="messageMeta">
         <span className={isSquirl ? 'squirlLabel' : undefined} style={labelColor ? { color: labelColor, fontWeight: 600 } : undefined}>
           {isSquirl && (
-            <svg className="squirlAcorn" viewBox="0 0 16 16" aria-label="acorn" role="img">
-              <path className="squirlAcornStem" d="M9.2 3.9c.1-1.2.8-2 2-2.6" />
-              <path className="squirlAcornCap" d="M3.2 6.6c.6-2.4 2.6-3.8 5.3-3.8 2.6 0 4.5 1.4 5.1 3.8-2.9 1.3-7.4 1.3-10.4 0Z" />
-              <path className="squirlAcornNut" d="M4.2 7.5c.5 3.9 2.1 6.4 4.3 6.4s3.8-2.5 4.2-6.4c-2.5.8-6 .8-8.5 0Z" />
-            </svg>
+            <AcornIcon className="squirlAcorn" />
           )}
           {messageLabel(message, registry)}
         </span>
@@ -587,11 +793,7 @@ function MessageView({ message, showThinking, registry, rewindCandidate, rewindS
 
 function ChatActivity({ label }: { label: string }) {
   return <div className="chatActivity" role="status" aria-live="polite">
-    <svg className="chatActivityAcorn" viewBox="0 0 16 16" aria-hidden="true">
-      <path className="squirlAcornStem" d="M9.2 3.9c.1-1.2.8-2 2-2.6" />
-      <path className="squirlAcornCap" d="M3.2 6.6c.6-2.4 2.6-3.8 5.3-3.8 2.6 0 4.5 1.4 5.1 3.8-2.9 1.3-7.4 1.3-10.4 0Z" />
-      <path className="squirlAcornNut" d="M4.2 7.5c.5 3.9 2.1 6.4 4.3 6.4s3.8-2.5 4.2-6.4c-2.5.8-6 .8-8.5 0Z" />
-    </svg>
+    <AcornIcon className="chatActivityAcorn" />
     <span>{label}</span>
   </div>;
 }
@@ -628,6 +830,59 @@ function ApprovalModal({ request, onRespond }: {
       </div>
     </div>
   );
+}
+
+export function GoogleSignInModal({ clientConfigured, onSignIn, onDismiss }: { clientConfigured: boolean; onSignIn: (clientId?: string) => Promise<void>; onDismiss: () => void }) {
+  const [clientId, setClientId] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  return <div className="modalShade"><div className="modal googleSignInModal" role="dialog" aria-modal="true" aria-labelledby="google-sign-in-title">
+    <div className="googleMark" aria-hidden="true">G</div>
+    <h2 id="google-sign-in-title">Connect Squirl to Google</h2>
+    <p>Sign in to create your local Squirl session and connect the calendars you choose.</p>
+    <ul><li>See upcoming calendar events in Current tasks</li><li>Choose calendars after signing in</li><li>Optionally create and update only Squirl-owned inferred-task events</li></ul>
+    {!clientConfigured && <label>Installed-app OAuth client ID<input value={clientId} onChange={(event) => setClientId(event.target.value)} placeholder="…apps.googleusercontent.com" autoFocus /></label>}
+    {error && <p className="errorText">{error}</p>}
+    <footer><button onClick={onDismiss}>Not now</button><button className="primary googleSignInButton" disabled={busy || (!clientConfigured && !clientId.trim())} onClick={() => { setBusy(true); setError(''); void onSignIn(clientId.trim() || undefined).catch((value) => setError(value instanceof Error ? value.message : String(value))).finally(() => setBusy(false)); }}>{busy ? 'Opening Google…' : 'Sign in with Google'}</button></footer>
+  </div></div>;
+}
+
+export function CalendarSelectionModal({ activity, onSave, onLater }: { activity: TaskActivityState['calendar']; onSave: (ids: string[]) => Promise<void>; onLater: () => void }) {
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(activity.calendars.filter((calendar) => calendar.selected || calendar.primary).map((calendar) => calendar.id)));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => { if (selected.size === 0 && activity.calendars.length) setSelected(new Set(activity.calendars.filter((calendar) => calendar.selected || calendar.primary).map((calendar) => calendar.id))); }, [activity.calendars]);
+  return <div className="modalShade"><div className="modal googleCalendarPicker" role="dialog" aria-modal="true" aria-labelledby="calendar-picker-title">
+    <h2 id="calendar-picker-title">Choose calendars for Squirl</h2>
+    {activity.profile && <p className="googleAccountLine">Signed in as <strong>{activity.profile.name || activity.profile.email}</strong>{activity.profile.name && <small>{activity.profile.email}</small>}</p>}
+    <p>Select which calendars may contribute events to Current tasks.</p>
+    <div className="googleCalendarChoices">{activity.calendars.map((calendar) => <label className="check" key={calendar.id}><input type="checkbox" checked={selected.has(calendar.id)} onChange={(event) => setSelected((current) => { const next = new Set(current); if (event.target.checked) next.add(calendar.id); else next.delete(calendar.id); return next; })}/><span>{calendar.summary}{calendar.primary ? <small>Primary</small> : null}</span></label>)}</div>
+    {activity.calendars.length === 0 && <p className="muted">{activity.status === 'refreshing' ? 'Loading your calendars…' : 'Calendars are temporarily unavailable. You can choose them later in Settings.'}</p>}
+    {error && <p className="errorText">{error}</p>}
+    <footer><button onClick={onLater}>Choose later</button><button className="primary" disabled={busy || selected.size === 0} onClick={() => { setBusy(true); setError(''); void onSave([...selected]).catch((value) => setError(value instanceof Error ? value.message : String(value))).finally(() => setBusy(false)); }}>{busy ? 'Saving…' : 'Use selected calendars'}</button></footer>
+  </div></div>;
+}
+
+function AgentInteractionModal({ participantId, request, onRespond }: {
+  participantId: string;
+  request: AgentInteractionRequest;
+  onRespond: (response: AgentInteractionResponse) => Promise<void>;
+}) {
+  const [value, setValue] = useState(request.method === 'editor' ? request.prefill ?? '' : '');
+  return <div className="modalShade">
+    <div className="modal agentInteractionModal">
+      <h2>{request.title || `PI request from @${participantId}`}</h2>
+      {request.message && <p>{request.message}</p>}
+      {request.method === 'select' && <div className="interactionChoices">{request.options.map((option) => <button key={option} onClick={() => void onRespond({ value: option })}>{option}</button>)}</div>}
+      {request.method === 'input' && <input autoFocus value={value} placeholder={request.placeholder} onChange={(event) => setValue(event.target.value)} />}
+      {request.method === 'editor' && <textarea autoFocus value={value} onChange={(event) => setValue(event.target.value)} />}
+      <footer>
+        <button onClick={() => void onRespond({ cancelled: true })}>Cancel</button>
+        {request.method === 'confirm' && <><button onClick={() => void onRespond({ confirmed: false })}>No</button><button className="primary" onClick={() => void onRespond({ confirmed: true })}>Yes</button></>}
+        {(request.method === 'input' || request.method === 'editor') && <button className="primary" onClick={() => void onRespond({ value })}>Submit</button>}
+      </footer>
+    </div>
+  </div>;
 }
 
 function RoomRosterDropdown({ participants, onClose, onRename, onManage }: {
@@ -697,6 +952,7 @@ function App() {
   const [uiState, setUiState] = useState<UiStateV1 | null>(null);
   const [theme, setTheme] = useState<'light' | 'dark'>('dark');
   const [state, setState] = useState<AppState | null>(null);
+  const clientIdRef = useRef(crypto.randomUUID());
   const [input, setInput] = useState('');
   const [activeSurface, setActiveSurface] = useState<CommandSurface | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -714,17 +970,22 @@ function App() {
   const [evalRunSummary, setEvalRunSummary] = useState<JudgeSummary | undefined>(undefined);
   const [showThinking, setShowThinking] = useState(false);
   const [approval, setApproval] = useState<ToolApprovalRequest | null>(null);
+  const [agentInteractions, setAgentInteractions] = useState<Array<{ participantId: string; request: AgentInteractionRequest }>>([]);
   const [rosterOpen, setRosterOpen] = useState(false);
   const [recipientId, setRecipientId] = useState(SQUIRL_PARTICIPANT.id);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [recipientMenuOpen, setRecipientMenuOpen] = useState(false);
+  const [modeSwitching, setModeSwitching] = useState(false);
   const [toast, setToast] = useState('');
   const [rewindCandidates, setRewindCandidates] = useState<Array<{ label: string; preview: string; messageId: string; messageIndex: number; retainedCount: number; removedCount: number; targetMessageId: string | null }> | null>(null);
   const [rewindIndex, setRewindIndex] = useState(0);
   const [rewindConfirming, setRewindConfirming] = useState(false);
+  const [googlePromptDismissed, setGooglePromptDismissed] = useState(false);
+  const [calendarSelectionDismissed, setCalendarSelectionDismissed] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const sidebarWorkspaceRef = useRef<HTMLDivElement>(null);
   const savedChatScrollRef = useRef<ChatViewportSnapshot | null>(null);
   const stickToBottomRef = useRef(true);
   const didInitialScrollRef = useRef(false);
@@ -748,6 +1009,10 @@ function App() {
   const updateMemoryState = useCallback((next: UiStateV1['memory']) => updateUiState({ memory: next }), [updateUiState]);
   const updateModelState = useCallback((next: UiStateV1['model']) => updateUiState({ model: next }), [updateUiState]);
   const updateAgentState = useCallback((next: UiStateV1['agent']) => updateUiState({ agent: next }), [updateUiState]);
+  const focusComposer = useCallback(() => {
+    if (activeSurface) setActiveSurface(null);
+    window.requestAnimationFrame(() => composerRef.current?.focus());
+  }, [activeSurface]);
 
   async function startRewindMode() {
     if (status.isStreaming) {
@@ -836,14 +1101,38 @@ function App() {
     if (!recipients.some((participant) => participant.id === recipientId)) setRecipientId(SQUIRL_PARTICIPANT.id);
   }, [participants, recipientId]);
   const lastMessage = messages[messages.length - 1];
-  const waitingForAssistantMessage = status.isStreaming && !(
-    lastMessage?.role === 'assistant' && lastMessage.isStreaming && lastMessage.content.length > 0
-  );
-  const activityLabel = chatActivityLabel(status.pipelineStatus);
+  const work = state?.work ?? { active: [], queued: [] };
+  const selectedActivity = work.active.find((activity) => activity.participantId === recipientId);
+  const activityRows = work.active.map((activity) => {
+    const participant = participants.find((candidate) => candidate.id === activity.participantId);
+    const label = participant?.label ?? activity.participantId;
+    return { ...activity, label: participantActivityLabel(activity.participantId, label, activity.detail, status.pipelineStatus) };
+  });
   const scrollSignature = `${messages.length}:${lastMessage?.id ?? ''}:${lastMessage?.content.length ?? 0}`;
 
   const loadState = async () => {
     setState(await api<AppState>('/api/state'));
+  };
+
+  const launchGoogleSignIn = async (clientId?: string) => {
+    if (!state) throw new Error('Squirl is still loading.');
+    let current = state;
+    if (clientId || !state.config.calendar?.enabled) {
+      current = await api<AppState>('/api/config', { method: 'POST', body: JSON.stringify({
+        ...state.config,
+        calendar: { ...state.config.calendar, enabled: true, refreshMinutes: 5, ...(clientId ? { googleClientId: clientId } : {}) },
+      }) });
+      setState(current);
+    }
+    const result = await api<{ authorizationUrl: string }>('/api/calendar/oauth/start');
+    if (window.squirlDesktop) await window.squirlDesktop.openExternal(result.authorizationUrl);
+    else window.location.assign(result.authorizationUrl);
+  };
+
+  const saveCalendarSelection = async (calendarIds: string[]) => {
+    const next = await api<AppState>('/api/calendar/selection', { method: 'POST', body: JSON.stringify({ calendarIds }) });
+    setState(next);
+    setCalendarSelectionDismissed(false);
   };
 
   useEffect(() => {
@@ -858,14 +1147,13 @@ function App() {
     }).catch(() => setUiState(defaultUiState()));
   }, []);
   useEffect(() => {
-    if (status.isStreaming) return;
     const interval = window.setInterval(() => {
       void loadState().catch(() => {
         // The server may be restarting during development; keep the current UI.
       });
     }, 1500);
     return () => window.clearInterval(interval);
-  }, [status.isStreaming]);
+  }, []);
 
   const scrollToLatest = (behavior: ScrollBehavior = 'auto') => {
     const list = listRef.current;
@@ -946,60 +1234,76 @@ function App() {
     window.setTimeout(() => setToast(''), 3500);
   };
 
+  const handleChatEvent = (event: ChatEvent) => {
+    if (event.type === 'state') setState(event.state);
+    if (event.type === 'message') setState((prev) => prev ? {
+      ...prev,
+      messages: prev.messages.some((message) => message.id === event.message.id)
+        ? prev.messages.map((message) => message.id === event.message.id ? event.message : message)
+        : [...prev.messages, event.message],
+    } : prev);
+    if (event.type === 'assistant-update' || event.type === 'assistant-final') {
+      setState((prev) => prev ? {
+        ...prev,
+        messages: prev.messages.some((message) => message.id === event.message.id)
+          ? prev.messages.map((message) => message.id === event.message.id ? event.message : message)
+          : [...prev.messages, event.message],
+      } : prev);
+    }
+    if (event.type === 'token') {
+      setState((prev) => prev ? {
+        ...prev,
+        messages: prev.messages.map((message) => message.id === event.assistantId && message.role === 'assistant'
+          ? { ...message, content: message.content + event.token }
+          : message),
+      } : prev);
+    }
+    if (event.type === 'status') setState((prev) => prev ? { ...prev, status: event.status } : prev);
+    if (event.type === 'work-state') setState((prev) => prev ? { ...prev, work: event.work } : prev);
+    if (event.type === 'agent-status') {
+      setState((prev) => prev ? { ...prev, participants: prev.participants.map((participant) => participant.id === event.participantId ? { ...participant, status: event.status as Participant['status'] } : participant) } : prev);
+    }
+    if (event.type === 'task-activity') setState((prev) => prev ? { ...prev, taskActivity: event.taskActivity } : prev);
+    if (event.type === 'tool-approval') setApproval(event.request);
+    if (event.type === 'agent-interaction') setAgentInteractions((current) => [...current, { participantId: event.participantId, request: event.request }]);
+    if (event.type === 'agent-editor-prefill') {
+      setRecipientId(event.participantId);
+      setInput(event.text);
+      composerRef.current?.focus();
+    }
+    if (event.type === 'open-command') openCommandSurface(event.surface);
+    if (event.type === 'toast' || event.type === 'error') pushToast(event.message);
+  };
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let retryTimer = 0;
+    const connect = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/api/events?clientId=${encodeURIComponent(clientIdRef.current)}`, { signal: controller.signal });
+        await consumeChatEventStream(response, handleChatEvent);
+      } catch {
+        if (!controller.signal.aborted) retryTimer = window.setTimeout(() => void connect(), 500);
+      }
+    };
+    void connect();
+    return () => { controller.abort(); window.clearTimeout(retryTimer); };
+  }, []);
+
   const sendMessage = async () => {
     const message = input.trim();
-    if (!message || status.isStreaming) return;
+    if (!message) return;
     stickToBottomRef.current = true;
     setInput('');
-    const res = await fetch(`${API_BASE}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, recipientId }),
-    });
-    if (!res.body) return;
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        const event = JSON.parse(line) as ChatEvent;
-        if (event.type === 'state') setState(event.state);
-        if (event.type === 'message') setState((prev) => prev ? { ...prev, messages: [...prev.messages, event.message] } : prev);
-        if (event.type === 'assistant-update') {
-          setState((prev) => prev ? { ...prev, messages: prev.messages.map((msg) => msg.id === event.message.id ? event.message : msg) } : prev);
-        }
-        if (event.type === 'token') {
-          setState((prev) => {
-            if (!prev) return prev;
-            return {
-              ...prev,
-              messages: prev.messages.map((msg) => msg.id === event.assistantId && msg.role === 'assistant'
-                ? { ...msg, content: msg.content + event.token }
-                : msg),
-            };
-          });
-        }
-        if (event.type === 'assistant-final') {
-          setState((prev) => prev ? { ...prev, messages: prev.messages.map((msg) => msg.id === event.message.id ? event.message : msg) } : prev);
-        }
-        if (event.type === 'status') setState((prev) => prev ? { ...prev, status: event.status } : prev);
-        if (event.type === 'agent-status') {
-          setState((prev) => prev ? { ...prev, participants: prev.participants.map((p) => p.id === event.participantId ? { ...p, status: event.status as Participant['status'] } : p) } : prev);
-        }
-        if (event.type === 'task-activity') setState((prev) => prev ? { ...prev, taskActivity: event.taskActivity } : prev);
-        if (event.type === 'tool-approval') setApproval(event.request);
-        if (event.type === 'open-command') openCommandSurface(event.surface);
-        if (event.type === 'toast') pushToast(event.message);
-        if (event.type === 'error') pushToast(event.message);
-      }
+    try {
+      await api<ChatAccepted>('/api/chat', {
+        method: 'POST',
+        body: JSON.stringify({ message, recipientId, clientId: clientIdRef.current }),
+      });
+    } catch (error) {
+      setInput(message);
+      pushToast(error instanceof Error ? error.message : String(error));
     }
-    await loadState();
   };
 
   const saveConfig = async (config: SquirlConfig) => {
@@ -1007,7 +1311,7 @@ function App() {
     pushToast('Settings saved.');
   };
 
-  const addAgent = async (kind: AgentKind, options: { id?: string; model?: string; effort?: EffortLevel; cwd?: string }) => {
+  const addAgent = async (kind: AgentKind, options: { id?: string; model?: string; effort?: EffortLevel; cwd?: string; permissionMode?: ClaudePermissionMode; sandbox?: CodexSandbox; piToolMode?: PiToolMode }) => {
     try {
       const response = await api<{ state: AppState; agent: { id: string; label: string } }>('/api/agents/add', {
         method: 'POST',
@@ -1015,6 +1319,7 @@ function App() {
       });
       setState(response.state);
       setRecipientId(response.agent.id);
+      setSelectedAgentId(response.agent.id);
       pushToast(`${response.agent.label} joined the room.`);
     } catch (error) {
       pushToast(error instanceof Error ? error.message : String(error));
@@ -1022,11 +1327,66 @@ function App() {
     }
   };
 
+  const updateAgent = async (id: string, values: AgentEditValues): Promise<{ id: string }> => {
+    try {
+      const response = await api<{ state: AppState; agent: { id: string; label: string } }>('/api/agents/update', {
+        method: 'POST',
+        body: JSON.stringify({ id, ...values }),
+      });
+      setState(response.state);
+      setSelectedAgentId(response.agent.id);
+      if (recipientId === id) setRecipientId(response.agent.id);
+      pushToast(`Updated @${response.agent.id}.`);
+      return response.agent;
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+  };
+
+  const selectedAgentProfile = state?.config.agents?.defaults?.find((profile) => profile.id?.toLowerCase() === selectedRecipient.id.toLowerCase());
+  const selectedPermissionMode = selectedRecipient.kind === 'claude-code'
+    ? selectedAgentProfile?.permissionMode ?? state?.config.agents?.defaultClaudePermissionMode ?? 'acceptEdits'
+    : undefined;
+  const selectedSandbox = selectedRecipient.kind === 'codex'
+    ? selectedAgentProfile?.sandbox ?? state?.config.agents?.defaultCodexSandbox ?? 'workspace-write'
+    : undefined;
+  const selectedAgentModeLabel = agentModeLabel(selectedRecipient.kind, selectedPermissionMode, selectedSandbox);
+  const cycleSelectedAgentMode = async () => {
+    if (modeSwitching || selectedActivity || selectedRecipient.status === 'busy') return;
+    if (selectedRecipient.kind !== 'claude-code' && selectedRecipient.kind !== 'codex') return;
+    setModeSwitching(true);
+    try {
+      if (selectedRecipient.kind === 'claude-code') {
+        await updateAgent(selectedRecipient.id, { permissionMode: nextClaudePermissionMode(selectedPermissionMode ?? 'acceptEdits') });
+      } else {
+        await updateAgent(selectedRecipient.id, { sandbox: nextCodexSandbox(selectedSandbox ?? 'workspace-write') });
+      }
+      composerRef.current?.focus();
+    } finally {
+      setModeSwitching(false);
+    }
+  };
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!isAgentModeCycleShortcut(event)) return;
+      if (activeSurface || evalRunActive || rewindCandidates || (selectedRecipient.kind !== 'claude-code' && selectedRecipient.kind !== 'codex')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void cycleSelectedAgentMode();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [activeSurface, evalRunActive, rewindCandidates, selectedRecipient.id, selectedRecipient.kind, selectedRecipient.status, selectedPermissionMode, selectedSandbox, modeSwitching, selectedActivity]);
+
   const stopAgent = async (id: string) => {
     try {
       const response = await api<{ state: AppState }>('/api/agents/stop', { method: 'POST', body: JSON.stringify({ id }) });
       setState(response.state);
       if (recipientId === id) setRecipientId(SQUIRL_PARTICIPANT.id);
+      if (selectedAgentId === id) setSelectedAgentId(null);
+      setAgentInteractions((items) => items.filter((item) => item.participantId !== id));
       pushToast(`Stopped @${id}.`);
     } catch (error) {
       pushToast(error instanceof Error ? error.message : String(error));
@@ -1181,12 +1541,13 @@ function App() {
       />;
     }
     // 'context' is rendered as a chat-pane takeover (see ContextView), not in the right rail.
-    if (activeSurface === 'agent') return <AgentPanel participants={participants} defaultCwd={state.status.workingDir} onAdd={addAgent} onStop={stopAgent} initialState={uiState?.agent ?? defaultUiState().agent} onStateChange={updateAgentState}/>;
+    if (activeSurface === 'agent') return <AgentPanel participants={participants} profiles={state.config.agents?.defaults ?? []} selectedAgentId={selectedAgentId} defaultCwd={state.status.workingDir} onAdd={addAgent} onUpdate={updateAgent} onStop={stopAgent} initialState={uiState?.agent ?? defaultUiState().agent} onStateChange={updateAgentState}/>;
     if (activeSurface === 'room') return <div className="roomSurface"><h3>Participants</h3>{roomMembers(participants).map((p) => <div className="rosterRow" key={p.id}><ParticipantIdentity participant={p} text={p.label} className="rosterName"/><code>{p.kind === 'user' || p.kind === 'local-llm' ? 'local' : `@${p.id}`}</code><span>{p.status ?? 'ready'}</span></div>)}</div>;
+    if (activeSurface === 'overview') return <PresentationOverview mode="surface" onStart={focusComposer} />;
     if (activeSurface === 'system') return <pre className="systemPromptView">{systemPrompt}</pre>;
     if (activeSurface === 'help') return <div className="helpGrid">{state.commands.map((command) => <button key={command.name} onClick={() => { const surface = resolveCommandSurface(command); if (surface) openCommandSurface(surface); }}><code>{command.usage}</code><span>{command.description}</span></button>)}</div>;
     return null;
-  }, [activeSurface, state, status.selectedModel, approval, evalHistory, evalRunning, evalProgress, evalError, participants, systemPrompt, recipientId, uiState, updateEvalState, updateMemoryState, updateModelState, updateAgentState]);
+  }, [activeSurface, state, status.selectedModel, approval, evalHistory, evalRunning, evalProgress, evalError, participants, systemPrompt, recipientId, selectedAgentId, uiState, updateEvalState, updateMemoryState, updateModelState, updateAgentState, focusComposer]);
 
   const paletteMatches = useMemo(() => {
     const needle = input.slice(1).toLowerCase();
@@ -1263,11 +1624,7 @@ function App() {
   if (!state || !uiState) return (
     <main className="appShell loadingScreen" data-theme={theme}>
       <div className="emptyState" role="status" aria-label="Loading Squirl">
-        <svg className="loadingAcorn" viewBox="0 0 16 16" aria-hidden="true">
-          <path className="squirlAcornStem" d="M9.2 3.9c.1-1.2.8-2 2-2.6" />
-          <path className="squirlAcornCap" d="M3.2 6.6c.6-2.4 2.6-3.8 5.3-3.8 2.6 0 4.5 1.4 5.1 3.8-2.9 1.3-7.4 1.3-10.4 0Z" />
-          <path className="squirlAcornNut" d="M4.2 7.5c.5 3.9 2.1 6.4 4.3 6.4s3.8-2.5 4.2-6.4c-2.5.8-6 .8-8.5 0Z" />
-        </svg>
+        <AcornIcon className="loadingAcorn" />
       </div>
     </main>
   );
@@ -1280,37 +1637,38 @@ function App() {
             src={theme === 'dark' ? '/logo-dark.png' : '/logo-light.png'}
             alt="Squirl"
           />
-          <span>{status.workingDir || 'loading...'}</span>
+          <span className="brandTagline">Keep your data. Keep it private.</span>
         </div>
-        <button
-          className="themeToggle"
-          type="button"
-          onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
-          aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
-          title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+        <div
+          ref={sidebarWorkspaceRef}
+          className="sidebarWorkspace"
+          style={{ '--tasks-height': `${uiState.sidebar.tasksHeightRatio * 100}%` } as React.CSSProperties}
         >
-          <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>
-          {theme === 'dark' ? 'Light mode' : 'Dark mode'}
-        </button>
-        <RoomSidebarRoster
-          participants={participants}
-          healthEntries={state.health.entries}
-          squirlDependenciesExpanded={uiState.sidebar.squirlDependenciesExpanded}
-          onSquirlDependenciesExpandedChange={(expanded) => updateUiState({ sidebar: { squirlDependenciesExpanded: expanded } })}
-          onSelectParticipant={(participant) => {
-            if (participant.kind === 'local-llm') {
-              setSelectedAgentId(null);
-              openCommandSurface('model');
-            } else {
-              setSelectedAgentId(participant.id);
-              openCommandSurface('agent');
-            }
-          }}
-          loadPreview={async (participantId, signal) => (
-            await api<{ preview: ParticipantContextPreview }>(`/api/participants/${encodeURIComponent(participantId)}/context-preview`, { signal })
-          ).preview}
-        />
-        <CurrentTasks activity={state.taskActivity} />
+          <RoomSidebarRoster
+            participants={participants}
+            healthEntries={state.health.entries}
+            squirlDependenciesExpanded={uiState.sidebar.squirlDependenciesExpanded}
+            onSquirlDependenciesExpandedChange={(expanded) => updateUiState({ sidebar: { squirlDependenciesExpanded: expanded } })}
+            onSelectParticipant={(participant) => {
+              if (participant.kind === 'local-llm') {
+                setSelectedAgentId(null);
+                openCommandSurface('model');
+              } else {
+                setSelectedAgentId(participant.id);
+                openCommandSurface('agent');
+              }
+            }}
+            loadPreview={async (participantId, signal) => (
+              await api<{ preview: ParticipantContextPreview }>(`/api/participants/${encodeURIComponent(participantId)}/context-preview`, { signal })
+            ).preview}
+          />
+          <CurrentTasks
+            activity={state.taskActivity}
+            heightRatio={uiState.sidebar.tasksHeightRatio}
+            onHeightRatioChange={(tasksHeightRatio) => updateUiState({ sidebar: { tasksHeightRatio } })}
+            resizeContainerRef={sidebarWorkspaceRef}
+          />
+        </div>
         <div className="telemetry">
           <span>model</span><strong>{status.modelDisplay}</strong>
           <span>context</span><strong>{formatTokens(status.tokenCount)} / {status.contextWindow == null ? '?' : formatTokens(status.contextWindow)}</strong>
@@ -1344,7 +1702,7 @@ function App() {
             onStateChange={updateContextState}
           />
         ) : activeSurface ? (
-          <SurfaceFrame title={activeSurface} onClose={closeActiveSurface}>
+          <SurfaceFrame title={activeSurface === 'agent' ? 'agents' : activeSurface} onClose={closeActiveSurface}>
             {activePanelView}
           </SurfaceFrame>
         ) : (
@@ -1355,6 +1713,16 @@ function App() {
             <span>{status.embedderName || 'index not configured'}</span>
           </div>
           <div className="topActions">
+            <button
+              className="themeToggle"
+              type="button"
+              onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
+              aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+              title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+            >
+              <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>
+              {theme === 'dark' ? 'Light mode' : 'Dark mode'}
+            </button>
             <div className="roomRosterControl">
               <button
                 className="chip"
@@ -1388,18 +1756,15 @@ function App() {
               <input type="checkbox" checked={showThinking} onChange={(event) => setShowThinking(event.target.checked)} />
               thinking
             </label>
-            {status.isStreaming && <button className="danger" onClick={() => void api('/api/cancel', { method: 'POST' }).then(loadState)}>Cancel</button>}
+            {selectedActivity?.cancellable && <button className="danger" onClick={() => void api('/api/cancel', { method: 'POST', body: JSON.stringify({ participantId: recipientId }) })}>Cancel @{recipientId}</button>}
           </div>
         </header>
 
         <div className={`messageList${rewindCandidates ? ' rewindMode' : ''}`} ref={listRef} onScroll={handleMessageScroll}>
           {messages.length === 0 ? (
-            <div className="emptyState">
-              <h2>Start a Squirl session</h2>
-              <p>Ask a question, attach files from Context, or import ChatGPT history from Memory.</p>
-            </div>
+            <PresentationOverview onStart={focusComposer} />
           ) : groupMessageTurns(messages).map((turn) => <TurnView key={turn.key} turn={turn.messages} showThinking={showThinking} registry={participantRegistry} rewindCandidateIds={rewindCandidateIds} selectedMessageId={selectedRewindCandidate?.messageId}/>)}
-          {waitingForAssistantMessage && <ChatActivity label={activityLabel}/>}
+          {activityRows.map((activity) => <ChatActivity key={activity.turnId} label={activity.label}/>) }
           <div ref={bottomRef} className="bottomSentinel" aria-hidden="true" />
           {!isAtLatest && (
             <button className="latestButton" onClick={() => scrollToLatest('smooth')}>
@@ -1408,7 +1773,7 @@ function App() {
           )}
         </div>
 
-        <footer className={`composer${status.isStreaming ? ' composerActive' : ''}${rewindCandidates ? ' rewindComposer' : ''}`} onKeyDownCapture={(event) => {
+        <footer className={`composer${selectedActivity ? ' composerActive' : ''}${rewindCandidates ? ' rewindComposer' : ''}`} onKeyDownCapture={(event) => {
           if (!paletteOpen) return;
           if (event.key === 'Escape') {
             event.preventDefault();
@@ -1439,6 +1804,18 @@ function App() {
           {paletteOpen && state && (
             <CommandPaletteView commands={state.commands} query={input} selected={paletteIndex} onSelected={setPaletteIndex} onChoose={chooseCommand}/>
           )}
+          {work.queued.length > 0 && <div className="composerOutbox" aria-label="Queued messages">
+            {work.queued.map((turn) => {
+              const sameParticipantQueue = work.queued.filter((candidate) => candidate.participantId === turn.participantId);
+              const position = sameParticipantQueue.findIndex((candidate) => candidate.id === turn.id) + 1;
+              return <div className="outboxItem" key={turn.id}>
+                <strong>@{turn.participantId}</strong>
+                <span>{turn.input}</span>
+                <small>queued {position}</small>
+                <button type="button" className="chip" onClick={() => void api('/api/queue/remove', { method: 'POST', body: JSON.stringify({ turnId: turn.id }) })}>Remove</button>
+              </div>;
+            })}
+          </div>}
           <div className="recipientPicker">
             <button
               className="recipientButton"
@@ -1450,6 +1827,13 @@ function App() {
               <ParticipantIdentity participant={selectedRecipient} text={`@${recipientId}`} />
               <span aria-hidden="true">▾</span>
             </button>
+            {selectedAgentModeLabel && <button
+              className="agentModeButton"
+              type="button"
+              disabled={modeSwitching || !!selectedActivity || selectedRecipient.status === 'busy'}
+              title="Cycle agent mode (Shift+Tab)"
+              onClick={() => void cycleSelectedAgentMode()}
+            ><span>{modeSwitching ? 'Switching…' : selectedAgentModeLabel}</span><kbd>⇧Tab</kbd></button>}
             {recipientMenuOpen && (
               <div className="recipientMenu" role="listbox" aria-label="Message recipient">
                 {recipients.map((participant) => (
@@ -1490,17 +1874,44 @@ function App() {
             }}
             placeholder="Type a message, slash command, or @file reference..."
           />
-          {status.isStreaming && <div className="composerProgress" role="progressbar" aria-label={activityLabel}><span /></div>}
-          <button className="primary" disabled={status.isStreaming} onClick={() => void sendMessage()}>Send</button>
+          <button className="primary" disabled={!input.trim()} onClick={() => void sendMessage()}>Send</button>
         </footer>
         </>
         )}
       </section>
 
       {approval && <ApprovalModal request={approval} onRespond={approve} />}
+      {state && uiState && state.config.userProfile?.onboardingComplete && !state.taskActivity.calendar.connected && !googlePromptDismissed && <GoogleSignInModal
+        clientConfigured={state.taskActivity.calendar.clientConfigured}
+        onSignIn={launchGoogleSignIn}
+        onDismiss={() => setGooglePromptDismissed(true)}
+      />}
+      {state?.taskActivity.calendar.connected && state.taskActivity.calendar.selectionRequired && !calendarSelectionDismissed && <CalendarSelectionModal
+        activity={state.taskActivity.calendar}
+        onSave={saveCalendarSelection}
+        onLater={() => setCalendarSelectionDismissed(true)}
+      />}
+      {agentInteractions[0] && <AgentInteractionModal
+        key={`${agentInteractions[0].participantId}:${agentInteractions[0].request.id}`}
+        participantId={agentInteractions[0].participantId}
+        request={agentInteractions[0].request}
+        onRespond={async (response) => {
+          const current = agentInteractions[0];
+          if (!current) return;
+          try {
+            await api('/api/agents/interactions/respond', { method: 'POST', body: JSON.stringify({ participantId: current.participantId, id: current.request.id, ...response }) });
+            setAgentInteractions((items) => items.slice(1));
+          } catch (error) {
+            pushToast(error instanceof Error ? error.message : String(error));
+          }
+        }}
+      />}
       {toast && <div className="toast">{toast}</div>}
     </main>
   );
 }
 
-createRoot(document.getElementById('root')!).render(<App />);
+if (typeof document !== 'undefined') {
+  const root = document.getElementById('root');
+  if (root) createRoot(root).render(<App />);
+}

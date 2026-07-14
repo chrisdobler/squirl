@@ -1,17 +1,18 @@
-import type { AgentKind } from '../agents/types.js';
+import type { AgentKind, ClaudePermissionMode, CodexSandbox, PiToolMode } from '../agents/types.js';
 import type { CommandSurface } from '../commands/registry.js';
 import type { EffortLevel } from '../types.js';
+import { DEFAULT_SIDEBAR_TASKS_RATIO, clampSidebarTasksRatio } from './sidebar-task-resize.js';
 
 export const UI_STATE_VERSION = 1 as const;
 
-const SURFACES: CommandSurface[] = ['settings', 'model', 'context', 'memory', 'eval', 'rewind', 'room', 'agent', 'system', 'help'];
+const SURFACES: CommandSurface[] = ['settings', 'model', 'context', 'memory', 'eval', 'rewind', 'room', 'agent', 'system', 'help', 'overview'];
 const RESTORABLE_SURFACES = new Set<CommandSurface>(SURFACES.filter((surface) => surface !== 'rewind' && surface !== 'settings'));
 
 export interface UiStateV1 {
   version: typeof UI_STATE_VERSION;
   activeSurface: CommandSurface | null;
   theme: 'light' | 'dark';
-  sidebar: { squirlDependenciesExpanded: boolean };
+  sidebar: { squirlDependenciesExpanded: boolean; tasksHeightRatio: number };
   chat: {
     draft: string;
     recipientId: string;
@@ -19,10 +20,10 @@ export interface UiStateV1 {
     viewport: { scrollTop: number; atLatest: boolean; anchorMessageId?: string; anchorOffset?: number } | null;
   };
   context: { mode: 'explorer' | 'files'; query: string; activeDiscIndex: number | null };
-  eval: { selectedKey: string; hiddenMetrics: string[]; layer: 1 | 2 | 3; mode: 'frozen' | 'live'; label: string };
+  eval: { hiddenMetrics: string[]; layer: 1 | 2 | 3; mode: 'frozen' | 'live'; label: string };
   memory: { importPath: string; recallQuery: string };
   model: { localUrl: string; manualModel: string };
-  agent: { kind: AgentKind; id: string; model: string; effort: EffortLevel | ''; cwd: string };
+  agent: { kind: AgentKind; id: string; model: string; effort: EffortLevel | ''; cwd: string; permissionMode: ClaudePermissionMode; sandbox: CodexSandbox; piToolMode: PiToolMode };
 }
 
 export type UiStatePatch = Partial<Omit<UiStateV1, 'version' | 'sidebar' | 'chat' | 'context' | 'eval' | 'memory' | 'model' | 'agent'>> & {
@@ -40,13 +41,13 @@ export function defaultUiState(): UiStateV1 {
     version: UI_STATE_VERSION,
     activeSurface: null,
     theme: 'dark',
-    sidebar: { squirlDependenciesExpanded: true },
+    sidebar: { squirlDependenciesExpanded: true, tasksHeightRatio: DEFAULT_SIDEBAR_TASKS_RATIO },
     chat: { draft: '', recipientId: 'squirl', showThinking: false, viewport: null },
     context: { mode: 'explorer', query: '', activeDiscIndex: null },
-    eval: { selectedKey: '', hiddenMetrics: [], layer: 1, mode: 'frozen', label: '' },
+    eval: { hiddenMetrics: [], layer: 1, mode: 'frozen', label: '' },
     memory: { importPath: '', recallQuery: '' },
     model: { localUrl: 'http://localhost:8000/v1', manualModel: '' },
-    agent: { kind: 'claude-code', id: '', model: '', effort: '', cwd: '' },
+    agent: { kind: 'claude-code', id: '', model: '', effort: '', cwd: '', permissionMode: 'acceptEdits', sandbox: 'workspace-write', piToolMode: 'coding' },
   };
 }
 
@@ -71,7 +72,12 @@ export function normalizeUiState(value: unknown): UiStateV1 {
     version: UI_STATE_VERSION,
     activeSurface: surface,
     theme: root.theme === 'light' ? 'light' : 'dark',
-    sidebar: { squirlDependenciesExpanded: sidebar.squirlDependenciesExpanded !== false },
+    sidebar: {
+      squirlDependenciesExpanded: sidebar.squirlDependenciesExpanded !== false,
+      tasksHeightRatio: Number.isFinite(sidebar.tasksHeightRatio)
+        ? clampSidebarTasksRatio(sidebar.tasksHeightRatio as number)
+        : DEFAULT_SIDEBAR_TASKS_RATIO,
+    },
     chat: {
       draft: string(chat.draft, ''),
       recipientId: string(chat.recipientId, 'squirl'),
@@ -89,7 +95,6 @@ export function normalizeUiState(value: unknown): UiStateV1 {
       activeDiscIndex: Number.isInteger(context.activeDiscIndex) && (context.activeDiscIndex as number) >= 0 ? context.activeDiscIndex as number : null,
     },
     eval: {
-      selectedKey: string(evalState.selectedKey, ''),
       hiddenMetrics,
       layer: evalState.layer === 2 || evalState.layer === 3 ? evalState.layer : 1,
       mode: evalState.mode === 'live' ? 'live' : 'frozen',
@@ -98,10 +103,13 @@ export function normalizeUiState(value: unknown): UiStateV1 {
     memory: { importPath: string(memory.importPath, ''), recallQuery: string(memory.recallQuery, '') },
     model: { localUrl: string(model.localUrl, defaults.model.localUrl), manualModel: string(model.manualModel, '') },
     agent: {
-      kind: agent.kind === 'codex' ? 'codex' : 'claude-code',
+      kind: agent.kind === 'codex' ? 'codex' : agent.kind === 'pi' ? 'pi' : 'claude-code',
       id: string(agent.id, ''), model: string(agent.model, ''),
-      effort: ['low', 'medium', 'high', 'xhigh', 'max'].includes(String(agent.effort)) ? agent.effort as EffortLevel : '',
+      effort: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(String(agent.effort)) ? agent.effort as EffortLevel : '',
       cwd: string(agent.cwd, ''),
+      permissionMode: agent.permissionMode === 'default' || agent.permissionMode === 'plan' || agent.permissionMode === 'bypassPermissions' ? agent.permissionMode : 'acceptEdits',
+      sandbox: agent.sandbox === 'read-only' || agent.sandbox === 'danger-full-access' ? agent.sandbox : 'workspace-write',
+      piToolMode: agent.piToolMode === 'read-only' ? 'read-only' : 'coding',
     },
   };
 }

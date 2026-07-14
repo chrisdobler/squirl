@@ -26,8 +26,22 @@ function seriesKeyOf(e: HistoryEntry): string {
   return `${e.layer}:${e.mode}:${e.embedderName}:${e.chunkHash}`;
 }
 
-function seriesLabel(e: HistoryEntry): string {
-  return `L${e.layer} · ${e.mode} · ${e.embedderName}`;
+/** Pick the newest comparable result series for the layer/mode being configured to run. */
+export function entriesForSelection(
+  history: HistoryEntry[],
+  layer: 1 | 2 | 3,
+  mode: 'frozen' | 'live',
+): HistoryEntry[] {
+  const matching = history.filter((entry) => entry.layer === layer && entry.mode === mode);
+  if (matching.length === 0) return [];
+
+  const latest = matching.reduce((newest, entry) =>
+    entry.timestamp.localeCompare(newest.timestamp) > 0 ? entry : newest,
+  );
+  const activeKey = seriesKeyOf(latest);
+  return matching
+    .filter((entry) => seriesKeyOf(entry) === activeKey)
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 }
 
 const W = 540, H = 240, PAD_L = 34, PAD_R = 12, PAD_T = 14, PAD_B = 26;
@@ -89,26 +103,6 @@ export interface EvalDashboardProps {
 }
 
 export function EvalDashboard({ history, running, progress, error, monitorEnabled, onRefresh, onRun, onToggleMonitor, initialState, onStateChange }: EvalDashboardProps) {
-  // Group into comparable series; default to the series of the most recent run.
-  const series = useMemo(() => {
-    const groups = new Map<string, HistoryEntry[]>();
-    for (const e of history) {
-      const k = seriesKeyOf(e);
-      (groups.get(k) ?? groups.set(k, []).get(k)!).push(e);
-    }
-    return groups;
-  }, [history]);
-
-  const seriesKeys = [...series.keys()];
-  const defaultKey = history.length ? seriesKeyOf(history[history.length - 1]!) : '';
-  const [selectedKey, setSelectedKey] = useState<string>(initialState.selectedKey || defaultKey);
-  const activeKey = series.has(selectedKey) ? selectedKey : defaultKey;
-  const entries = useMemo(() => {
-    const list = (series.get(activeKey) ?? []).slice();
-    list.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-    return list;
-  }, [series, activeKey]);
-
   const [hidden, setHidden] = useState<Set<string>>(new Set(initialState.hiddenMetrics));
   const toggle = (key: string) => setHidden((prev) => {
     const next = new Set(prev);
@@ -119,10 +113,11 @@ export function EvalDashboard({ history, running, progress, error, monitorEnable
   const [layer, setLayer] = useState<1 | 2 | 3>(initialState.layer);
   const [mode, setMode] = useState<'frozen' | 'live'>(initialState.mode);
   const [label, setLabel] = useState(initialState.label);
+  const entries = useMemo(() => entriesForSelection(history, layer, mode), [history, layer, mode]);
 
   React.useEffect(() => {
-    onStateChange({ selectedKey: history.length ? activeKey : selectedKey, hiddenMetrics: [...hidden], layer, mode, label });
-  }, [activeKey, selectedKey, hidden, layer, mode, label, history.length, onStateChange]);
+    onStateChange({ hiddenMetrics: [...hidden], layer, mode, label });
+  }, [hidden, layer, mode, label, onStateChange]);
 
   const presentLines = METRIC_LINES.filter((m) => entries.some((e) => m.get(e) !== null));
 
@@ -159,18 +154,10 @@ export function EvalDashboard({ history, running, progress, error, monitorEnable
       {running && <p className="evalStatus">{progress ?? 'starting…'}</p>}
       {error && <p className="evalError">{error}</p>}
 
-      {history.length === 0 ? (
-        <p className="evalEmpty">No eval runs yet. Click Run to record the first data point.</p>
+      {entries.length === 0 ? (
+        <p className="evalEmpty">No Layer {layer} {mode} runs yet. Click Run to record the first data point.</p>
       ) : (
         <>
-          {seriesKeys.length > 1 && (
-            <select className="evalSeries" value={activeKey} onChange={(e) => setSelectedKey(e.target.value)}>
-              {seriesKeys.map((k) => (
-                <option key={k} value={k}>{seriesLabel(series.get(k)![0]!)} ({series.get(k)!.length})</option>
-              ))}
-            </select>
-          )}
-
           <LineChart entries={entries} hidden={hidden} />
 
           <div className="evalLegend">
