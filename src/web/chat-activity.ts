@@ -12,3 +12,13 @@ export function chatActivityLabel(status: QueryPipelineStatus | null): string {
     case 'tool': return status.detail ? `Running ${status.detail}…` : 'Using a tool…';
   }
 }
+
+export function participantActivityLabel(
+  participantId: string,
+  participantLabel: string,
+  detail: string | undefined,
+  squirlPipelineStatus: QueryPipelineStatus | null,
+): string {
+  if (participantId === 'squirl') return chatActivityLabel(squirlPipelineStatus);
+  return detail ? `${participantLabel} is running ${detail}…` : `${participantLabel} is working…`;
+}

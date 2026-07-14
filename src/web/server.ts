@@ -5,11 +5,13 @@ import { fileURLToPath } from 'node:url';
 
 import { SquirlRuntime } from './runtime.js';
 import type { ChatEvent, EvalEvent, EvalRunRequest } from './types.js';
-import type { AgentKind } from '../agents/types.js';
+import type { AgentKind, ClaudePermissionMode, CodexSandbox, PiToolMode } from '../agents/types.js';
 import type { EffortLevel } from '../types.js';
 import type { UiStatePatch } from './ui-state.js';
 import { UiStateStore } from './ui-state-store.js';
 import { discoverCodexModels } from '../agents/codex-models.js';
+import { discoverClaudeModels } from '../agents/claude-models.js';
+import { discoverPiModels, resolvePiBinary } from '../agents/pi-models.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
@@ -65,6 +67,16 @@ function sendJson(res: ServerResponse, status: number, data: unknown): void {
 
 function sendError(res: ServerResponse, err: unknown, status = 500): void {
   sendJson(res, status, { error: err instanceof Error ? err.message : String(err) });
+}
+
+function sendHtml(res: ServerResponse, status: number, html: string): void {
+  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(html);
+}
+
+function sendRedirect(res: ServerResponse, location: string): void {
+  res.writeHead(302, { Location: location, 'Cache-Control': 'no-store' });
+  res.end();
 }
 
 function parseUrl(req: IncomingMessage): URL {
@@ -150,6 +162,49 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
       if (url.pathname === '/api/config' && req.method === 'POST') {
         const body = await readBody(req);
         sendJson(res, 200, await runtime.updateConfig(body as never));
+        return;
+      }
+
+      if (url.pathname === '/api/calendar/status' && req.method === 'GET') {
+        sendJson(res, 200, runtime.getTaskActivityState().calendar);
+        return;
+      }
+
+      if (url.pathname === '/api/calendar/oauth/start' && req.method === 'GET') {
+        const callbackOrigin = `http://${req.headers.host ?? '127.0.0.1:4174'}`;
+        const returnOrigin = typeof req.headers.origin === 'string' && req.headers.origin !== 'null'
+          ? req.headers.origin : callbackOrigin;
+        sendJson(res, 200, { authorizationUrl: runtime.calendarAuthorizationUrl(callbackOrigin, returnOrigin) });
+        return;
+      }
+
+      if (url.pathname === '/api/calendar/oauth/callback' && req.method === 'GET') {
+        const code = url.searchParams.get('code'); const state = url.searchParams.get('state');
+        if (!code || !state) throw new Error(url.searchParams.get('error') || 'Missing Google authorization response.');
+        const returnUri = await runtime.completeCalendarAuthorization(code, state);
+        const callbackOrigin = `http://${req.headers.host ?? '127.0.0.1:4174'}`;
+        if (returnUri !== callbackOrigin) {
+          sendRedirect(res, returnUri);
+          return;
+        }
+        sendHtml(res, 200, '<!doctype html><title>Squirl Calendar connected</title><p>Google Calendar is connected. <a href="/">Return to Squirl</a>.</p>');
+        return;
+      }
+
+      if (url.pathname === '/api/calendar/selection' && req.method === 'POST') {
+        const body = await readBody(req) as { calendarIds?: string[] };
+        sendJson(res, 200, await runtime.updateCalendarSelection(Array.isArray(body.calendarIds) ? body.calendarIds : []));
+        return;
+      }
+
+      if (url.pathname === '/api/calendar/refresh' && req.method === 'POST') {
+        await runtime.refreshCalendar();
+        sendJson(res, 200, runtime.getState());
+        return;
+      }
+
+      if (url.pathname === '/api/calendar/disconnect' && req.method === 'POST') {
+        sendJson(res, 200, await runtime.disconnectCalendar());
         return;
       }
 
@@ -248,8 +303,28 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
         return;
       }
 
+      if (url.pathname === '/api/agents/interactions/respond' && req.method === 'POST') {
+        const body = await readBody(req) as { participantId?: string; id?: string; value?: string; confirmed?: boolean; cancelled?: boolean };
+        if (!body.participantId || !body.id) throw new Error('Missing PI interaction participant or id');
+        await runtime.respondToAgentInteraction(body.participantId, body.id, {
+          ...(body.value !== undefined ? { value: body.value } : {}),
+          ...(body.confirmed !== undefined ? { confirmed: body.confirmed } : {}),
+          ...(body.cancelled !== undefined ? { cancelled: body.cancelled } : {}),
+        });
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
       if (url.pathname === '/api/cancel' && req.method === 'POST') {
-        sendJson(res, 200, { ok: runtime.cancel() });
+        const body = await readBody(req) as { participantId?: string };
+        sendJson(res, 200, { ok: runtime.cancel(body.participantId) });
+        return;
+      }
+
+      if (url.pathname === '/api/queue/remove' && req.method === 'POST') {
+        const body = await readBody(req) as { turnId?: string };
+        if (!body.turnId) throw new Error('Missing queued turn id');
+        sendJson(res, 200, { ok: runtime.removeQueuedTurn(body.turnId) });
         return;
       }
 
@@ -262,19 +337,40 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
         return;
       }
 
+      if (url.pathname === '/api/agents/update' && req.method === 'POST') {
+        const body = await readBody(req) as { id?: string; name?: string; model?: string | null; effort?: EffortLevel | null; cwd?: string; permissionMode?: ClaudePermissionMode; sandbox?: CodexSandbox; piToolMode?: PiToolMode };
+        if (!body.id) throw new Error('Missing agent id');
+        const result = await runtime.updateAgent(body.id, {
+          ...(body.name !== undefined ? { name: body.name } : {}),
+          ...(body.model !== undefined ? { model: body.model } : {}),
+          ...(body.effort !== undefined ? { effort: body.effort } : {}),
+          ...(body.cwd !== undefined ? { cwd: body.cwd } : {}),
+          ...(body.permissionMode !== undefined ? { permissionMode: body.permissionMode } : {}),
+          ...(body.sandbox !== undefined ? { sandbox: body.sandbox } : {}),
+          ...(body.piToolMode !== undefined ? { piToolMode: body.piToolMode } : {}),
+        });
+        if (!result.ok) throw new Error(result.error);
+        sendJson(res, 200, { state: runtime.getState(), agent: result });
+        return;
+      }
+
       if (url.pathname === '/api/agents/models' && req.method === 'GET') {
         const kind = url.searchParams.get('kind');
-        if (kind !== 'codex') throw new Error('Model discovery is only available for Codex agents');
-        const discovery = discoverCodexModels();
-        if (discovery.models.length === 0) throw new Error('Codex has no cached models. Open the Codex CLI once to refresh its model list.');
+        if (kind !== 'codex' && kind !== 'claude-code' && kind !== 'pi') throw new Error('Agent kind must be claude-code, codex, or pi');
+        const discovery = kind === 'codex'
+          ? discoverCodexModels()
+          : kind === 'claude-code'
+            ? discoverClaudeModels()
+            : await discoverPiModels(resolvePiBinary(runtime.getState().config.agents?.piBin), runtime.getState().status.workingDir);
+        if (discovery.models.length === 0) throw new Error(`${kind === 'codex' ? 'Codex' : kind === 'claude-code' ? 'Claude Code' : 'PI'} has no available models.`);
         sendJson(res, 200, discovery);
         return;
       }
 
       if (url.pathname === '/api/agents/add' && req.method === 'POST') {
-        const body = await readBody(req) as { kind?: AgentKind; id?: string; model?: string; effort?: EffortLevel; cwd?: string };
-        if (body.kind !== 'claude-code' && body.kind !== 'codex') throw new Error('Agent kind must be claude-code or codex');
-        const result = await runtime.addAgent(body.kind, { id: body.id, model: body.model, effort: body.effort, cwd: body.cwd });
+        const body = await readBody(req) as { kind?: AgentKind; id?: string; model?: string; effort?: EffortLevel; cwd?: string; permissionMode?: ClaudePermissionMode; sandbox?: CodexSandbox; piToolMode?: PiToolMode };
+        if (body.kind !== 'claude-code' && body.kind !== 'codex' && body.kind !== 'pi') throw new Error('Agent kind must be claude-code, codex, or pi');
+        const result = await runtime.addAgent(body.kind, { id: body.id, model: body.model, effort: body.effort, cwd: body.cwd, permissionMode: body.permissionMode, sandbox: body.sandbox, piToolMode: body.piToolMode });
         if (!result.ok) throw new Error(result.error);
         sendJson(res, 200, { state: runtime.getState(), agent: result });
         return;
@@ -288,16 +384,25 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
         return;
       }
 
-      if (url.pathname === '/api/chat' && req.method === 'POST') {
-        const body = await readBody(req) as { message?: string; recipientId?: string };
+      if (url.pathname === '/api/events' && req.method === 'GET') {
         const write = createEventWriter(res);
-        try {
-          await runtime.chat(body.message ?? '', body.recipientId ?? 'squirl', write);
-        } catch (err) {
-          write({ type: 'error', message: err instanceof Error ? err.message : String(err) });
-          write({ type: 'done' });
-        }
-        res.end();
+        const unsubscribe = runtime.subscribeEvents(write, url.searchParams.get('clientId') ?? undefined);
+        const heartbeat = setInterval(() => res.write('\n'), 15_000);
+        const close = () => { clearInterval(heartbeat); unsubscribe(); };
+        req.once('close', close);
+        res.once('close', close);
+        return;
+      }
+
+      if (url.pathname === '/api/chat' && req.method === 'POST') {
+        const body = await readBody(req) as { message?: string; recipientId?: string; clientId?: string };
+        const result = runtime.submitChat(body.message ?? '', body.recipientId ?? 'squirl', body.clientId);
+        sendJson(res, 202, {
+          turnId: result.turn.id,
+          participantId: result.turn.participantId,
+          started: result.started,
+          queuePosition: result.queuePosition,
+        });
         return;
       }
 

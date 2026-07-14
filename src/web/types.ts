@@ -3,7 +3,8 @@ import type { SelectedModel } from '../components/ModelPicker.js';
 import type { Message } from '../types.js';
 import type { QueryPipelineStatus } from '../pipeline-status.js';
 import type { LocalBackend } from '../api.js';
-import type { Participant } from '../agents/types.js';
+import type { AgentInteractionRequest, Participant } from '../agents/types.js';
+import type { ParticipantWorkState } from '../agents/turn-scheduler.js';
 import type { TaskActivityState } from '../tasks/types.js';
 import type { CommandDescriptor, CommandSurface } from '../commands/registry.js';
 import type { HealthReport, HealthEntry, HealthState } from './health.js';
@@ -46,11 +47,20 @@ export interface AppState {
   participants: Participant[];
   health: HealthReport;
   taskActivity: TaskActivityState;
+  work: ParticipantWorkState;
 }
 
 export interface ChatRequest {
   message: string;
   recipientId: string;
+  clientId?: string;
+}
+
+export interface ChatAccepted {
+  turnId: string;
+  participantId: string;
+  started: boolean;
+  queuePosition: number;
 }
 
 export type ChatEvent =
@@ -62,7 +72,10 @@ export type ChatEvent =
   | { type: 'status'; status: RuntimeStatus }
   | { type: 'agent-status'; participantId: string; status: string }
   | { type: 'task-activity'; taskActivity: TaskActivityState }
+  | { type: 'work-state'; work: ParticipantWorkState }
   | { type: 'tool-approval'; request: ToolApprovalRequest }
+  | { type: 'agent-interaction'; participantId: string; request: AgentInteractionRequest }
+  | { type: 'agent-editor-prefill'; participantId: string; text: string }
   | { type: 'open-command'; surface: CommandSurface }
   | { type: 'toast'; level: 'info' | 'error'; message: string }
   | { type: 'done' }

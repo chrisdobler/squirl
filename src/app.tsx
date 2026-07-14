@@ -14,7 +14,7 @@ import { ToastContainer, type ToastMessage } from './components/Toast.js';
 import { Orchestrator } from './orchestrator.js';
 import { getModelConfig, resolveContextWindow } from './model-config.js';
 import { loadConfig, saveConfig, rememberContextWindow } from './config.js';
-import { loadHistory, appendMessage, readEntries, getAllHistoryFiles, rewindHistoryAfter } from './history.js';
+import { loadHistory, appendMessage, readEntries, getAllHistoryFiles, loadAllHistoryEntries, rewindHistoryAfter } from './history.js';
 import { matchCommand, filterCommands } from './commands/registry.js';
 import { buildRewindCandidates, rewindRequestFromCandidate } from './rewind.js';
 import type { RewindRequest } from './rewind.js';
@@ -34,19 +34,25 @@ import { messagesToTurnPairs } from './search/turn-pair.js';
 import { backfillFromHistory } from './search/backfill.js';
 import type { VectorStore } from './search/types.js';
 import { MemoryPipeline } from './search/memory-pipeline.js';
-import { OpenAIMetaLLM, AnthropicMetaLLM } from './search/meta-llm.js';
+import { OpenAIMetaLLM, AnthropicMetaLLM, createConfiguredMetaLLM } from './search/meta-llm.js';
 import type { MetaLLM } from './search/meta-extract.js';
 import type { Message, AssistantMessage, ResponseMeta } from './types.js';
-import type { QueryPipelineStatus } from './pipeline-status.js';
+import { formatPipelineStatus, type QueryPipelineStatus } from './pipeline-status.js';
 import { applyScrollDelta, nextAutoscrollEnabled, nextStreamingScrollOffset } from './scroll-behavior.js';
 import { GroupChatCoordinator } from './agents/coordinator.js';
+import { ParticipantTurnScheduler, type ParticipantTurn, type ParticipantWorkState, type TurnExecutionContext } from './agents/turn-scheduler.js';
 import { LocalSpawnTransport } from './agents/transport/local-spawn.js';
 import { buildAgentDescriptor } from './agents/factory.js';
 import { SQUIRL_PARTICIPANT, USER_PARTICIPANT } from './agents/participants.js';
 import { materializeProfile, nextAvailableAgentId, profileFromDescriptor, removeAgentProfile, upsertAgentProfile, validateAgentHandle } from './agents/profiles.js';
-import { parseDelegationIntent, type DelegationAgent, type DelegationIntent } from './agents/delegation.js';
-import type { AgentEvent, AgentKind, Participant } from './agents/types.js';
+import { delegationConfirmationResponse, delegationConfirmationText, recoverPendingDelegation, resolveDelegationIntent, type DelegationAgent, type DelegationIntent } from './agents/delegation.js';
+import type { AgentEvent, AgentInteractionRequest, AgentInteractionResponse, AgentKind, Participant } from './agents/types.js';
 import { boundedToolOutput } from './tool-activity.js';
+import { discoverCodexModels, resolveCodexBinary } from './agents/codex-models.js';
+import { resolvePiBinary } from './agents/pi-models.js';
+import { TASK_ACTIVITY_WINDOW_MS } from './tasks/evidence.js';
+import { loadTaskActivitySnapshot } from './tasks/store.js';
+import { formatScrumReport, generateScrumReport } from './tasks/scrum.js';
 
 function defaultModelFromConfig(config?: SquirlConfig): SelectedModel {
   const provider = config?.defaultProvider ?? 'anthropic';
@@ -55,7 +61,14 @@ function defaultModelFromConfig(config?: SquirlConfig): SelectedModel {
   }
   if (provider === 'local') {
     const modelId = config?.defaultModel || 'default';
-    return { id: modelId, label: modelId, provider: 'local', baseUrl: config?.localBaseUrl ?? 'http://localhost:8000/v1', backend: config?.localBackend };
+    return {
+      id: modelId,
+      label: modelId,
+      provider: 'local',
+      baseUrl: config?.localBaseUrl ?? 'http://localhost:8000/v1',
+      backend: config?.localBackend,
+      contextWindow: config?.modelContextWindows?.[modelId],
+    };
   }
   return { id: config?.defaultModel ?? 'claude-sonnet-4-6', label: config?.defaultModel ?? 'Claude Sonnet 4.6', provider: 'anthropic' };
 }
@@ -84,6 +97,30 @@ const ApprovalPrompt: React.FC<{ command: string; onRespond: (approved: boolean)
       <Text>Network command: <Text color="yellow">{command}</Text>  <Text dimColor>Allow? (y/n)</Text></Text>
     </Box>
   );
+};
+
+const PiInteractionPrompt: React.FC<{
+  participantId: string;
+  request: AgentInteractionRequest;
+  onRespond: (response: AgentInteractionResponse) => void;
+}> = ({ participantId, request, onRespond }) => {
+  const [value, setValue] = useState(request.method === 'editor' ? request.prefill ?? '' : '');
+  const [selected, setSelected] = useState(0);
+  useInput((input, key) => {
+    if (key.escape) onRespond({ cancelled: true });
+    else if (request.method === 'confirm' && (input === 'y' || input === 'Y')) onRespond({ confirmed: true });
+    else if (request.method === 'confirm' && (input === 'n' || input === 'N')) onRespond({ confirmed: false });
+    else if (request.method === 'select' && key.upArrow) setSelected((index) => Math.max(0, index - 1));
+    else if (request.method === 'select' && key.downArrow) setSelected((index) => Math.min(request.options.length - 1, index + 1));
+    else if (request.method === 'select' && key.return && request.options[selected]) onRespond({ value: request.options[selected] });
+  });
+  return <Box flexDirection="column" borderStyle="single" borderTop borderBottom borderLeft={false} borderRight={false} paddingX={1}>
+    <Text color="magenta" bold>{request.title || `PI request from @${participantId}`}</Text>
+    {request.message && <Text>{request.message}</Text>}
+    {request.method === 'confirm' && <Text dimColor>y yes · n no · esc cancel</Text>}
+    {request.method === 'select' && request.options.map((option, index) => <Text key={option} color={index === selected ? 'cyan' : undefined}>{index === selected ? '› ' : '  '}{option}</Text>)}
+    {(request.method === 'input' || request.method === 'editor') && <Box><Text color="cyan">{'› '}</Text><TextInput value={value} onChange={setValue} onSubmit={() => onRespond({ value })} placeholder={request.method === 'input' ? request.placeholder : undefined} focus /></Box>}
+  </Box>;
 };
 
 const RewindPrompt: React.FC<{ request: RewindRequest; onRespond: (approved: boolean) => void }> = ({ request, onRespond }) => {
@@ -157,6 +194,7 @@ export const App: React.FC<AppProps> = ({
   const [isRewindPickerOpen, setIsRewindPickerOpen] = useState(false);
   const [rewindPickerIndex, setRewindPickerIndex] = useState(0);
   const [pendingApproval, setPendingApproval] = useState<{ command: string; resolve: (approved: boolean) => void } | null>(null);
+  const [agentInteractions, setAgentInteractions] = useState<Array<{ participantId: string; request: AgentInteractionRequest }>>([]);
   const [pendingRewind, setPendingRewind] = useState<RewindRequest | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [toolStatus, setToolStatus] = useState('');
@@ -166,12 +204,9 @@ export const App: React.FC<AppProps> = ({
   const [selectedToolIndex, setSelectedToolIndex] = useState(0);
   const [expandedToolIds, setExpandedToolIds] = useState<Set<string>>(() => new Set());
   const [tokensPerSecond, setTokensPerSecond] = useState(0);
-  const abortRef = useRef<AbortController | null>(null);
   const streamStartRef = useRef(0);
   const streamTokensRef = useRef(0);
-  const streamBufferRef = useRef('');
   const latestAssistantRef = useRef<AssistantMessage | null>(null);
-  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const orchestratorRef = useRef(new Orchestrator(workingDir));
   const statusEmitterRef = useRef(new StatusEmitter());
   const ingestQueueRef = useRef<IngestQueue | null>(null);
@@ -213,8 +248,13 @@ export const App: React.FC<AppProps> = ({
   const agentFlushRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleAgentEventRef = useRef<(event: AgentEvent) => void>(() => {});
   const runLocalTurnRef = useRef<(input: string, emit: (e: AgentEvent) => void, signal: AbortSignal) => Promise<void>>(async () => {});
+  const scheduledTurnRunnerRef = useRef<(turn: ParticipantTurn, context: TurnExecutionContext) => Promise<void>>(async () => {});
   const coordinatorRef = useRef<GroupChatCoordinator | null>(null);
   const configRef = useRef<SquirlConfig>(config ?? {});
+  const routingMetaLLMRef = useRef<MetaLLM | null>(null);
+  const taskMetaLLMRef = useRef<MetaLLM | null>(null);
+  if (!routingMetaLLMRef.current) routingMetaLLMRef.current = createConfiguredMetaLLM(configRef.current);
+  const bypassSemanticDelegationRef = useRef<string | null>(null);
   if (!coordinatorRef.current) {
     coordinatorRef.current = new GroupChatCoordinator({
       config: { autoHandoff: config?.agents?.autoHandoff, maxHops: config?.agents?.maxHops },
@@ -226,6 +266,19 @@ export const App: React.FC<AppProps> = ({
     });
     coordinatorRef.current.onEvent((event) => handleAgentEventRef.current(event));
   }
+  const schedulerRef = useRef<ParticipantTurnScheduler | null>(null);
+  if (!schedulerRef.current) {
+    schedulerRef.current = new ParticipantTurnScheduler(
+      (turn, context) => scheduledTurnRunnerRef.current(turn, context),
+      (participantId) => participantId === SQUIRL_PARTICIPANT.id || coordinatorRef.current?.getDescriptor(participantId)?.kind !== 'claude-code',
+      (error, turn) => addToast(`@${turn.participantId} failed: ${error instanceof Error ? error.message : String(error)}`),
+    );
+  }
+  const [workState, setWorkState] = useState<ParticipantWorkState>(() => schedulerRef.current!.snapshot());
+  useEffect(() => schedulerRef.current!.onChange((work) => {
+    setWorkState(work);
+    setIsStreaming(work.active.length > 0);
+  }), []);
 
   useEffect(() => {
     if (!participants.some((participant) => participant.id === selectedRecipientId)) setSelectedRecipientId(SQUIRL_PARTICIPANT.id);
@@ -351,6 +404,7 @@ export const App: React.FC<AppProps> = ({
   useEffect(() => {
     if (!config?.index?.enabled) return;
     let cancelled = false;
+    taskMetaLLMRef.current = null;
 
     (async () => {
       const storeConfig = {
@@ -419,6 +473,7 @@ export const App: React.FC<AppProps> = ({
         const memoryPipeline = new MemoryPipeline(metaLLM, embedder, store, {
           recallK: config.index!.recallK ?? 10,
         });
+        taskMetaLLMRef.current = metaLLM;
         orchestratorRef.current.setMemoryPipeline(memoryPipeline);
 
         const files = getAllHistoryFiles();
@@ -427,6 +482,7 @@ export const App: React.FC<AppProps> = ({
       } catch (err) {
         if (cancelled) return;
         const message = formatVectorStoreStartupError(err, storeConfig);
+        taskMetaLLMRef.current = null;
         embedderRef.current = null;
         vectorStoreRef.current = null;
         ingestQueueRef.current = null;
@@ -437,6 +493,7 @@ export const App: React.FC<AppProps> = ({
 
     return () => {
       cancelled = true;
+      taskMetaLLMRef.current = null;
       orchestratorRef.current.setMemoryPipeline(null);
     };
   }, [config?.index?.enabled]);
@@ -467,6 +524,11 @@ export const App: React.FC<AppProps> = ({
     if (key.ctrl && input === 'r') { setIsRoomRosterOpen(true); return; }
     if (key.ctrl && input === 'v') { setShowThinking((v) => !v); return; }
     if (key.ctrl && input === 's') { setMouseMode((v) => !v); return; }
+    if (key.ctrl && input === 'x') {
+      const queued = workState.queued.find((turn) => turn.participantId === selectedRecipientId);
+      if (queued) schedulerRef.current?.removeQueued(queued.id);
+      return;
+    }
     if (key.ctrl && input === 't') {
       if (toolMessages.length > 0) { setSelectedToolIndex(toolMessages.length - 1); setIsToolMode(true); }
       return;
@@ -514,22 +576,8 @@ export const App: React.FC<AppProps> = ({
       return;
     }
     if (key.escape) {
-      if (isStreaming && abortRef.current) {
-        abortRef.current.abort();
-        setIsStreaming(false);
-        setToolStatus('');
-        setPipelineStatus(null);
-        setMessages(prev => {
-          const updated = [...prev];
-          const last = updated[updated.length - 1];
-          if (last && last.role === 'assistant') {
-            const final_ = { ...last, isStreaming: false, content: last.content + ' [cancelled]' } as AssistantMessage;
-            updated[updated.length - 1] = final_;
-            appendMessage(final_);
-          }
-          return updated;
-        });
-        abortRef.current = null;
+      if (schedulerRef.current?.cancel(selectedRecipientId)) {
+        if (selectedRecipientId !== SQUIRL_PARTICIPANT.id) void coordinatorRef.current?.interrupt(selectedRecipientId);
       } else {
         setInputValue('');
       }
@@ -699,6 +747,7 @@ export const App: React.FC<AppProps> = ({
         break;
       }
       case 'tool-start': {
+        schedulerRef.current?.setPhase(event.participantId, 'tool', event.toolName);
         setToolStatus(`${participantLabel(event.participantId)}: ${event.toolName}`);
         const key = event.toolId || `${event.participantId}:${event.toolName}`;
         const messageId = crypto.randomUUID();
@@ -711,6 +760,7 @@ export const App: React.FC<AppProps> = ({
         break;
       }
       case 'tool-end': {
+        schedulerRef.current?.setPhase(event.participantId, 'working');
         setToolStatus('');
         const key = event.toolId || `${event.participantId}:${event.toolName}`;
         const pending = pendingToolsRef.current.get(key);
@@ -734,6 +784,24 @@ export const App: React.FC<AppProps> = ({
       }
       case 'session-status': {
         setParticipants((prev) => prev.map((p) => (p.id === event.participantId ? { ...p, status: event.status } : p)));
+        break;
+      }
+      case 'interaction-request': {
+        setAgentInteractions((current) => [...current, { participantId: event.participantId, request: event.request }]);
+        break;
+      }
+      case 'interaction-notify': {
+        addToast(`${participantLabel(event.participantId)}: ${event.message}`);
+        break;
+      }
+      case 'interaction-status': {
+        schedulerRef.current?.setPhase(event.participantId, event.text ? 'tool' : 'working', event.text);
+        setToolStatus(event.text ? `${participantLabel(event.participantId)}: ${event.text}` : '');
+        break;
+      }
+      case 'interaction-editor-prefill': {
+        setSelectedRecipientId(event.participantId);
+        setInputValue(event.text);
         break;
       }
       case 'error': {
@@ -767,11 +835,13 @@ export const App: React.FC<AppProps> = ({
     try {
       const existingIds = coordinatorRef.current!.listParticipants().map((participant) => participant.id);
       const id = opts?.id ? validateAgentHandle(opts.id, existingIds) : nextAvailableAgentId(kind, existingIds);
+      const codexDefaults = kind === 'codex' ? discoverCodexModels() : undefined;
       const descriptor = buildAgentDescriptor({
-        kind, cwd: workingDir, id, label: id, model: opts?.model, effort: opts?.effort,
-        bin: kind === 'claude-code' ? configRef.current.agents?.claudeBin : configRef.current.agents?.codexBin,
-        permissionMode: configRef.current.agents?.defaultClaudePermissionMode,
-        sandbox: configRef.current.agents?.defaultCodexSandbox,
+        kind, cwd: workingDir, id, label: id, model: opts?.model ?? codexDefaults?.defaultModel, effort: opts?.effort,
+        bin: kind === 'claude-code' ? configRef.current.agents?.claudeBin : kind === 'codex' ? resolveCodexBinary(configRef.current.agents?.codexBin) : resolvePiBinary(configRef.current.agents?.piBin),
+        permissionMode: configRef.current.agents?.defaultClaudePermissionMode ?? 'acceptEdits',
+        sandbox: configRef.current.agents?.defaultCodexSandbox ?? 'workspace-write',
+        piToolMode: configRef.current.agents?.defaultPiToolMode,
       });
       const participant = await coordinatorRef.current!.addAgent(descriptor);
       setParticipants(coordinatorRef.current!.listParticipants());
@@ -787,6 +857,7 @@ export const App: React.FC<AppProps> = ({
     if (!coordinatorRef.current!.hasAgent(id)) return false;
     await coordinatorRef.current!.removeAgent(id);
     setParticipants(coordinatorRef.current!.listParticipants());
+    setAgentInteractions((items) => items.filter((item) => item.participantId !== id));
     configRef.current = removeAgentProfile(configRef.current, id);
     saveConfig(configRef.current);
     return true;
@@ -814,74 +885,59 @@ export const App: React.FC<AppProps> = ({
     .filter((p) => p.kind !== 'user' && p.kind !== 'local-llm')
     .map((p) => ({ id: p.id, label: p.label, status: p.status ?? '?', mode: p.mode ?? '' })), []);
 
-  const runAgentDispatch = useCallback((value: string) => {
-    const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: value, participantId: selectedRecipientId };
+  const executeAgentDispatch = useCallback(async (participantId: string, value: string, context: TurnExecutionContext) => {
+    const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: value, participantId };
     setMessages((prev) => [...prev, userMsg]);
     appendMessage(userMsg);
+    streamAutoscrollRef.current = true;
+    setScrollOffset(0);
+    context.setPhase('working');
+    await coordinatorRef.current!.dispatchTo(participantId, value, context.signal);
+  }, []);
+
+  const runAgentDispatch = useCallback((value: string) => {
+    schedulerRef.current!.enqueue(selectedRecipientId, value);
     setInputValue('');
     historyIndexRef.current = -1;
     savedInputRef.current = '';
-    streamAutoscrollRef.current = true;
-    setScrollOffset(0);
-    setIsStreaming(true);
-    const abortController = new AbortController();
-    abortRef.current = abortController;
-    coordinatorRef.current!.dispatchTo(selectedRecipientId, value, abortController.signal)
-      .catch((err) => addToast(err instanceof Error ? err.message : String(err)))
-      .finally(() => {
-        setIsStreaming(false);
-        streamAutoscrollRef.current = false;
-        setToolStatus('');
-        abortRef.current = null;
-      });
-  }, [addToast, selectedRecipientId]);
+  }, [selectedRecipientId]);
 
-  const runDelegatedDispatch = useCallback((value: string, delegation: DelegationIntent) => {
+  const executeDelegatedDispatch = useCallback(async (value: string, delegation: DelegationIntent, context: TurnExecutionContext) => {
     const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: value, participantId: SQUIRL_PARTICIPANT.id };
     const handoffHistory = [...messagesRef.current, userMsg];
     setMessages((prev) => [...prev, userMsg]);
     appendMessage(userMsg);
-    setInputValue('');
-    historyIndexRef.current = -1;
-    savedInputRef.current = '';
     streamAutoscrollRef.current = true;
     setScrollOffset(0);
-    setIsStreaming(true);
-    const abortController = new AbortController();
-    abortRef.current = abortController;
     for (const id of delegation.unavailableTargetIds) addToast(`Agent @${id} is not connected. Open Agents and connect it before delegating work.`);
-    void (async () => {
-      for (const targetId of delegation.targetIds) {
-        if (abortController.signal.aborted) break;
+    await Promise.all(delegation.targetIds.map(async (targetId) => {
+        if (context.signal.aborted) return;
         const participant = coordinatorRef.current!.listParticipants().find((item) => item.id === targetId);
-        if (!participant) continue;
+        if (!participant) return;
         const handoff = await orchestratorRef.current.prepareHandoff(
           { id: participant.id, label: participant.label, specialty: participant.specialty },
           delegation.originalRequest,
           delegation.task,
           handoffHistory,
           selectedModelRef.current,
-          abortController.signal,
-          (stage) => setPipelineStatus({ stage }),
+          context.signal,
+          (stage) => { setPipelineStatus({ stage }); context.setPhase('preparing', stage); },
         );
         const messageId = crypto.randomUUID();
         handleAgentEventRef.current({ type: 'message-start', participantId: SQUIRL_PARTICIPANT.id, messageId, responseMeta: { model: selectedModelRef.current.id } });
         handleAgentEventRef.current({ type: 'token', participantId: SQUIRL_PARTICIPANT.id, messageId, token: handoff });
         handleAgentEventRef.current({ type: 'message-end', participantId: SQUIRL_PARTICIPANT.id, messageId, content: handoff });
-        try {
-          await coordinatorRef.current!.dispatchTo(targetId, handoff, abortController.signal);
-        } catch (error) {
-          addToast(`Could not delegate to @${targetId}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-    })().finally(() => {
-      setIsStreaming(false);
-      streamAutoscrollRef.current = false;
-      setToolStatus('');
-      setPipelineStatus(null);
-      abortRef.current = null;
-    });
+        schedulerRef.current!.enqueue(targetId, handoff, { delegated: true });
+    }));
+    setPipelineStatus(null);
   }, [addToast]);
+
+  const runDelegatedDispatch = useCallback((value: string, delegation: DelegationIntent) => {
+    schedulerRef.current!.enqueue(SQUIRL_PARTICIPANT.id, value, { kind: 'delegation', delegation });
+    setInputValue('');
+    historyIndexRef.current = -1;
+    savedInputRef.current = '';
+  }, []);
 
   // Auto-start agents configured to launch on startup.
   useEffect(() => {
@@ -892,15 +948,18 @@ export const App: React.FC<AppProps> = ({
       for (const raw of defaults) {
         try {
           const profile = materializeProfile(raw, workingDir);
-          migrated.push(profile);
-          if (!profile.reconnect) continue;
+          if (!profile.reconnect) { migrated.push(profile); continue; }
+          const codexDefaults = profile.kind === 'codex' ? discoverCodexModels() : undefined;
           const descriptor = buildAgentDescriptor({
             kind: profile.kind, cwd: profile.cwd, id: profile.id, label: profile.label, specialty: profile.specialty,
-            model: profile.model, effort: profile.effort, bin: profile.bin ?? (profile.kind === 'claude-code' ? configRef.current.agents?.claudeBin : configRef.current.agents?.codexBin),
-            permissionMode: profile.permissionMode ?? configRef.current.agents?.defaultClaudePermissionMode,
-            sandbox: profile.sandbox ?? configRef.current.agents?.defaultCodexSandbox,
+            model: profile.model ?? codexDefaults?.defaultModel, effort: profile.effort,
+            bin: profile.bin ?? (profile.kind === 'claude-code' ? configRef.current.agents?.claudeBin : profile.kind === 'codex' ? resolveCodexBinary(configRef.current.agents?.codexBin) : resolvePiBinary(configRef.current.agents?.piBin)),
+            permissionMode: profile.permissionMode ?? configRef.current.agents?.defaultClaudePermissionMode ?? 'acceptEdits',
+            sandbox: profile.sandbox ?? configRef.current.agents?.defaultCodexSandbox ?? 'workspace-write',
+            piToolMode: profile.piToolMode ?? configRef.current.agents?.defaultPiToolMode,
           });
           await coordinatorRef.current!.addAgent(descriptor);
+          migrated.push(profileFromDescriptor(descriptor, profile.profileId));
         } catch (err) { addToast(`Could not reconnect agent: ${err instanceof Error ? err.message : String(err)}`); }
       }
       configRef.current = { ...configRef.current, agents: { ...configRef.current.agents, defaults: migrated } };
@@ -909,6 +968,122 @@ export const App: React.FC<AppProps> = ({
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const generateScrum = async (dateInput: string): Promise<string> => {
+    const llm = taskMetaLLMRef.current;
+    const embedder = embedderRef.current;
+    const vectorStore = vectorStoreRef.current;
+    if (!configRef.current.index?.enabled || !llm || !embedder || !vectorStore) {
+      throw new Error('Scrum reports require semantic memory. Run /setup to configure the task index.');
+    }
+    const now = new Date();
+    const cutoff = now.getTime() - TASK_ACTIVITY_WINDOW_MS;
+    const currentTasks = (loadTaskActivitySnapshot()?.tasks ?? []).filter((task) =>
+      task.source !== 'calendar' && Date.parse(task.lastActiveAt) >= cutoff,
+    );
+    return formatScrumReport(await generateScrumReport({
+      input: dateInput,
+      entries: loadAllHistoryEntries(),
+      currentTasks,
+      llm,
+      embedder,
+      vectorStore,
+      now,
+      recallK: configRef.current.index.recallK ?? 8,
+    }));
+  };
+
+  const executeSquirlTurn = useCallback(async (value: string, context: TurnExecutionContext) => {
+    streamAutoscrollRef.current = true;
+    setScrollOffset(0);
+    setTokensPerSecond(0);
+    streamStartRef.current = Date.now();
+    streamTokensRef.current = 0;
+    latestAssistantRef.current = null;
+    let assistantId = '';
+    const priorMessages = messagesRef.current.filter((message) =>
+      !(message.role === 'assistant' && message.isStreaming)
+      && !(message.role === 'tool' && message.toolStatus === 'running'));
+
+    try {
+      const newMessages = await orchestratorRef.current.chat(
+        value,
+        priorMessages,
+        selectedModelRef.current,
+        {
+          onNewMessage: (message) => {
+            if (message.role === 'user') message = { ...message, participantId: SQUIRL_PARTICIPANT.id };
+            if (message.role === 'assistant') {
+              message = { ...message, responseMeta: { model: selectedModelRef.current.id } };
+              assistantId = message.id;
+              latestAssistantRef.current = message;
+            }
+            setMessages((previous) => [...previous, message]);
+            if (message.role !== 'assistant') appendMessage(message);
+          },
+          onToken: (token, assistant) => {
+            latestAssistantRef.current = assistant;
+            if (token) streamTokensRef.current++;
+            const elapsed = (Date.now() - streamStartRef.current) / 1000;
+            if (elapsed > 0.5) setTokensPerSecond(Math.round(streamTokensRef.current / elapsed));
+            setMessages((previous) => previous.map((message) => message.id === assistant.id && message.role === 'assistant'
+              ? { ...message, ...assistant, responseMeta: message.responseMeta }
+              : message));
+          },
+          onDone: () => {
+            const latest = latestAssistantRef.current;
+            setMessages((previous) => previous.map((message) => {
+              if (message.id !== assistantId || message.role !== 'assistant') return message;
+              const finalized = { ...message, ...(latest?.id === assistantId ? latest : {}), isStreaming: false } as AssistantMessage;
+              appendMessage(finalized);
+              return finalized;
+            }));
+          },
+          onError: (error) => {
+            setMessages((previous) => previous.map((message) => message.id === assistantId && message.role === 'assistant'
+              ? { ...message, content: `Error: ${error.message}`, isStreaming: false }
+              : message));
+          },
+          onToolApproval: (_toolName, args) => new Promise<boolean>((resolve) => {
+            setPendingApproval({ command: args.command as string, resolve });
+          }),
+          onToolStart: (name) => { setToolStatus(`Running ${name}...`); context.setPhase('tool', name); },
+          onToolEnd: () => { setToolStatus(''); context.setPhase('working'); },
+          onMemoryStart: () => setToolStatus('Recalling...'),
+          onMemoryEnd: (inlineDisplay, queries) => {
+            setToolStatus('');
+            if (inlineDisplay) setMessages((previous) => [...previous, {
+              id: crypto.randomUUID(), role: 'tool', toolCallId: 'memory', toolName: '/memory', content: inlineDisplay,
+              memoryLookup: { queries: queries ?? [] },
+            }]);
+          },
+          onStatus: (stage, detail) => {
+            setPipelineStatus({ stage, detail });
+            context.setPhase(stage === 'tool' ? 'tool' : stage === 'context' || stage.startsWith('memory') ? 'preparing' : 'working', detail ?? stage);
+          },
+        },
+        context.signal,
+      );
+      if (ingestQueueRef.current && configRef.current.index?.enabled) {
+        for (const pair of messagesToTurnPairs(newMessages, 'current', 'squirl')) ingestQueueRef.current.enqueue(pair);
+      }
+    } finally {
+      streamAutoscrollRef.current = false;
+      setToolStatus('');
+      setPipelineStatus(null);
+    }
+  }, []);
+
+  scheduledTurnRunnerRef.current = async (turn, context) => {
+    const metadata = turn.metadata as { kind?: string; delegation?: DelegationIntent } | undefined;
+    if (metadata?.kind === 'delegation' && metadata.delegation) {
+      await executeDelegatedDispatch(turn.input, metadata.delegation, context);
+    } else if (turn.participantId === SQUIRL_PARTICIPANT.id) {
+      await executeSquirlTurn(turn.input, context);
+    } else {
+      await executeAgentDispatch(turn.participantId, turn.input, context);
+    }
+  };
 
   const handleSubmit = (value: string) => {
     if (!value.trim()) return;
@@ -947,173 +1122,82 @@ export const App: React.FC<AppProps> = ({
         listAgents: listAgentsCmd,
         displayName: configRef.current.userProfile?.displayName,
         participants,
+        generateScrum,
       });
       return;
     }
 
-    if (isStreaming) return;
-
-    if (selectedRecipientId === SQUIRL_PARTICIPANT.id) {
+    if (selectedRecipientId === SQUIRL_PARTICIPANT.id && bypassSemanticDelegationRef.current !== value.trim()) {
       const delegationAgents = new Map<string, DelegationAgent>();
       for (const profile of configRef.current.agents?.defaults ?? []) {
         if (!profile.id) continue;
         delegationAgents.set(profile.id, { id: profile.id, label: profile.label, kind: profile.kind, connected: coordinatorRef.current!.hasAgent(profile.id) });
       }
       for (const participant of coordinatorRef.current!.listParticipants()) {
-        if (participant.kind !== 'claude-code' && participant.kind !== 'codex') continue;
+        if (participant.kind !== 'claude-code' && participant.kind !== 'codex' && participant.kind !== 'pi') continue;
         delegationAgents.set(participant.id, { id: participant.id, label: participant.label, kind: participant.kind, connected: coordinatorRef.current!.hasAgent(participant.id) });
       }
-      const delegation = parseDelegationIntent(value.trim(), [...delegationAgents.values()]);
-      if (delegation) {
-        runDelegatedDispatch(value.trim(), delegation);
+      const knownAgents = [...delegationAgents.values()];
+      const pending = recoverPendingDelegation(messagesRef.current);
+      const response = pending ? delegationConfirmationResponse(value) : 'unrelated';
+      if (pending && response === 'confirm') {
+        const targets = pending.targetIds.map((id) => knownAgents.find((agent) => agent.id === id)!).filter(Boolean);
+        runDelegatedDispatch(value.trim(), {
+          targetIds: targets.filter((agent) => agent.connected).map((agent) => agent.id),
+          unavailableTargetIds: targets.filter((agent) => !agent.connected).map((agent) => agent.id),
+          originalRequest: pending.originalRequest,
+          task: pending.task,
+          trigger: 'natural-language',
+        });
         return;
       }
+      if (pending && response === 'cancel') {
+        const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: value.trim(), participantId: SQUIRL_PARTICIPANT.id };
+        const assistant: AssistantMessage = { id: crypto.randomUUID(), role: 'assistant', content: 'Okay, I won’t dispatch that work.', createdAt: new Date().toISOString() };
+        setMessages((current) => [...current, userMsg, assistant]);
+        appendMessage(userMsg);
+        appendMessage(assistant);
+        setInputValue('');
+        return;
+      }
+
+      void resolveDelegationIntent(value.trim(), knownAgents, routingMetaLLMRef.current).then((resolution) => {
+        if (resolution.kind === 'dispatch') {
+          runDelegatedDispatch(value.trim(), resolution.delegation);
+          return;
+        }
+        if (resolution.kind === 'confirm') {
+          const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: value.trim(), participantId: SQUIRL_PARTICIPANT.id };
+          const assistant: AssistantMessage = {
+            id: crypto.randomUUID(), role: 'assistant', content: delegationConfirmationText(resolution.pending),
+            proactiveKind: 'delegation-confirmation', delegationConfirmation: resolution.pending,
+            createdAt: new Date().toISOString(),
+          };
+          setMessages((current) => [...current, userMsg, assistant]);
+          appendMessage(userMsg);
+          appendMessage(assistant);
+          setInputValue('');
+          return;
+        }
+        bypassSemanticDelegationRef.current = value.trim();
+        handleSubmit(value.trim());
+      }).catch((error) => addToast(error instanceof Error ? error.message : String(error)));
+      return;
     }
+
+    if (bypassSemanticDelegationRef.current === value.trim()) bypassSemanticDelegationRef.current = null;
 
     if (selectedRecipientId !== SQUIRL_PARTICIPANT.id) {
       runAgentDispatch(value.trim());
       return;
     }
 
+    schedulerRef.current!.enqueue(SQUIRL_PARTICIPANT.id, value.trim());
     setInputValue('');
     historyIndexRef.current = -1;
     savedInputRef.current = '';
-    streamAutoscrollRef.current = true;
-    setScrollOffset(0);
-    setIsStreaming(true);
-    setTokensPerSecond(0);
-    streamStartRef.current = Date.now();
-    streamTokensRef.current = 0;
-    streamBufferRef.current = '';
-    latestAssistantRef.current = null;
+    return;
 
-    const abortController = new AbortController();
-    abortRef.current = abortController;
-
-    orchestratorRef.current.chat(
-      value.trim(),
-      messages,
-      selectedModel,
-      {
-        onNewMessage: (msg) => {
-          if (msg.role === 'user') msg = { ...msg, participantId: SQUIRL_PARTICIPANT.id };
-          if (msg.role === 'assistant') {
-            msg = { ...msg, responseMeta: { model: selectedModel.id } };
-            latestAssistantRef.current = msg;
-          }
-          setMessages(prev => [...prev, msg]);
-          if (msg.role !== 'assistant') {
-            appendMessage(msg);
-          }
-        },
-        onToken: (token, assistant) => {
-          latestAssistantRef.current = assistant;
-          if (token) streamTokensRef.current++;
-          streamBufferRef.current += token;
-
-          // Throttle renders to ~30fps
-          if (!flushTimerRef.current) {
-            flushTimerRef.current = setTimeout(() => {
-              flushTimerRef.current = null;
-              const buffered = streamBufferRef.current;
-              if (!buffered) return;
-              streamBufferRef.current = '';
-
-              const elapsed = (Date.now() - streamStartRef.current) / 1000;
-              if (elapsed > 0.5) {
-                setTokensPerSecond(Math.round(streamTokensRef.current / elapsed));
-              }
-              const latestAssistant = latestAssistantRef.current;
-              setMessages(prev => {
-                const updated = [...prev];
-                const last = updated[updated.length - 1];
-                if (last && last.role === 'assistant' && last.isStreaming && latestAssistant?.id === last.id) {
-                  updated[updated.length - 1] = { ...last, ...latestAssistant };
-                }
-                return updated;
-              });
-            }, 33);
-          }
-        },
-        onDone: (usage) => {
-          if (flushTimerRef.current) {
-            clearTimeout(flushTimerRef.current);
-            flushTimerRef.current = null;
-          }
-          const remaining = streamBufferRef.current;
-          streamBufferRef.current = '';
-          const latestAssistant = latestAssistantRef.current;
-          setMessages(prev => {
-            const updated = [...prev];
-            const last = updated[updated.length - 1];
-            if (last && last.role === 'assistant') {
-              const content = latestAssistant?.id === last.id ? latestAssistant.content : last.content + remaining;
-              const finalized = {
-                ...last,
-                ...(latestAssistant?.id === last.id ? latestAssistant : {}),
-                content,
-                isStreaming: false,
-              } as AssistantMessage;
-              updated[updated.length - 1] = finalized;
-              appendMessage(finalized);
-            }
-            return updated;
-          });
-        },
-        onError: (error) => {
-          setMessages(prev => {
-            const updated = [...prev];
-            const last = updated[updated.length - 1];
-            if (last && last.role === 'assistant' && last.isStreaming) {
-              updated[updated.length - 1] = { ...last, content: `Error: ${error.message}`, isStreaming: false } as AssistantMessage;
-            }
-            return updated;
-          });
-        },
-        onToolApproval: (_toolName, args) => {
-          return new Promise<boolean>((resolve) => {
-            setPendingApproval({ command: args.command as string, resolve });
-          });
-        },
-        onToolStart: (name) => {
-          setToolStatus(`Running ${name}...`);
-        },
-        onToolEnd: () => {
-          setToolStatus('');
-        },
-        onMemoryStart: () => {
-          setToolStatus('Recalling...');
-        },
-        onMemoryEnd: (inlineDisplay, queries) => {
-          setToolStatus('');
-          if (inlineDisplay) {
-            setMessages(prev => [...prev, {
-              id: crypto.randomUUID(),
-              role: 'tool' as const,
-              toolCallId: 'memory',
-              toolName: '/memory',
-              content: inlineDisplay,
-              memoryLookup: { queries: queries ?? [] },
-            }]);
-          }
-        },
-        onStatus: (stage, detail) => {
-          setPipelineStatus({ stage, detail });
-        },
-      },
-      abortController.signal,
-    ).then((newMessages) => {
-      if (ingestQueueRef.current && config?.index?.enabled) {
-        const pairs = messagesToTurnPairs(newMessages, 'current', 'squirl');
-        for (const pair of pairs) ingestQueueRef.current.enqueue(pair);
-      }
-    }).finally(() => {
-      setIsStreaming(false);
-      streamAutoscrollRef.current = false;
-      setToolStatus('');
-      setPipelineStatus(null);
-      abortRef.current = null;
-    });
   };
 
   const commandQuery = inputValue.startsWith('/') ? inputValue.slice(1).toLowerCase() : null;
@@ -1185,6 +1269,14 @@ export const App: React.FC<AppProps> = ({
       )}
       {pendingApproval ? (
         <ApprovalPrompt command={pendingApproval.command} onRespond={(approved) => { pendingApproval.resolve(approved); setPendingApproval(null); }} />
+      ) : agentInteractions[0] ? (
+        <PiInteractionPrompt participantId={agentInteractions[0].participantId} request={agentInteractions[0].request} onRespond={(response) => {
+          const current = agentInteractions[0];
+          if (!current) return;
+          void coordinatorRef.current?.respondToInteraction(current.participantId, current.request.id, response)
+            .catch((error) => addToast(error instanceof Error ? error.message : String(error)))
+            .finally(() => setAgentInteractions((items) => items.slice(1)));
+        }} />
       ) : pendingRewind ? (
         <RewindPrompt request={pendingRewind} onRespond={(approved) => {
           const request = pendingRewind;
@@ -1204,15 +1296,27 @@ export const App: React.FC<AppProps> = ({
       ) : isImportPromptOpen ? (
         <ImportPrompt onSubmit={handleImportSubmit} onClose={() => setIsImportPromptOpen(false)} />
       ) : (
-        <InputArea
-          value={inputValue}
-          onChange={handleInputChange}
-          onSubmit={handleSubmit}
-          focus={!isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen && !isRewindPickerOpen && !isRoomRosterOpen && !isRecipientPickerOpen}
-          recipientId={selectedRecipientId}
-        />
+        <>
+          {workState.active.map((activity) => {
+            const participant = participants.find((candidate) => candidate.id === activity.participantId);
+            const label = activity.participantId === SQUIRL_PARTICIPANT.id
+              ? pipelineStatus ? formatPipelineStatus(pipelineStatus) : 'Squirl is working…'
+              : `${participant?.label ?? activity.participantId} is ${activity.detail ? `running ${activity.detail}` : 'working'}…`;
+            return <Box key={activity.turnId} paddingX={2}><Text color="yellow">{label}</Text></Box>;
+          })}
+          {workState.queued.slice(0, 3).map((turn, index) => (
+            <Box key={turn.id} paddingX={2}><Text dimColor>outbox @{turn.participantId} #{index + 1}: {turn.input.slice(0, 60)}  ctrl+x remove selected</Text></Box>
+          ))}
+          <InputArea
+            value={inputValue}
+            onChange={handleInputChange}
+            onSubmit={handleSubmit}
+            focus={!isModelMenuOpen && !isContextMenuOpen && !isCommandPaletteOpen && !isRewindPickerOpen && !isRoomRosterOpen && !isRecipientPickerOpen && agentInteractions.length === 0}
+            recipientId={selectedRecipientId}
+          />
+        </>
       )}
-      <StatusBar tokenCount={tokenCount} contextWindow={contextWindow} isStreaming={isStreaming} toolStatus={isToolMode ? 'tool activity: ↑/↓ select · enter toggle · esc close' : toolStatus} tokensPerSecond={tokensPerSecond} modelName={modelDisplay} workingDir={workingDir} commandQuery={commandQuery} commandIndex={commandIndex} statusEmitter={statusEmitterRef.current} indexEnabled={config?.index?.enabled ?? false} storeName={config?.index?.store ? `${config.index.store}${config.index.chromaUrl ? ` (${config.index.chromaUrl.replace(/^https?:\/\//, '')})` : ''}` : ''} embedderName={embedderDisplay} mouseMode={mouseMode} pipelineStatus={pipelineStatus} />
+      <StatusBar tokenCount={tokenCount} contextWindow={contextWindow} isStreaming={workState.active.some((activity) => activity.participantId === selectedRecipientId && activity.cancellable)} toolStatus={isToolMode ? 'tool activity: ↑/↓ select · enter toggle · esc close' : toolStatus} tokensPerSecond={tokensPerSecond} modelName={modelDisplay} workingDir={workingDir} commandQuery={commandQuery} commandIndex={commandIndex} statusEmitter={statusEmitterRef.current} indexEnabled={config?.index?.enabled ?? false} storeName={config?.index?.store ? `${config.index.store}${config.index.chromaUrl ? ` (${config.index.chromaUrl.replace(/^https?:\/\//, '')})` : ''}` : ''} embedderName={embedderDisplay} mouseMode={mouseMode} pipelineStatus={pipelineStatus} />
     </Box>
   );
 };

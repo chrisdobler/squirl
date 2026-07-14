@@ -2,14 +2,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import type { Participant } from '../agents/types.js';
 
 let testHome: string;
 let historyDir: string;
 let testCounter = 0;
 let capturedHistory: any[] = [];
+let capturedModel: any = null;
 let mockDetectedModels: Array<{ id: string; contextWindow?: number }> = [];
 let mockAssistantContent = 'ok';
 let preparedHandoffs: Array<{ target: any; originalRequest: string; task: string }> = [];
+let mockDelegationClassification = '{"decision":"not_delegate","confidence":"high","targetIds":[],"task":""}';
 
 // Use timestamps relative to "now" so fixture entries stay inside history.ts's 24h
 // rollover window regardless of the calendar date the suite runs on (otherwise rollover
@@ -53,8 +56,9 @@ vi.mock('../orchestrator.js', () => ({
       return `Handoff to @${target.id}\n\nGoal: ${task}`;
     }
     async assessFacilitation() { return null; }
-    async chat(input: string, conversationHistory: any[], _model: any, callbacks: any) {
+    async chat(input: string, conversationHistory: any[], model: any, callbacks: any) {
       capturedHistory = conversationHistory;
+      capturedModel = model;
       const user = { id: 'web-user', role: 'user', content: input };
       const assistant = { id: 'web-assistant', role: 'assistant', content: '', isStreaming: true };
       callbacks.onNewMessage(user);
@@ -79,6 +83,14 @@ vi.mock('../api.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../search/meta-llm.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../search/meta-llm.js')>();
+  return {
+    ...actual,
+    createConfiguredMetaLLM: () => ({ complete: async () => mockDelegationClassification }),
+  };
+});
+
 function writeJsonl(filePath: string, entries: Array<{ timestamp: string; message: any }>) {
   writeFileSync(filePath, entries.map((entry) => JSON.stringify(entry)).join('\n') + '\n', 'utf-8');
 }
@@ -90,7 +102,9 @@ function entry(id: string, role: 'user' | 'assistant', content: string, timestam
 async function loadRuntime() {
   vi.resetModules();
   capturedHistory = [];
+  capturedModel = null;
   preparedHandoffs = [];
+  mockDelegationClassification = '{"decision":"not_delegate","confidence":"high","targetIds":[],"task":""}';
   const { SquirlRuntime } = await import('./runtime.js');
   return new SquirlRuntime('/tmp/squirl-web-runtime-test');
 }
@@ -178,6 +192,64 @@ describe('SquirlRuntime shared history', () => {
       message: { id: 'web-assistant', role: 'assistant', content: 'ok', isStreaming: true, responseMeta: { model: 'claude-sonnet-4-6' } },
     });
   });
+
+  it('persists a clarification question after five minutes without a known task', async () => {
+    writeJsonl(join(historyDir, 'current.jsonl'), []);
+    const runtime = await loadRuntime();
+    const internals = runtime as unknown as {
+      taskUnknownSince: number;
+      taskRefreshRunning: boolean;
+      messages: any[];
+      checkTaskClarification: (now: number) => void;
+    };
+    const now = Date.now();
+    internals.taskUnknownSince = now;
+    internals.taskRefreshRunning = false;
+
+    internals.checkTaskClarification(now + 5 * 60 * 1000 - 1);
+    expect(internals.messages).toHaveLength(0);
+
+    internals.checkTaskClarification(now + 5 * 60 * 1000);
+    const prompt = runtime.getState().messages.at(-1);
+    expect(prompt).toMatchObject({ role: 'assistant', proactiveKind: 'task-clarification' });
+    expect(prompt?.content).toContain('Can you tell me about the current task?');
+
+    internals.checkTaskClarification(now + 60 * 60 * 1000);
+    expect(internals.messages.filter((message) => message.proactiveKind === 'task-clarification')).toHaveLength(1);
+
+    const persisted = readFileSync(join(historyDir, 'current.jsonl'), 'utf-8').trim().split('\n').map((line) => JSON.parse(line).message);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]).toMatchObject({ proactiveKind: 'task-clarification' });
+  });
+
+  it('finds a persisted clarification outside the bounded visible transcript', async () => {
+    const askedAt = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+    const entries: Array<{ timestamp: string; message: any }> = [{
+      timestamp: askedAt,
+      message: { id: 'clarification', role: 'assistant', content: 'What are you working on?', proactiveKind: 'task-clarification', createdAt: askedAt },
+    }];
+    for (let index = 0; index < 50; index++) {
+      const timestamp = new Date(Date.now() - (50 - index) * 60_000).toISOString();
+      entries.push(entry(`u${index}`, 'user', `message ${index}`, timestamp));
+    }
+    writeJsonl(join(historyDir, 'current.jsonl'), entries);
+
+    const runtime = await loadRuntime();
+    const internals = runtime as unknown as {
+      taskUnknownSince: number;
+      taskRefreshRunning: boolean;
+      messages: any[];
+      checkTaskClarification: (now: number) => void;
+    };
+    expect(internals.messages).toHaveLength(50);
+    expect(internals.messages.some((message) => message.id === 'clarification')).toBe(false);
+
+    internals.taskRefreshRunning = false;
+    internals.checkTaskClarification(Date.now() + 24 * 60 * 60_000);
+
+    const persisted = readFileSync(join(historyDir, 'current.jsonl'), 'utf-8').trim().split('\n').map((line) => JSON.parse(line).message);
+    expect(persisted.filter((message) => message.proactiveKind === 'task-clarification')).toHaveLength(1);
+  });
 });
 
 describe('SquirlRuntime agents', () => {
@@ -200,7 +272,7 @@ describe('SquirlRuntime agents', () => {
     expect(runtime.listAgents()).toEqual([]);
   });
 
-  it('adds and removes a codex agent with conservative defaults', async () => {
+  it('adds and removes a codex agent with bounded write access by default', async () => {
     // Codex start() spawns nothing (per-turn model), so no real subprocess is launched here.
     const runtime = await loadRuntime();
 
@@ -210,11 +282,39 @@ describe('SquirlRuntime agents', () => {
 
     const listed = runtime.listAgents();
     expect(listed.map((a) => a.id)).toEqual(['codex']);
-    expect(listed[0]!.mode).toBe('sandbox: read-only');
+    expect(listed[0]!.mode).toBe('sandbox: workspace-write');
 
     expect(await runtime.stopAgent('codex')).toBe(true);
     expect(runtime.listAgents()).toEqual([]);
     expect(await runtime.stopAgent('codex')).toBe(false);
+  });
+
+  it('persists agent failures in the conversation and collapses duplicate error events', async () => {
+    const runtime = await loadRuntime();
+    await runtime.addAgent('codex', { model: 'gpt-test' });
+    const events: any[] = [];
+    const internals = runtime as unknown as {
+      activeEmit: (event: unknown) => void;
+      handleAgentEvent: (event: unknown) => void;
+    };
+    internals.activeEmit = (event) => events.push(event);
+
+    const failure = { type: 'error', participantId: 'codex', message: 'The selected model requires a newer Codex CLI.' };
+    internals.handleAgentEvent(failure);
+    internals.handleAgentEvent(failure);
+
+    const errors = runtime.getState().messages.filter((message) => message.role === 'tool' && message.toolStatus === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({
+      toolName: 'codex:connector error',
+      content: 'The selected model requires a newer Codex CLI.',
+      participantId: 'codex',
+    });
+    expect(events.filter((event) => event.type === 'message')).toHaveLength(1);
+    expect(events).toContainEqual({
+      type: 'toast', level: 'error',
+      message: 'codex failed. The full error is shown in the conversation.',
+    });
   });
 
   it('launches and persists an agent in the requested working directory', async () => {
@@ -294,6 +394,59 @@ describe('SquirlRuntime agents', () => {
     expect(saved.agents.defaults[0]).toMatchObject({ kind: 'codex', id: 'review-builder', reconnect: true });
   });
 
+  it('updates launch settings, preserves profile identity, and clears optional fields', async () => {
+    const projectDir = join(testHome, 'Projects', 'edited');
+    mkdirSync(projectDir, { recursive: true });
+    const runtime = await loadRuntime();
+    await runtime.addAgent('codex', { model: 'old-model', effort: 'low', sandbox: 'read-only' });
+    const before = JSON.parse(readFileSync(join(testHome, '.squirl', 'config.json'), 'utf-8')).agents.defaults[0];
+
+    const descriptor = (runtime as unknown as { coordinator: { getDescriptor: (id: string) => { sessionId?: string } | undefined } }).coordinator.getDescriptor('codex');
+    if (descriptor) descriptor.sessionId = 'old-thread';
+    const updated = await runtime.updateAgent('codex', { name: 'Review Builder', model: 'new-model', effort: 'high', cwd: projectDir, sandbox: 'danger-full-access' });
+
+    expect(updated).toEqual({ ok: true, id: 'review-builder', label: 'review-builder' });
+    let saved = JSON.parse(readFileSync(join(testHome, '.squirl', 'config.json'), 'utf-8')).agents.defaults[0];
+    expect(saved).toMatchObject({ profileId: before.profileId, id: 'review-builder', model: 'new-model', effort: 'high', cwd: projectDir, sandbox: 'danger-full-access' });
+    expect((runtime as unknown as { coordinator: { getDescriptor: (id: string) => { sessionId?: string; sandbox?: string } | undefined } }).coordinator.getDescriptor('review-builder')).toMatchObject({ sandbox: 'danger-full-access', sessionId: undefined });
+
+    expect(await runtime.updateAgent('review-builder', { model: null, effort: null })).toMatchObject({ ok: true, id: 'review-builder' });
+    saved = JSON.parse(readFileSync(join(testHome, '.squirl', 'config.json'), 'utf-8')).agents.defaults[0];
+    expect(saved.model).toBeUndefined();
+    expect(saved.effort).toBeUndefined();
+    expect(saved.profileId).toBe(before.profileId);
+  });
+
+  it('rejects duplicate handles, invalid directories, and edits while busy', async () => {
+    const runtime = await loadRuntime();
+    await runtime.addAgent('codex', { id: 'first' });
+    await runtime.addAgent('codex', { id: 'second' });
+
+    expect(await runtime.updateAgent('first', { name: 'second' })).toEqual({ ok: false, error: 'Agent "@second" already exists.' });
+    const missingDir = join(testHome, 'missing-edit-directory');
+    expect(await runtime.updateAgent('first', { cwd: missingDir })).toEqual({ ok: false, error: `Working directory does not exist: ${missingDir}` });
+
+    const internals = runtime as unknown as { coordinator: { agentParticipants: Map<string, Participant> } };
+    internals.coordinator.agentParticipants.get('first')!.status = 'busy';
+    expect(await runtime.updateAgent('first', { model: 'another-model' })).toEqual({
+      ok: false,
+      error: 'Cannot edit @first while it is busy. Wait for the current turn to finish or cancel it first.',
+    });
+  });
+
+  it('invalidates a persisted context preview when launch settings change', async () => {
+    const runtime = await loadRuntime();
+    await runtime.addAgent('codex', { id: 'reviewer', model: 'old-model' });
+    const internals = runtime as unknown as { participantContextPreviews: Record<string, any> };
+    internals.participantContextPreviews.reviewer = {
+      participantId: 'reviewer', modelId: 'old-model', source: 'codex-session', fidelity: 'inspected', matrixMode: 'usage', capturedAt: 'now',
+      usedTokens: 10, contextWindow: 100, buckets: { system: 0, memory: 0, files: 0, messages: 10 }, discs: [],
+    };
+
+    expect(await runtime.updateAgent('reviewer', { model: 'new-model' })).toMatchObject({ ok: true });
+    expect(runtime.getParticipantContextPreview('reviewer')).toMatchObject({ fidelity: 'unavailable', modelId: 'new-model' });
+  });
+
   it('migrates and reconnects saved profiles on startup', async () => {
     writeFileSync(join(testHome, '.squirl', 'config.json'), JSON.stringify({
       defaultProvider: 'anthropic',
@@ -321,6 +474,92 @@ describe('SquirlRuntime agents', () => {
     expect(runtime.getState().messages.filter((message) => message.role === 'user').map((message) => message.content)).toEqual([
       'tell cc to make a plan for agent directories',
     ]);
+  });
+
+  it('dispatches put-back-on phrasing and immediately records the delegated current task', async () => {
+    const runtime = await loadRuntime();
+    await runtime.addAgent('codex', { id: 'codex-squirl' });
+    mockDelegationClassification = '{"decision":"delegate","confidence":"high","targetIds":["codex-squirl"],"task":"the task it was doing before?"}';
+    const dispatchTo = vi.fn(async () => undefined);
+    (runtime as unknown as { coordinator: { dispatchTo: typeof dispatchTo } }).coordinator.dispatchTo = dispatchTo;
+
+    await runtime.chat('Can you put codex squirrel back on the task it was doing before?', 'squirl', () => undefined);
+
+    expect(preparedHandoffs).toEqual([expect.objectContaining({
+      target: expect.objectContaining({ id: 'codex-squirl' }),
+      task: 'the task it was doing before?',
+    })]);
+    expect(dispatchTo).toHaveBeenCalledOnce();
+    expect(runtime.getTaskActivityState().tasks[0]).toMatchObject({
+      title: 'Resume previous task',
+      participantIds: ['codex-squirl'],
+    });
+  });
+
+  it('persists uncertain delegation and dispatches it exactly once after yes', async () => {
+    const runtime = await loadRuntime();
+    await runtime.addAgent('codex', { id: 'codex-squirl' });
+    mockDelegationClassification = '{"decision":"uncertain","confidence":"low","targetIds":["codex-squirl"],"task":"review the overview"}';
+
+    await runtime.chat('Maybe codex squirrel should review the overview', 'squirl', () => undefined);
+    expect(runtime.getState().messages.at(-1)).toMatchObject({
+      role: 'assistant', proactiveKind: 'delegation-confirmation',
+      delegationConfirmation: { targetIds: ['codex-squirl'], task: 'review the overview' },
+    });
+
+    const dispatchTo = vi.fn(async () => undefined);
+    (runtime as unknown as { coordinator: { dispatchTo: typeof dispatchTo } }).coordinator.dispatchTo = dispatchTo;
+    await runtime.chat('yes', 'squirl', () => undefined);
+    expect(dispatchTo).toHaveBeenCalledOnce();
+    expect(preparedHandoffs.at(-1)).toMatchObject({ task: 'review the overview' });
+  });
+
+  it('cancels an uncertain delegation after no', async () => {
+    const runtime = await loadRuntime();
+    await runtime.addAgent('codex', { id: 'codex-squirl' });
+    mockDelegationClassification = '{"decision":"uncertain","confidence":"low","targetIds":["codex-squirl"],"task":"review this"}';
+    await runtime.chat('Maybe codex squirrel should review this', 'squirl', () => undefined);
+
+    const dispatchTo = vi.fn(async () => undefined);
+    (runtime as unknown as { coordinator: { dispatchTo: typeof dispatchTo } }).coordinator.dispatchTo = dispatchTo;
+    await runtime.chat('no', 'squirl', () => undefined);
+    expect(dispatchTo).not.toHaveBeenCalled();
+    expect(runtime.getState().messages.at(-1)?.content).toBe('Okay, I won’t dispatch that work.');
+  });
+
+  it('recovers an unexpired delegation confirmation after restart', async () => {
+    const first = await loadRuntime();
+    await first.addAgent('codex', { id: 'codex-squirl' });
+    mockDelegationClassification = '{"decision":"uncertain","confidence":"low","targetIds":["codex-squirl"],"task":"resume work"}';
+    await first.chat('Maybe codex squirrel should resume work', 'squirl', () => undefined);
+
+    const second = await loadRuntime();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const dispatchTo = vi.fn(async () => undefined);
+    (second as unknown as { coordinator: { dispatchTo: typeof dispatchTo } }).coordinator.dispatchTo = dispatchTo;
+    await second.chat('yes', 'squirl', () => undefined);
+    expect(dispatchTo).toHaveBeenCalledOnce();
+  });
+
+  it('records direct agent assignments and advances them on that agent response', async () => {
+    const runtime = await loadRuntime();
+    await runtime.addAgent('codex', { id: 'codex-squirl' });
+    const dispatchTo = vi.fn(async () => undefined);
+    const internals = runtime as unknown as {
+      coordinator: { dispatchTo: typeof dispatchTo };
+      handleAgentEvent: (event: unknown) => void;
+    };
+    internals.coordinator.dispatchTo = dispatchTo;
+
+    await runtime.chat('Move local LLM infrastructure outside the Squirl box', 'codex-squirl', () => undefined);
+    const assigned = runtime.getTaskActivityState().tasks[0]!;
+    expect(assigned).toMatchObject({ title: 'Move local LLM infrastructure outside the Squirl box', participantIds: ['codex-squirl'] });
+
+    internals.handleAgentEvent({ type: 'message-start', participantId: 'codex-squirl', messageId: 'agent-update' });
+    internals.handleAgentEvent({ type: 'message-end', participantId: 'codex-squirl', messageId: 'agent-update', content: 'Working on the overview now.' });
+    const advanced = runtime.getTaskActivityState().tasks[0]!;
+    expect(Date.parse(advanced.lastActiveAt)).toBeGreaterThanOrEqual(Date.parse(assigned.lastActiveAt));
+    expect(advanced.evidenceIds).toContain('agent-update');
   });
 
   it('keeps a durable stale snapshot when refresh is unavailable and expires it only after a reliable refresh', async () => {
@@ -365,7 +604,7 @@ describe('SquirlRuntime agents', () => {
     }] };
     internals.taskMetaLLM = { complete: async () => {
       classifications += 1;
-      return JSON.stringify({ confidence: 'high', tasks: [{ title: 'Build inferred task activity', evidenceIds: ['task-user'] }] });
+      return JSON.stringify({ confidence: 'high', tasks: [{ title: 'Build inferred task activity', summary: 'The runtime is classifying recent work into a sidebar task feed.', evidenceIds: ['task-user'] }] });
     } };
     internals.taskActivityEmit = (event) => events.push(event);
     internals.markTaskActivityChanged();
@@ -435,6 +674,8 @@ describe('SquirlRuntime context window', () => {
     mockDetectedModels = [{ id: localModel.id }];
     const restarted = await loadRuntime();
     expect(restarted.getStatus().contextWindow).toBe(32_768);
+    await restarted.chat('use the persisted window', 'squirl', () => {});
+    expect(capturedModel.contextWindow).toBe(32_768);
   });
 
   it('keeps an explicitly selected local model across a state poll (no config-churn reset)', async () => {

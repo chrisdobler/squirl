@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { startSquirlServer } from '../web/server.js';
@@ -29,10 +29,20 @@ async function createWindow(): Promise<void> {
     },
   });
 
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('https://accounts.google.com/')) void shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
   await win.loadURL(process.env.SQUIRL_ELECTRON_DEV_URL ?? api.url);
 }
 
 ipcMain.handle('squirl:version', () => app.getVersion());
+ipcMain.handle('squirl:open-external', (_event, url: string) => {
+  const target = new URL(url);
+  if (target.protocol !== 'https:') throw new Error('Only HTTPS external links are allowed.');
+  return shell.openExternal(target.toString());
+});
 ipcMain.handle('squirl:select-path', async (_event, options?: { directories?: boolean }) => {
   const result = await dialog.showOpenDialog({
     properties: options?.directories ? ['openDirectory'] : ['openFile'],
