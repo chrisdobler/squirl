@@ -1634,7 +1634,7 @@ function App() {
       <aside className="leftRail">
         <div className="brand">
           <img
-            src={theme === 'dark' ? '/logo-dark.png' : '/logo-light.png'}
+            src={theme === 'dark' ? '/logo-dark-clean.png' : '/logo-light-clean.png'}
             alt="Squirl"
           />
           <span className="brandTagline">Keep your data. Keep it private.</span>

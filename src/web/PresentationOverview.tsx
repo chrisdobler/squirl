@@ -93,7 +93,7 @@ export function PresentationOverview({ onStart, mode = 'landing' }: Presentation
 
         <div className="overviewSquirlSystem">
           <header>
-            <img src="/logo-dark.png" alt="" />
+            <img src="/logo-dark-clean.png" alt="" />
             <div><span>Continuity + orchestration</span><strong>Squirl</strong></div>
           </header>
           <div className="overviewPipelineMap">
