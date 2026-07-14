@@ -23,7 +23,7 @@ preferences, unresolved threads, and the original intent become fragmented acros
 **squirl is different:**
 - 🧠 Recalls relevant context from prior conversations
 - 🐿️ Acts as a personal facilitator between you and specialized agents
-- 🗣️ Keeps local models, Claude Code, and Codex together in one shared room
+- 🗣️ Keeps local models, Claude Code, Codex, and PI together in one shared room
 - 🔌 Remains local-first and multi-provider
 
 Squirl is not the default task executor. It preserves intent, notices gaps and conflicts,
@@ -39,7 +39,7 @@ keeps work oriented, and prepares handoffs for your approval.
 - **Memory evaluation** for measuring retrieval and answer quality
 
 ### 🗣️ Shared Agent Room
-- **Named participants** backed by local models, Claude Code, or Codex
+- **Named participants** backed by local models, Claude Code, Codex, or PI Agent
 - **Explicit routing and bounded handoffs** between participants
 - **Continuous facilitation** at meaningful conflicts, blockers, decisions, and milestones
 
@@ -114,8 +114,8 @@ Switch instantly.
 The core chat, semantic memory, shared web/TUI runtime, agent room, prompt inspection,
 and layered memory evaluations are implemented. Current priorities include:
 
-- Persistent event delivery for background agents and multiple web clients
-- Better asynchronous multi-agent coordination
+- Harden persistent event reconnect behavior for background agents and multiple web clients
+- Add safe Claude Code interruption without dropping resumable session state
 - Query-extraction evaluation coverage
 - Improved visibility into stale or failed memory indexing
 - A decision on remote-agent transport scope

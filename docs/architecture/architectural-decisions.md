@@ -35,9 +35,10 @@ This is Squirl's consolidated architecture decision record. It records decisions
 | [ADR-011](#adr-011--memory-changes-are-evaluated-in-layers) | Memory changes are evaluated in layers | Accepted | 2026-06-19 |
 | [ADR-012](#adr-012--external-coding-agents-join-through-ui-agnostic-adapters) | External coding agents join through UI-agnostic adapters | Accepted | 2026-06-18 |
 | [ADR-013](#adr-013--agent-routing-is-explicit-and-bounded-by-default) | Agent routing is explicit and bounded by default | Accepted | 2026-06-18 |
-| [ADR-014](#adr-014--web-agent-events-use-the-request-stream-until-persistent-broadcast-exists) | Web agent events use the request stream for now | Accepted | 2026-06-18 |
+| [ADR-014](#adr-014--web-agent-events-use-the-request-stream-until-persistent-broadcast-exists) | Web agent events use the request stream for now | Superseded by ADR-017 | 2026-06-18 |
 | [ADR-015](#adr-015--dependency-health-is-probed-server-side-and-published-with-app-state) | Dependency health is server-side cached app state | Accepted | 2026-06-29 |
 | [ADR-016](#adr-016--architecture-documentation-lives-with-the-code) | Architecture documentation lives with the code | Accepted | 2026-07-10 |
+| [ADR-017](#adr-017--participant-turns-are-queued-independently-and-web-events-are-persistent) | Participant turns use independent queues and persistent events | Accepted | 2026-07-13 |
 
 ---
 
@@ -332,7 +333,7 @@ Automatic agent-to-agent handoffs can create unreviewed work, permission expansi
 
 ### Decision
 
-Connected participants are addressed through explicit, case-insensitive `@mention`s. Automatic handoff is disabled by default; when enabled it is capped by `maxHops`. Agent CLI permissions start conservatively: Codex is read-only and Claude uses its default permission mode unless configuration explicitly changes them.
+Connected participants are addressed through explicit, case-insensitive `@mention`s. Automatic handoff is disabled by default; when enabled it is capped by `maxHops`. Agent CLI permissions remain explicit: Codex defaults to workspace-scoped write access, while Claude defaults to accepting file edits. Read-only/plan and dangerous full-access modes remain explicit options, and Shift+Tab cycles only the safe modes for the selected agent.
 
 ### Consequences
 
@@ -346,7 +347,7 @@ Connected participants are addressed through explicit, case-insensitive `@mentio
 
 ## ADR-014 — Web agent events use the request stream until persistent broadcast exists
 
-**Status:** Accepted  
+**Status:** Superseded by ADR-017
 **Date:** 2026-06-18
 
 ### Context
@@ -369,7 +370,7 @@ For the current implementation, `/api/chat` remains open while addressed agent t
 
 ## ADR-015 — Dependency health is probed server-side and published with app state
 
-**Status:** Accepted  
+**Status:** Accepted
 **Date:** 2026-06-29
 
 ### Context
@@ -413,3 +414,27 @@ Architecture documentation is version-controlled Markdown under `docs/architectu
 ### Evidence
 
 [[README|Squirl Linear Pipeline]], [[overall-architecture]], [[status-tracker]], [[memory-and-eval]], and [[multi-agent-room]].
+
+## ADR-017 — Participant turns are queued independently and web events are persistent
+
+**Status:** Accepted
+**Date:** 2026-07-13
+
+### Context
+
+The request-bound stream in ADR-014 made one agent's turn a room-wide lock. It also let Squirl's handoff pipeline label remain visible while an external agent was actually working, and it prevented the user from continuing a conversation with another participant.
+
+### Decision
+
+Each participant owns an in-memory FIFO with at most one active turn, while different participants may execute concurrently. Web chat submission returns an acknowledgement and live room events are delivered independently through `GET /api/events`. Web/Electron and TUI presentation use participant activity state; only Squirl activity may display Squirl memory or model-pipeline labels.
+
+### Consequences
+
+- A busy participant accepts follow-ups into a visible outbox instead of blocking the composer.
+- Queued turns are intentionally not replayed after restart and enter durable history only when execution starts.
+- Cancellation targets the selected participant, preserves its queue, and is offered only when the adapter can interrupt safely.
+- Concurrent UI updates must identify messages by id instead of assuming the newest message owns the active stream.
+
+### Evidence
+
+`src/agents/turn-scheduler.ts`, `src/web/runtime.ts`, `src/web/server.ts`, `src/web/renderer.tsx`, and `src/app.tsx`.

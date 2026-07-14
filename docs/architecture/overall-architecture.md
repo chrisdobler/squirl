@@ -58,7 +58,7 @@ flowchart TB
     hosted["OpenAI / Anthropic"]
     local["Local OpenAI-compatible gateway"]
     chroma["ChromaDB"]
-    cliProcesses["claude / codex subprocesses"]
+    cliProcesses["claude / codex / pi subprocesses"]
   end
 
   user --> tui
@@ -123,4 +123,3 @@ flowchart TB
 ## Current Reading
 
 The architecture is a shared runtime with multiple frontends. The TUI talks directly to the orchestrator, while the web and Electron surfaces use `SquirlRuntime` as the stateful bridge for config, history, health, evals, agents, and streaming chat events.
-
