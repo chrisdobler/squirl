@@ -14,7 +14,7 @@ afterEach(() => rmSync(directory, { recursive: true, force: true }));
 describe('task activity store', () => {
   it('round-trips an atomic private snapshot and rejects corrupt data', () => {
     const snapshot: TaskActivitySnapshot = {
-      version: 1,
+      version: 3,
       generatedAt: '2026-07-13T18:00:00.000Z',
       sourceWatermark: 'watermark',
       tasks: [{ id: 'task-1', title: 'Build task feed', lastActiveAt: '2026-07-13T17:59:00.000Z', participantIds: ['codex'], evidenceIds: ['u1'] }],
@@ -32,5 +32,15 @@ describe('task activity store', () => {
     writeFileSync(path, JSON.stringify({ version: 2, tasks: [] }), 'utf-8');
     expect(loadTaskActivitySnapshot(path)).toBeNull();
     expect(readFileSync(path, 'utf-8')).toContain('"version":2');
+  });
+
+  it.each([1, 2, 3] as const)('continues to read snapshot version %s', (version) => {
+    mkdirSync(directory, { recursive: true });
+    const snapshot = {
+      version, generatedAt: '2026-07-13T18:00:00.000Z', sourceWatermark: 'test',
+      tasks: [{ id: 'task-1', title: 'Improve task title quality', lastActiveAt: '2026-07-13T18:00:00.000Z', participantIds: [], evidenceIds: [] }],
+    };
+    writeFileSync(path, JSON.stringify(snapshot), 'utf-8');
+    expect(loadTaskActivitySnapshot(path)).toEqual(snapshot);
   });
 });

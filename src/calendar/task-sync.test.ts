@@ -22,12 +22,13 @@ describe('syncInferredTaskEvents', () => {
     expect(idle.entries[0]).toMatchObject({ endAt: '2026-07-13T18:06:00.000Z', lastActiveAt: '2026-07-13T18:00:00Z' });
     expect(updateTaskEvent).not.toHaveBeenCalled();
     const rolling = await syncInferredTaskEvents({
-      snapshot: { version: 2, generatedAt: '2026-07-13T18:10:00Z', sourceWatermark: 'b', tasks: [{ id: 'task-2', title: 'Build Squirl', lastActiveAt: '2026-07-13T18:09:00Z', participantIds: [], evidenceIds: [] }] },
+      snapshot: { version: 3, generatedAt: '2026-07-13T18:10:00Z', sourceWatermark: 'b', tasks: [{ id: 'task-1', title: 'Improve Squirl task visibility', lastActiveAt: '2026-07-13T18:09:00Z', participantIds: [], evidenceIds: [] }] },
       state: idle, calendarId: 'primary', client: { createTaskEvent, updateTaskEvent }, save,
       now: Date.parse('2026-07-13T18:10:00Z'),
       activeHorizonMs: 60_000,
     });
-    expect(rolling.entries[0]).toMatchObject({ taskId: 'task-2', startAt: '2026-07-13T18:00:00Z', endAt: '2026-07-13T18:11:00.000Z', status: 'active' });
+    expect(rolling.entries[0]).toMatchObject({ taskId: 'task-1', title: 'Improve Squirl task visibility', startAt: '2026-07-13T18:00:00Z', endAt: '2026-07-13T18:11:00.000Z', status: 'active' });
+    expect(createTaskEvent).toHaveBeenCalledOnce();
     const ended = await syncInferredTaskEvents({
       snapshot: { version: 2, generatedAt: '2026-07-13T18:12:00Z', sourceWatermark: 'c', tasks: [] },
       state: rolling, calendarId: 'primary', client: { createTaskEvent, updateTaskEvent }, save,

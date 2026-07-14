@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { LogEntry } from '../history.js';
-import { buildRecentTaskEvidence, buildTaskEvidenceForRange } from './evidence.js';
+import { buildRecentTaskEvidence, buildTaskEvidenceForRange, taskEvidenceWatermark } from './evidence.js';
 
 const now = Date.parse('2026-07-13T18:00:00.000Z');
 
@@ -39,6 +39,22 @@ describe('task activity evidence', () => {
 
     expect(evidence).toHaveLength(1);
     expect(evidence[0]?.assistantText).toBeUndefined();
+  });
+
+  it('keeps the activity watermark stable for tool chatter but advances it for a final agent response', () => {
+    const user = entry('2026-07-13T17:20:00.000Z', { id: 'u1', role: 'user', content: 'improve task titles', participantId: 'codex' });
+    const baseline = taskEvidenceWatermark(buildRecentTaskEvidence([user], Date.parse('2026-07-13T17:30:00.000Z')));
+    const withTool = taskEvidenceWatermark(buildRecentTaskEvidence([
+      user,
+      entry('2026-07-13T17:21:00.000Z', { id: 'tool-1', role: 'tool', content: 'command output', toolCallId: 'call-1', toolName: 'shell' }),
+    ], Date.parse('2026-07-13T17:30:00.000Z')));
+    const withAgent = taskEvidenceWatermark(buildRecentTaskEvidence([
+      user,
+      entry('2026-07-13T17:22:00.000Z', { id: 'a1', role: 'assistant', content: 'Updated the classifier.', participantId: 'codex' }),
+    ], Date.parse('2026-07-13T17:30:00.000Z')));
+
+    expect(withTool).toBe(baseline);
+    expect(withAgent).not.toBe(baseline);
   });
 
   it('advances for explicit agent responses but not local assistant output', () => {

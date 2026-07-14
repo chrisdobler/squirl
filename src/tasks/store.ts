@@ -28,7 +28,7 @@ export function loadTaskActivitySnapshot(path = taskActivityPath()): TaskActivit
   if (!existsSync(path)) return null;
   try {
     const value = JSON.parse(readFileSync(path, 'utf-8')) as Partial<TaskActivitySnapshot>;
-    if ((value.version !== 1 && value.version !== 2) || typeof value.generatedAt !== 'string' || !Number.isFinite(Date.parse(value.generatedAt)) || typeof value.sourceWatermark !== 'string') return null;
+    if ((value.version !== 1 && value.version !== 2 && value.version !== 3) || typeof value.generatedAt !== 'string' || !Number.isFinite(Date.parse(value.generatedAt)) || typeof value.sourceWatermark !== 'string') return null;
     if (!Array.isArray(value.tasks) || !value.tasks.every(isTask)) return null;
     return value as TaskActivitySnapshot;
   } catch {

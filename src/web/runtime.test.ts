@@ -476,24 +476,54 @@ describe('SquirlRuntime agents', () => {
     ]);
   });
 
-  it('dispatches put-back-on phrasing and immediately records the delegated current task', async () => {
+  it('reclassifies resumed work with a descriptive title instead of publishing a placeholder', async () => {
+    const recent = new Date().toISOString();
+    writeFileSync(join(testHome, '.squirl', 'task-activity.json'), JSON.stringify({
+      version: 3,
+      generatedAt: recent,
+      sourceWatermark: 'seed',
+      tasks: [{
+        id: 'task-overview', title: 'Improve overview service layout', summary: 'The overview service layout is being refined.',
+        lastActiveAt: recent, participantIds: ['codex-squirl'], evidenceIds: ['overview-request'], source: 'inferred',
+      }],
+    }) + '\n', 'utf-8');
     const runtime = await loadRuntime();
     await runtime.addAgent('codex', { id: 'codex-squirl' });
+    for (let attempt = 0; attempt < 5; attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
     mockDelegationClassification = '{"decision":"delegate","confidence":"high","targetIds":["codex-squirl"],"task":"the task it was doing before?"}';
     const dispatchTo = vi.fn(async () => undefined);
-    (runtime as unknown as { coordinator: { dispatchTo: typeof dispatchTo } }).coordinator.dispatchTo = dispatchTo;
+    const internals = runtime as unknown as { coordinator: { dispatchTo: typeof dispatchTo }; taskMetaLLM: any; taskActivitySnapshot: any };
+    internals.coordinator.dispatchTo = dispatchTo;
+    internals.taskActivitySnapshot = {
+      version: 3, generatedAt: recent, sourceWatermark: 'seed',
+      tasks: [{
+        id: 'task-overview', title: 'Improve overview service layout', summary: 'The overview service layout is being refined.',
+        lastActiveAt: recent, participantIds: ['codex-squirl'], evidenceIds: ['overview-request'], source: 'inferred',
+      }],
+    };
+    internals.taskMetaLLM = { complete: async ({ messages }: any) => {
+      const input = JSON.parse(messages[0].content);
+      const evidenceId = input.recentEvidence.at(-1).id;
+      return JSON.stringify({ confidence: 'high', tasks: [{
+        title: 'Improve overview service layout',
+        summary: 'The overview layout work is active again with workspace access restored.',
+        evidenceIds: [evidenceId], previousTaskIds: input.existingTasks[0] ? [input.existingTasks[0].id] : [],
+      }] });
+    } };
 
     await runtime.chat('Can you put codex squirrel back on the task it was doing before?', 'squirl', () => undefined);
+    for (let attempt = 0; attempt < 10 && runtime.getTaskActivityState().status !== 'ready'; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
 
     expect(preparedHandoffs).toEqual([expect.objectContaining({
       target: expect.objectContaining({ id: 'codex-squirl' }),
       task: 'the task it was doing before?',
     })]);
     expect(dispatchTo).toHaveBeenCalledOnce();
-    expect(runtime.getTaskActivityState().tasks[0]).toMatchObject({
-      title: 'Resume previous task',
-      participantIds: ['codex-squirl'],
-    });
+    expect(runtime.getTaskActivityState().tasks[0]).toMatchObject({ title: 'Improve overview service layout' });
+    expect(runtime.getTaskActivityState().tasks[0]?.participantIds).toContain('codex-squirl');
+    expect(runtime.getTaskActivityState().tasks.some((task) => task.title === 'Resume previous task')).toBe(false);
   });
 
   it('persists uncertain delegation and dispatches it exactly once after yes', async () => {
@@ -541,25 +571,47 @@ describe('SquirlRuntime agents', () => {
     expect(dispatchTo).toHaveBeenCalledOnce();
   });
 
-  it('records direct agent assignments and advances them on that agent response', async () => {
+  it('reconciles direct assignments and final agent responses without provisional titles', async () => {
     const runtime = await loadRuntime();
+    await new Promise<void>((resolve) => setImmediate(resolve));
     await runtime.addAgent('codex', { id: 'codex-squirl' });
     const dispatchTo = vi.fn(async () => undefined);
     const internals = runtime as unknown as {
       coordinator: { dispatchTo: typeof dispatchTo };
       handleAgentEvent: (event: unknown) => void;
+      taskMetaLLM: any;
     };
     internals.coordinator.dispatchTo = dispatchTo;
+    let taskClassifications = 0;
+    internals.taskMetaLLM = { complete: async ({ messages }: any) => {
+      taskClassifications += 1;
+      const input = JSON.parse(messages[0].content);
+      const existing = input.existingTasks[0];
+      return JSON.stringify({ confidence: 'high', tasks: [{
+        title: 'Separate local AI infrastructure',
+        summary: 'Local AI infrastructure is being moved outside the Squirl presentation box.',
+        evidenceIds: input.recentEvidence.map((item: any) => item.id),
+        previousTaskIds: existing ? [existing.id] : [],
+      }] });
+    } };
 
     await runtime.chat('Move local LLM infrastructure outside the Squirl box', 'codex-squirl', () => undefined);
+    for (let attempt = 0; attempt < 10 && runtime.getTaskActivityState().tasks.length === 0; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(taskClassifications).toBeGreaterThan(0);
     const assigned = runtime.getTaskActivityState().tasks[0]!;
-    expect(assigned).toMatchObject({ title: 'Move local LLM infrastructure outside the Squirl box', participantIds: ['codex-squirl'] });
+    expect(assigned).toMatchObject({ title: 'Separate local AI infrastructure', participantIds: ['codex-squirl'] });
 
     internals.handleAgentEvent({ type: 'message-start', participantId: 'codex-squirl', messageId: 'agent-update' });
     internals.handleAgentEvent({ type: 'message-end', participantId: 'codex-squirl', messageId: 'agent-update', content: 'Working on the overview now.' });
+    for (let attempt = 0; attempt < 10 && !runtime.getTaskActivityState().tasks[0]?.evidenceIds.includes('agent-update'); attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
     const advanced = runtime.getTaskActivityState().tasks[0]!;
+    expect(advanced.id).toBe(assigned.id);
     expect(Date.parse(advanced.lastActiveAt)).toBeGreaterThanOrEqual(Date.parse(assigned.lastActiveAt));
-    expect(advanced.evidenceIds).toContain('agent-update');
+    expect(taskClassifications).toBeGreaterThanOrEqual(2);
   });
 
   it('keeps a durable stale snapshot when refresh is unavailable and expires it only after a reliable refresh', async () => {
@@ -604,7 +656,7 @@ describe('SquirlRuntime agents', () => {
     }] };
     internals.taskMetaLLM = { complete: async () => {
       classifications += 1;
-      return JSON.stringify({ confidence: 'high', tasks: [{ title: 'Build inferred task activity', summary: 'The runtime is classifying recent work into a sidebar task feed.', evidenceIds: ['task-user'] }] });
+      return JSON.stringify({ confidence: 'high', tasks: [{ title: 'Improve inferred task visibility', summary: 'The runtime is classifying recent work into a sidebar task feed.', evidenceIds: ['task-user'], previousTaskIds: [] }] });
     } };
     internals.taskActivityEmit = (event) => events.push(event);
     internals.markTaskActivityChanged();
@@ -613,7 +665,7 @@ describe('SquirlRuntime agents', () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(classifications).toBe(1);
-    expect(runtime.getTaskActivityState()).toMatchObject({ status: 'ready', tasks: [{ title: 'Build inferred task activity' }] });
+    expect(runtime.getTaskActivityState()).toMatchObject({ status: 'ready', tasks: [{ title: 'Improve inferred task visibility' }] });
     expect(events).toContainEqual(expect.objectContaining({ type: 'task-activity', taskActivity: expect.objectContaining({ status: 'ready' }) }));
   });
 });

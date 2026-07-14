@@ -50,7 +50,7 @@ import { resolvePiBinary } from '../agents/pi-models.js';
 import { buildRecentTaskEvidence, TASK_ACTIVITY_WINDOW_MS, taskEvidenceWatermark } from '../tasks/evidence.js';
 import { classifyCurrentTasks } from '../tasks/classifier.js';
 import { loadTaskActivitySnapshot, saveTaskActivitySnapshot } from '../tasks/store.js';
-import type { TaskActivityItem, TaskActivitySnapshot, TaskActivityState } from '../tasks/types.js';
+import type { TaskActivitySnapshot, TaskActivityState } from '../tasks/types.js';
 import { TASK_CLARIFICATION_CHECK_MS, hasCurrentTask, lastTaskClarificationAt, shouldAskTaskClarification, taskClarificationQuestion, taskUncertaintyStart } from '../tasks/clarification.js';
 import { CALENDAR_WRITE_SCOPE, GoogleCalendarClient } from '../calendar/google.js';
 import { clearCalendarClientCredentials, clearCalendarCredentials, clearCalendarSnapshot, loadCalendarClientCredentials, loadCalendarSnapshot, loadCalendarTokens, loadTaskCalendarSync, saveCalendarSnapshot, saveCalendarTokens, saveTaskCalendarSync } from '../calendar/store.js';
@@ -77,14 +77,6 @@ export interface UpdateAgentOptions {
 
 const CODEX_SANDBOXES = new Set<CodexSandbox>(['read-only', 'workspace-write', 'danger-full-access']);
 const CLAUDE_PERMISSION_MODES = new Set<ClaudePermissionMode>(['default', 'acceptEdits', 'plan', 'bypassPermissions']);
-
-function delegatedTaskTitle(task: string): string {
-  const compact = task.replace(/\s+/g, ' ').trim();
-  if (/\btask\s+(?:it|they|he|she)\s+was\s+doing\s+before\b/i.test(compact)) return 'Resume previous task';
-  const withoutLead = compact.replace(/^(?:please\s+)?(?:work(?:ing)?\s+on|resume|continue)\s+/i, '').trim();
-  const title = withoutLead || compact || 'Delegated task';
-  return title.length > 96 ? `${title.slice(0, 95)}…` : title;
-}
 
 function defaultModelFromConfig(config?: SquirlConfig): SelectedModel {
   const provider = config?.defaultProvider ?? 'anthropic';
@@ -835,7 +827,6 @@ export class SquirlRuntime extends EventEmitter {
         this.messages = [...this.messages, userMsg];
         appendMessage(userMsg);
         this.historySignature = historySignature();
-        if (delegation.targetIds.length > 0) this.recordDelegatedTask(delegation, userMsg.id);
         this.markTaskActivityChanged(emit);
         this.emitTaskActivity();
         emit({ type: 'message', message: userMsg });
@@ -878,7 +869,6 @@ export class SquirlRuntime extends EventEmitter {
         this.messages = [...this.messages, userMsg];
         appendMessage(userMsg);
         this.historySignature = historySignature();
-        this.recordAssignedTask([recipientId], value, userMsg.id);
         this.markTaskActivityChanged(emit);
         this.emitTaskActivity();
         emit({ type: 'message', message: userMsg });
@@ -1011,53 +1001,6 @@ export class SquirlRuntime extends EventEmitter {
     return this.coordinator.listParticipants().find((p) => p.id === id)?.label ?? id;
   }
 
-  private recordDelegatedTask(delegation: DelegationIntent, evidenceId: string, now = new Date()): void {
-    this.recordAssignedTask(delegation.targetIds, delegation.task, evidenceId, now);
-  }
-
-  private recordAssignedTask(participantIds: string[], description: string, evidenceId: string, now = new Date()): void {
-    const lastActiveAt = now.toISOString();
-    const task: TaskActivityItem = {
-      id: `delegation-${evidenceId}`,
-      title: delegatedTaskTitle(description),
-      summary: `Delegated to ${participantIds.map((id) => `@${id}`).join(', ')}: ${description}`,
-      lastActiveAt,
-      participantIds: [...participantIds],
-      evidenceIds: [evidenceId],
-      source: 'inferred',
-    };
-    const snapshot: TaskActivitySnapshot = {
-      version: 2,
-      generatedAt: lastActiveAt,
-      sourceWatermark: `delegation:${evidenceId}`,
-      tasks: [task],
-    };
-    saveTaskActivitySnapshot(snapshot);
-    this.taskActivitySnapshot = snapshot;
-    this.taskRefreshFailed = false;
-    this.taskSourceDirty = false;
-    this.updateTaskUncertainty(now.getTime());
-  }
-
-  private recordAssignedParticipantActivity(participantId: string, evidenceId: string, now = new Date()): void {
-    if (!this.taskActivitySnapshot?.tasks.some((task) => task.participantIds.includes(participantId))) return;
-    const lastActiveAt = now.toISOString();
-    const snapshot: TaskActivitySnapshot = {
-      ...this.taskActivitySnapshot,
-      version: 2,
-      generatedAt: lastActiveAt,
-      sourceWatermark: `agent-response:${evidenceId}`,
-      tasks: this.taskActivitySnapshot.tasks.map((task) => task.participantIds.includes(participantId)
-        ? { ...task, lastActiveAt, evidenceIds: [...new Set([...task.evidenceIds, evidenceId])] }
-        : task),
-    };
-    saveTaskActivitySnapshot(snapshot);
-    this.taskActivitySnapshot = snapshot;
-    this.taskRefreshFailed = false;
-    this.taskSourceDirty = false;
-    this.updateTaskUncertainty(now.getTime());
-  }
-
   private syncIdentityContext(): void {
     if (typeof this.orchestrator.setIdentityContext !== 'function') return;
     this.orchestrator.setIdentityContext({
@@ -1094,24 +1037,29 @@ export class SquirlRuntime extends EventEmitter {
     try {
       while (this.taskRefreshQueued) {
         this.taskRefreshQueued = false;
-        const llm = this.taskMetaLLM;
+        const llm = this.taskMetaLLM ?? this.routingMetaLLM;
         const embedder = this.embedder;
         const vectorStore = this.vectorStore;
-        if (!this.config.index?.enabled || !llm || !embedder || !vectorStore) {
-          throw new Error('Semantic memory is unavailable for task classification.');
-        }
         const historyEntries = getAllHistoryFiles().flatMap((file) => readEntries(file)).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
         const evidence = buildRecentTaskEvidence(historyEntries);
+        const sourceWatermark = taskEvidenceWatermark(evidence);
+        if (sourceWatermark === this.taskActivitySnapshot?.sourceWatermark) {
+          this.taskRefreshFailed = false;
+          this.taskSourceDirty = false;
+          this.updateTaskUncertainty();
+          this.emitTaskActivity();
+          continue;
+        }
         const snapshot = await classifyCurrentTasks({
           evidence,
           llm,
           embedder,
           vectorStore,
           previous: this.taskActivitySnapshot,
-          recallK: this.config.index.recallK ?? 8,
+          recallK: this.config.index?.recallK ?? 8,
           calendarEvents: this.calendarSnapshot?.events ?? [],
         });
-        snapshot.sourceWatermark = taskEvidenceWatermark(evidence);
+        snapshot.sourceWatermark = sourceWatermark;
         saveTaskActivitySnapshot(snapshot);
         this.taskActivitySnapshot = snapshot;
         this.taskRefreshFailed = false;
@@ -1232,7 +1180,6 @@ export class SquirlRuntime extends EventEmitter {
         this.messages = this.messages.map((m) => (m.id === event.messageId ? finalized : m));
         appendMessage(finalized);
         this.historySignature = historySignature();
-        if (pid) this.recordAssignedParticipantActivity(pid, finalized.id);
         this.markTaskActivityChanged(emit);
         emit({ type: 'assistant-final', message: finalized });
         break;

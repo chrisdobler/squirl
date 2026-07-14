@@ -36,7 +36,7 @@ export interface TaskActivityState {
 }
 
 export interface TaskActivitySnapshot {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   generatedAt: string;
   sourceWatermark: string;
   tasks: TaskActivityItem[];
