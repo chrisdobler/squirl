@@ -1,4 +1,4 @@
-// Core contracts for "remoting in" headless coding agents (Claude Code, Codex) as
+// Core contracts for "remoting in" headless coding agents (Claude Code, Codex, PI) as
 // group-chat participants. This module is UI-agnostic and Node-only; both the Ink TUI
 // and the web/Electron runtime drive it.
 //
@@ -9,8 +9,10 @@
 
 import type { EffortLevel, ResponseMeta } from '../types.js';
 
-export type AgentKind = 'claude-code' | 'codex';
+export type AgentKind = 'claude-code' | 'codex' | 'pi';
 export type TransportKind = 'local' | 'ssh';
+
+export type PiToolMode = 'coding' | 'read-only';
 
 /** Lifecycle state of a single agent session. */
 export type AgentStatus = 'starting' | 'ready' | 'busy' | 'stopped' | 'error';
@@ -47,13 +49,15 @@ export interface AgentDescriptor {
   bin?: string;
   model?: string;
   effort?: EffortLevel;
-  /** Claude only. Defaults to 'default' (asks before edits/commands). */
+  /** Claude only. Defaults to 'acceptEdits' (writes without edit prompts). */
   permissionMode?: ClaudePermissionMode;
   /** Claude only. Skip hooks/plugins/auto-memory. NOTE: breaks OAuth auth — opt-in for API-key users. */
   bare?: boolean;
-  /** Codex only. Defaults to 'read-only'. */
+  /** Codex only. Defaults to 'workspace-write'. */
   sandbox?: CodexSandbox;
-  /** Resume target: a UUID for Claude (--session-id) or a Codex thread id (exec resume). */
+  /** PI only. Defaults to 'coding'; PI itself does not provide a sandbox or permission prompts. */
+  piToolMode?: PiToolMode;
+  /** Resume target: a Claude UUID, Codex thread id, or PI session id/path. */
   sessionId?: string;
   /** Future transport config; unused while transport === 'local'. */
   ssh?: { host: string; user?: string; identity?: string };
@@ -101,7 +105,23 @@ export type AgentEvent =
   | { type: 'usage'; participantId: string; usage: AgentUsage }
   | { type: 'turn-end'; participantId: string }
   | { type: 'error'; participantId: string; message: string }
-  | { type: 'exit'; participantId: string; code: number | null };
+  | { type: 'exit'; participantId: string; code: number | null }
+  | { type: 'interaction-request'; participantId: string; request: AgentInteractionRequest }
+  | { type: 'interaction-notify'; participantId: string; message: string; level: 'info' | 'warning' | 'error' }
+  | { type: 'interaction-status'; participantId: string; key: string; text?: string }
+  | { type: 'interaction-editor-prefill'; participantId: string; text: string };
+
+export type AgentInteractionRequest =
+  | { id: string; method: 'select'; title?: string; message?: string; options: string[] }
+  | { id: string; method: 'confirm'; title?: string; message?: string }
+  | { id: string; method: 'input'; title?: string; message?: string; placeholder?: string }
+  | { id: string; method: 'editor'; title?: string; message?: string; prefill?: string };
+
+export interface AgentInteractionResponse {
+  value?: string;
+  confirmed?: boolean;
+  cancelled?: boolean;
+}
 
 /** A live agent session. The caller cannot tell Claude (persistent) from Codex (per-turn) apart. */
 export interface AgentSession {
@@ -113,6 +133,8 @@ export interface AgentSession {
   send(text: string): Promise<void>;
   /** Cancel the in-flight turn, if any. */
   interrupt(): Promise<void>;
+  /** Reply to an agent-owned extension/UI request when the harness supports it. */
+  respondToInteraction?(id: string, response: AgentInteractionResponse): Promise<void>;
   /** Tear down the process/transport. */
   stop(): Promise<void>;
   /** Subscribe to the session's event stream. Returns an unsubscribe function. */

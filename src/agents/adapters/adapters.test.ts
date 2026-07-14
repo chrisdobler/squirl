@@ -29,11 +29,18 @@ describe('ClaudeCodeAdapter', () => {
     expect(spec.args).toContain('--input-format');
     expect(spec.args).toContain('stream-json');
     expect(spec.args).toContain('--include-partial-messages');
-    // Safe default permission mode, never --bare (would break OAuth), never skip-permissions.
-    expect(spec.args.join(' ')).toContain('--permission-mode default');
+    // Write-enabled default, never --bare (would break OAuth), never skip-permissions.
+    expect(spec.args.join(' ')).toContain('--permission-mode acceptEdits');
     expect(spec.args).not.toContain('--bare');
     expect(spec.args).not.toContain('--dangerously-skip-permissions');
     expect(agent.status).toBe('ready');
+  });
+
+  it.each(['default', 'acceptEdits', 'plan', 'bypassPermissions'] as const)('passes the configured %s permission mode to Claude', async (permissionMode) => {
+    const transport = new FakeTransport();
+    const agent = new ClaudeCodeAdapter({ ...claudeDescriptor, permissionMode }, transport);
+    await agent.start();
+    expect(transport.lastSpawn.spec.args.join(' ')).toContain(`--permission-mode ${permissionMode}`);
   });
 
   it('writes a stream-json user turn to stdin on send', async () => {
@@ -87,7 +94,7 @@ describe('CodexAdapter', () => {
     expect(transport.lastSpawn.spec.args).toContain('model_reasoning_effort="high"');
   });
 
-  it('runs `codex exec` for the first turn (prompt via stdin, read-only sandbox)', async () => {
+  it('runs `codex exec` for the first turn (prompt via stdin, workspace-write sandbox)', async () => {
     const transport = new FakeTransport();
     const agent = new CodexAdapter(codexDescriptor, transport);
     await agent.start();
@@ -97,9 +104,17 @@ describe('CodexAdapter', () => {
     expect(spec.command).toBe('codex');
     expect(spec.args.slice(0, 2)).toEqual(['exec', '-']);
     expect(spec.args).toContain('--json');
-    expect(spec.args.join(' ')).toContain('--sandbox read-only');
+    expect(spec.args.join(' ')).toContain('--sandbox workspace-write');
     expect(handle.stdinData).toBe('list the files');
     expect(handle.stdinEnded).toBe(true);
+  });
+
+  it.each(['read-only', 'workspace-write', 'danger-full-access'] as const)('passes the configured %s sandbox to Codex', async (sandbox) => {
+    const transport = new FakeTransport();
+    const agent = new CodexAdapter({ ...codexDescriptor, sandbox }, transport);
+    await agent.start();
+    await agent.send('work');
+    expect(transport.lastSpawn.spec.args.join(' ')).toContain(`--sandbox ${sandbox}`);
   });
 
   it('captures the thread id and resumes it on the next turn', async () => {

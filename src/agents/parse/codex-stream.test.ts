@@ -65,4 +65,17 @@ describe('createCodexParser', () => {
     expect(events).toContainEqual({ type: 'exit', participantId: 'codex', code: 1 });
     expect(events.some((e) => e.type === 'error')).toBe(true);
   });
+
+  it('extracts useful API messages from error and turn.failed events', () => {
+    const parser = makeParser();
+    expect(parser.push(JSON.stringify({ type: 'error', message: JSON.stringify({ error: { message: 'upgrade Codex' } }) })))
+      .toEqual([{ type: 'error', participantId: 'codex', message: 'upgrade Codex' }]);
+    expect(parser.push(JSON.stringify({ type: 'turn.failed', error: { message: 'model unavailable' } })))
+      .toEqual([{ type: 'error', participantId: 'codex', message: 'model unavailable' }]);
+    expect(parser.push(JSON.stringify({ type: 'item.completed', item: { type: 'error', message: 'metadata missing' } })))
+      .toEqual([{
+        type: 'tool-end', participantId: 'codex', toolId: '', toolName: 'diagnostic',
+        result: 'metadata missing', ok: false,
+      }]);
+  });
 });

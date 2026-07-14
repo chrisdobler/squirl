@@ -1,4 +1,5 @@
 import type { MetaLLM } from './meta-extract.js';
+import type { SquirlConfig } from '../config.js';
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { searchLog } from './debug.js';
@@ -135,5 +136,21 @@ export function createMetaLLM(spec: MetaLLMSpec): MetaLLM {
     ...(spec.apiKey ? { apiKey: spec.apiKey } : {}),
     ...(spec.timeoutMs ? { timeoutMs: spec.timeoutMs } : {}),
     ...(spec.baseUrl ? { baseUrl: spec.baseUrl } : {}),
+  });
+}
+
+/** Build the small configured model used by JSON-only runtime classifiers. */
+export function createConfiguredMetaLLM(config: SquirlConfig, timeoutMs?: number): MetaLLM {
+  const provider = config.index?.metaProvider ?? config.defaultProvider ?? 'openai';
+  const model = config.index?.metaModel ?? (provider === 'local'
+    ? (config.defaultModel ?? 'default')
+    : provider === 'anthropic'
+      ? 'claude-haiku-4-5-20251001'
+      : 'gpt-4o-mini');
+  return createMetaLLM({
+    provider,
+    model,
+    ...(provider === 'local' && config.localBaseUrl ? { baseUrl: config.localBaseUrl } : {}),
+    ...(timeoutMs ? { timeoutMs } : {}),
   });
 }

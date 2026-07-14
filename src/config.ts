@@ -3,7 +3,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 
 import type { LocalBackend } from './api.js';
-import type { AgentKind, ClaudePermissionMode, CodexSandbox } from './agents/types.js';
+import type { AgentKind, ClaudePermissionMode, CodexSandbox, PiToolMode } from './agents/types.js';
 import type { EffortLevel } from './types.js';
 
 export interface AgentProfile {
@@ -21,6 +21,7 @@ export interface AgentProfile {
   cwd?: string;
   permissionMode?: ClaudePermissionMode;
   sandbox?: CodexSandbox;
+  piToolMode?: PiToolMode;
   /** Auto-connect this profile when Squirl starts. Defaults to true for compatibility. */
   reconnect?: boolean;
 }
@@ -34,10 +35,14 @@ export interface AgentsConfig {
   claudeBin?: string;
   /** Path/name of the codex binary. Default 'codex' (on PATH). */
   codexBin?: string;
-  /** Default Claude permission mode for new agents. Default 'default' (asks before edits/commands). */
+  /** Path/name of the PI binary. Default 'pi' (on PATH). */
+  piBin?: string;
+  /** Default Claude permission mode for new agents. Default 'acceptEdits'. */
   defaultClaudePermissionMode?: ClaudePermissionMode;
-  /** Default Codex sandbox for new agents. Default 'read-only'. */
+  /** Default Codex sandbox for new agents. Default 'workspace-write'. */
   defaultCodexSandbox?: CodexSandbox;
+  /** Default PI tool posture. PI has no native sandbox; default 'coding'. */
+  defaultPiToolMode?: PiToolMode;
   /** Agents to auto-start when squirl launches. */
   defaults?: AgentProfile[];
 }
@@ -79,6 +84,18 @@ export interface SquirlConfig {
       layer?: 1 | 2 | 3;            // default 1
       mode?: 'frozen' | 'live';     // default 'frozen'
     };
+  };
+  calendar?: {
+    enabled?: boolean;
+    /** Public Google installed-app OAuth client id. OAuth tokens are stored separately. */
+    googleClientId?: string;
+    selectedCalendarIds?: string[];
+    /** Create and maintain Squirl-owned events for inferred active work. */
+    syncInferredTasks?: boolean;
+    /** Destination calendar for Squirl-owned inferred-task events. */
+    taskWriteCalendarId?: string;
+    /** Background refresh cadence. Defaults to five minutes. */
+    refreshMinutes?: number;
   };
   agents?: AgentsConfig;
 }

@@ -19,6 +19,17 @@ interface CodexItem {
   aggregated_output?: string;
   exit_code?: number | null;
   status?: string;
+  message?: string;
+}
+
+function errorMessage(value: unknown, fallback = 'codex turn failed'): string {
+  if (typeof value !== 'string') return fallback;
+  try {
+    const parsed = JSON.parse(value) as { error?: { message?: string }; message?: string };
+    return parsed.error?.message ?? parsed.message ?? value;
+  } catch {
+    return value;
+  }
 }
 
 export function createCodexParser(opts: ParserOptions): StreamParser {
@@ -43,6 +54,13 @@ export function createCodexParser(opts: ParserOptions): StreamParser {
 
       case 'item.completed': {
         const item = (obj.item ?? {}) as CodexItem;
+        if (item.type === 'error') {
+          return [{
+            type: 'tool-end', participantId,
+            toolId: String(item.id ?? ''), toolName: 'diagnostic',
+            result: errorMessage(item.message), ok: false,
+          }];
+        }
         if (item.type === 'agent_message') {
           const messageId = newMessageId();
           const text = String(item.text ?? '');
@@ -72,7 +90,8 @@ export function createCodexParser(opts: ParserOptions): StreamParser {
 
       case 'turn.failed':
       case 'error': {
-        const message = typeof obj.message === 'string' ? obj.message : 'codex turn failed';
+        const nested = obj.error as { message?: string } | undefined;
+        const message = errorMessage(obj.message ?? nested?.message);
         return [{ type: 'error', participantId, message }];
       }
 

@@ -8,9 +8,9 @@ class FakeSession implements AgentSession {
   sent: string[] = [];
   private listeners = new Set<(event: AgentEvent) => void>();
 
-  constructor(readonly descriptor: AgentDescriptor, private readonly reply: (text: string) => string) {}
+  constructor(readonly descriptor: AgentDescriptor, private readonly reply: (text: string) => string, private readonly failStart = false) {}
 
-  start(): Promise<void> { return Promise.resolve(); }
+  start(): Promise<void> { return this.failStart ? Promise.reject(new Error(`failed to start ${this.descriptor.id}`)) : Promise.resolve(); }
   interrupt(): Promise<void> { return Promise.resolve(); }
   stop(): Promise<void> { return Promise.resolve(); }
   onEvent(handler: (event: AgentEvent) => void): () => void {
@@ -38,7 +38,7 @@ interface Harness {
   events: AgentEvent[];
 }
 
-function makeHarness(opts: { autoHandoff?: boolean; maxHops?: number; replies?: Record<string, (text: string) => string> } = {}): Harness {
+function makeHarness(opts: { autoHandoff?: boolean; maxHops?: number; replies?: Record<string, (text: string) => string>; failStartIds?: string[] } = {}): Harness {
   const built = new Map<string, FakeSession>();
   const localInputs: string[] = [];
   const events: AgentEvent[] = [];
@@ -53,7 +53,7 @@ function makeHarness(opts: { autoHandoff?: boolean; maxHops?: number; replies?: 
       emit({ type: 'turn-end', participantId: 'squirl' });
     },
     createSession: (descriptor) => {
-      const session = new FakeSession(descriptor, replies[descriptor.id] ?? (() => 'ok'));
+      const session = new FakeSession(descriptor, replies[descriptor.id] ?? (() => 'ok'), opts.failStartIds?.includes(descriptor.id));
       built.set(descriptor.id, session);
       return session;
     },
@@ -210,6 +210,29 @@ describe('GroupChatCoordinator', () => {
     expect(h.coordinator.hasAgent('claude-builder')).toBe(true);
     await h.coordinator.dispatchTo('claude-builder', 'build it', new AbortController().signal);
     expect(h.built.get('claude-builder')!.sent).toEqual(['build it']);
+  });
+
+  it('restores the original session when a replacement cannot start', async () => {
+    const h = makeHarness({ failStartIds: ['broken'] });
+    const original = await h.coordinator.addAgent({ ...descriptor('cc'), model: 'original' });
+
+    await expect(h.coordinator.replaceAgent('cc', { ...descriptor('broken'), model: 'replacement' })).rejects.toThrow('failed to start broken');
+
+    expect(h.coordinator.hasAgent('broken')).toBe(false);
+    expect(h.coordinator.getDescriptor('cc')).toMatchObject({ id: 'cc', model: 'original' });
+    expect(h.coordinator.listParticipants().find((participant) => participant.id === 'cc')?.color).toBe(original.color);
+  });
+
+  it('ignores a delayed exit from the old process after replacing an agent under the same id', async () => {
+    const h = makeHarness();
+    await h.coordinator.addAgent(descriptor('cc'));
+    const oldSession = h.built.get('cc')!;
+
+    await h.coordinator.replaceAgent('cc', { ...descriptor('cc'), permissionMode: 'acceptEdits' });
+    oldSession.emit({ type: 'exit', participantId: 'cc', code: 143 });
+
+    expect(h.coordinator.listParticipants().find((participant) => participant.id === 'cc')?.status).toBe('ready');
+    expect(h.events.at(-1)).not.toEqual({ type: 'exit', participantId: 'cc', code: 143 });
   });
 
   it('stays silent when the facilitator assessment returns no intervention', async () => {

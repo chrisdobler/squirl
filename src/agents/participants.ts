@@ -35,8 +35,9 @@ export function pickAgentColor(inUse: Iterable<ParticipantColor>): ParticipantCo
 
 /** Short human label for an agent's permission/sandbox posture, surfaced in the UI. */
 export function describeAgentMode(descriptor: AgentDescriptor): string {
-  if (descriptor.kind === 'codex') return `sandbox: ${descriptor.sandbox ?? 'read-only'}`;
-  return `permission: ${descriptor.permissionMode ?? 'default'}`;
+  if (descriptor.kind === 'codex') return `sandbox: ${descriptor.sandbox ?? 'workspace-write'}`;
+  if (descriptor.kind === 'pi') return `tools: ${descriptor.piToolMode ?? 'coding'} (unsandboxed)`;
+  return `permission: ${descriptor.permissionMode ?? 'acceptEdits'}`;
 }
 
 export function participantFromDescriptor(descriptor: AgentDescriptor, color: ParticipantColor): Participant {

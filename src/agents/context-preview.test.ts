@@ -115,4 +115,12 @@ describe('participant context preview lookup', () => {
     expect(preview).toMatchObject({ fidelity: 'preview', matrixMode: 'usage', usedTokens: 250, contextWindow: 1000 });
     expect(preview.discs.filter((kind) => kind !== 'available')).toHaveLength(25);
   });
+
+  it('shows PI RPC context statistics without reading its session transcript', () => {
+    const preview = inspectParticipantContext('pi', {
+      participantId: 'pi', sessionId: 'pi-session', modelId: 'openai/gpt-test', inputTokens: 500, contextWindow: 2000,
+    }, { claudeProjects: '/missing', codexSessions: '/missing' });
+    expect(preview).toMatchObject({ source: 'pi-session', fidelity: 'preview', matrixMode: 'usage', usedTokens: 500, contextWindow: 2000 });
+    expect(preview.discs.filter((kind) => kind !== 'available')).toHaveLength(25);
+  });
 });

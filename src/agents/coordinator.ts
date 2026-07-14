@@ -9,7 +9,7 @@
 import { createAgentSession } from './adapters/index.js';
 import { parseMentions } from './mentions.js';
 import { SQUIRL_PARTICIPANT, USER_PARTICIPANT, participantFromDescriptor, pickAgentColor } from './participants.js';
-import type { AgentDescriptor, AgentEvent, AgentSession, AgentTransport, Participant, ParticipantColor } from './types.js';
+import type { AgentDescriptor, AgentEvent, AgentInteractionResponse, AgentSession, AgentTransport, Participant, ParticipantColor } from './types.js';
 import type { AgentContextTelemetry } from './context-preview.js';
 import { discoverCodexModels } from './codex-models.js';
 
@@ -112,6 +112,12 @@ export class GroupChatCoordinator {
     };
   }
 
+  async respondToInteraction(participantId: string, id: string, response: AgentInteractionResponse): Promise<void> {
+    const session = this.sessions.get(participantId);
+    if (!session?.respondToInteraction) throw new Error(`Agent "@${participantId}" does not accept interactive responses.`);
+    await session.respondToInteraction(id, response);
+  }
+
   async addAgent(descriptor: AgentDescriptor): Promise<Participant> {
     return this.addAgentWithColor(descriptor);
   }
@@ -126,12 +132,24 @@ export class GroupChatCoordinator {
     const session = this.createSession(descriptor, this.options.transport);
     // Permanent forwarder: surface lifecycle/status events and keep participant status in sync.
     session.onEvent((event) => {
+      // A replaced process may report its asynchronous exit after a new session has claimed
+      // the same participant id. Ignore events from that stale session.
+      if (this.sessions.get(descriptor.id) !== session) return;
       this.applyStatus(descriptor.id, event);
       this.emit(event);
     });
     this.sessions.set(descriptor.id, session);
     this.agentParticipants.set(descriptor.id, participant);
-    await session.start();
+    try {
+      await session.start();
+    } catch (error) {
+      try { await session.stop(); } catch { /* Preserve the startup error. */ }
+      this.sessions.delete(descriptor.id);
+      this.agentParticipants.delete(descriptor.id);
+      this.resolvedModels.delete(descriptor.id);
+      this.contextTelemetry.delete(descriptor.id);
+      throw error;
+    }
     participant.status = session.status;
     this.emit({ type: 'session-status', participantId: descriptor.id, status: session.status });
     return participant;
@@ -148,21 +166,36 @@ export class GroupChatCoordinator {
     this.emit({ type: 'session-status', participantId: id, status: 'stopped' });
   }
 
-  async renameAgent(currentId: string, nextId: string, label = nextId): Promise<Participant> {
+  /** Replace a live agent session while preserving its room color and restoring it on startup failure. */
+  async replaceAgent(currentId: string, replacement: AgentDescriptor): Promise<Participant> {
     const session = this.sessions.get(currentId);
     if (!session) throw new Error(`No agent "@${currentId}".`);
-    if (currentId !== nextId && this.sessions.has(nextId)) throw new Error(`Agent "@${nextId}" already exists.`);
+    if (currentId !== replacement.id && this.sessions.has(replacement.id)) {
+      throw new Error(`Agent "@${replacement.id}" already exists.`);
+    }
 
-    const old = session.descriptor;
-    const oldColor = this.agentParticipants.get(currentId)?.color;
-    const replacement: AgentDescriptor = { ...old, id: nextId, label };
+    const original = session.descriptor;
+    const originalColor = this.agentParticipants.get(currentId)?.color;
     await this.removeAgent(currentId);
     try {
-      return await this.addAgentWithColor(replacement, oldColor);
+      return await this.addAgentWithColor(replacement, originalColor);
     } catch (error) {
-      try { await this.addAgentWithColor(old, oldColor); } catch { /* Preserve the original startup error. */ }
+      try { await this.addAgentWithColor(original, originalColor); } catch { /* Preserve the replacement startup error. */ }
       throw error;
     }
+  }
+
+  async renameAgent(currentId: string, nextId: string, label = nextId): Promise<Participant> {
+    const descriptor = this.getDescriptor(currentId);
+    if (!descriptor) throw new Error(`No agent "@${currentId}".`);
+    return this.replaceAgent(currentId, { ...descriptor, id: nextId, label });
+  }
+
+  async interrupt(id: string): Promise<boolean> {
+    const session = this.sessions.get(id);
+    if (!session || session.descriptor.kind === 'claude-code') return false;
+    await session.interrupt();
+    return true;
   }
 
   private applyStatus(id: string, event: AgentEvent): void {

@@ -15,6 +15,7 @@ describe('agent profiles', () => {
   it('assigns distinct defaults to multiple agents of one kind', () => {
     expect(nextAvailableAgentId('claude-code', [])).toBe('cc');
     expect(nextAvailableAgentId('claude-code', ['cc', 'cc-2'])).toBe('cc-3');
+    expect(nextAvailableAgentId('pi', [])).toBe('pi');
   });
 
   it('migrates legacy defaults and can upsert/remove them', () => {
@@ -28,5 +29,10 @@ describe('agent profiles', () => {
   it('preserves optional model effort on persisted profiles', () => {
     const profile = materializeProfile({ kind: 'claude-code', id: 'writer', model: 'fable', effort: 'medium' }, '/repo');
     expect(profile).toMatchObject({ model: 'fable', effort: 'medium' });
+  });
+
+  it('preserves PI thinking and tool posture', () => {
+    const profile = materializeProfile({ kind: 'pi', id: 'pi', effort: 'minimal', piToolMode: 'read-only' }, '/repo');
+    expect(profile).toMatchObject({ kind: 'pi', effort: 'minimal', piToolMode: 'read-only' });
   });
 });

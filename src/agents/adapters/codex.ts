@@ -22,7 +22,7 @@ export class CodexAdapter extends BaseAgentSession {
     const args = ['exec'];
     if (this.threadId) args.push('resume', this.threadId);
     args.push('-'); // read the prompt from stdin
-    args.push('--json', '--sandbox', d.sandbox ?? 'read-only', '-C', d.cwd, '--skip-git-repo-check');
+    args.push('--json', '--sandbox', d.sandbox ?? 'workspace-write', '-C', d.cwd, '--skip-git-repo-check');
     if (d.model) args.push('--model', d.model);
     if (d.effort) args.push('--config', `model_reasoning_effort="${d.effort}"`);
     return args;

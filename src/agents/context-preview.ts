@@ -15,7 +15,7 @@ export interface ContextPreviewBuckets {
 }
 
 export type ContextPreviewFidelity = 'exact' | 'preview' | 'inspected' | 'inspected-estimate' | 'unavailable';
-export type ContextPreviewSource = 'squirl-request' | 'claude-session' | 'codex-session';
+export type ContextPreviewSource = 'squirl-request' | 'claude-session' | 'codex-session' | 'pi-session';
 export type ContextPreviewMatrixMode = 'categorized' | 'usage';
 
 /** Sanitized context data safe to return to the renderer. It intentionally contains no raw context text or paths. */
@@ -333,7 +333,7 @@ export function unavailableContextPreview(participantId: string, source: Context
     modelId: modelId ?? null,
     source,
     fidelity: 'unavailable',
-    matrixMode: source === 'codex-session' ? 'usage' : 'categorized',
+    matrixMode: source === 'codex-session' || source === 'pi-session' ? 'usage' : 'categorized',
     capturedAt: null,
     usedTokens: null,
     contextWindow: null,
@@ -368,9 +368,9 @@ export function defaultContextArtifactRoots(): ContextArtifactRoots {
 }
 
 export function inspectParticipantContext(kind: AgentKind, telemetry: AgentContextTelemetry, roots = defaultContextArtifactRoots()): ParticipantContextPreview {
-  const source: ContextPreviewSource = kind === 'claude-code' ? 'claude-session' : 'codex-session';
-  const codexUsageFallback = (): ParticipantContextPreview | null => {
-    if (kind !== 'codex' || telemetry.inputTokens == null) return null;
+  const source: ContextPreviewSource = kind === 'claude-code' ? 'claude-session' : kind === 'codex' ? 'codex-session' : 'pi-session';
+  const usageFallback = (): ParticipantContextPreview | null => {
+    if ((kind !== 'codex' && kind !== 'pi') || telemetry.inputTokens == null) return null;
     const buckets = { ...EMPTY_BUCKETS, messages: telemetry.inputTokens };
     return {
       participantId: telemetry.participantId,
@@ -385,11 +385,12 @@ export function inspectParticipantContext(kind: AgentKind, telemetry: AgentConte
       discs: computeContextDiscs(buckets, telemetry.contextWindow ?? 0),
     };
   };
-  if (!telemetry.sessionId) return codexUsageFallback() ?? unavailableContextPreview(telemetry.participantId, source, 'No session context is available until this agent has started a turn.', telemetry.modelId);
+  if (kind === 'pi') return usageFallback() ?? unavailableContextPreview(telemetry.participantId, source, 'No completed PI turn usage has been captured yet.', telemetry.modelId);
+  if (!telemetry.sessionId) return usageFallback() ?? unavailableContextPreview(telemetry.participantId, source, 'No session context is available until this agent has started a turn.', telemetry.modelId);
   const file = kind === 'claude-code'
     ? findFile(roots.claudeProjects, (name) => name === `${telemetry.sessionId}.jsonl`, 2)
     : findFile(roots.codexSessions, (name) => name.endsWith(`${telemetry.sessionId}.jsonl`), 4);
-  if (!file) return codexUsageFallback() ?? unavailableContextPreview(telemetry.participantId, source, 'The local CLI session artifact is not available yet.', telemetry.modelId);
+  if (!file) return usageFallback() ?? unavailableContextPreview(telemetry.participantId, source, 'The local CLI session artifact is not available yet.', telemetry.modelId);
   let inspected: InspectedContext | null;
   try {
     const content = readFileSync(file, 'utf-8');
@@ -397,7 +398,7 @@ export function inspectParticipantContext(kind: AgentKind, telemetry: AgentConte
   } catch {
     inspected = null;
   }
-  if (!inspected) return codexUsageFallback() ?? unavailableContextPreview(telemetry.participantId, source, 'The local CLI session artifact could not be inspected.', telemetry.modelId);
+  if (!inspected) return usageFallback() ?? unavailableContextPreview(telemetry.participantId, source, 'The local CLI session artifact could not be inspected.', telemetry.modelId);
 
   const estimated = inspected.buckets.system + inspected.buckets.memory + inspected.buckets.files + inspected.buckets.messages;
   const authoritativeUsed = telemetry.inputTokens ?? inspected.inputTokens;

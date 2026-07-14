@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { OpenAIMetaLLM, AnthropicMetaLLM, createMetaLLM } from './meta-llm.js';
+import { OpenAIMetaLLM, AnthropicMetaLLM, createConfiguredMetaLLM, createMetaLLM } from './meta-llm.js';
 
 describe('OpenAIMetaLLM', () => {
   it('calls OpenAI chat completions and returns content', async () => {
@@ -57,5 +57,13 @@ describe('createMetaLLM', () => {
     const llm = createMetaLLM({ provider: 'local', model: 'm', baseUrl: 'http://gpu1:8000/v1' });
     expect(llm).toBeInstanceOf(OpenAIMetaLLM);
     expect(created).not.toHaveBeenCalled();
+  });
+});
+
+describe('createConfiguredMetaLLM', () => {
+  it('works independently of semantic index enablement', () => {
+    expect(createConfiguredMetaLLM({ defaultProvider: 'anthropic' })).toBeInstanceOf(AnthropicMetaLLM);
+    expect(createConfiguredMetaLLM({ defaultProvider: 'local', defaultModel: 'local-model', localBaseUrl: 'http://gpu1:8000/v1' }))
+      .toBeInstanceOf(OpenAIMetaLLM);
   });
 });

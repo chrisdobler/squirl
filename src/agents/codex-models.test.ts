@@ -3,7 +3,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { discoverCodexModels } from './codex-models.js';
+import { discoverCodexModels, resolveCodexBinary } from './codex-models.js';
 
 const dirs: string[] = [];
 
@@ -43,5 +43,30 @@ describe('discoverCodexModels', () => {
       defaultModel: 'custom-model',
       models: [{ id: 'custom-model', label: 'custom-model' }],
     });
+  });
+
+  it('ignores a partially-written model cache', () => {
+    const dir = codexHome();
+    writeFileSync(join(dir, 'config.toml'), 'model = "gpt-safe"\n');
+    writeFileSync(join(dir, 'models_cache.json'), '{incomplete');
+
+    expect(discoverCodexModels(dir)).toEqual({
+      defaultModel: 'gpt-safe',
+      models: [{ id: 'gpt-safe', label: 'gpt-safe' }],
+    });
+  });
+});
+
+describe('resolveCodexBinary', () => {
+  it('honors an explicit configured binary', () => {
+    expect(resolveCodexBinary('/custom/codex', '/missing/bundled/codex')).toBe('/custom/codex');
+  });
+
+  it('uses a bundled binary when present and otherwise falls back to PATH', () => {
+    const dir = codexHome();
+    const bundled = join(dir, 'codex');
+    writeFileSync(bundled, 'binary');
+    expect(resolveCodexBinary(undefined, bundled)).toBe(bundled);
+    expect(resolveCodexBinary(undefined, join(dir, 'missing'))).toBe('codex');
   });
 });

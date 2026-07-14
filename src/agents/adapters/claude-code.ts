@@ -26,7 +26,7 @@ export class ClaudeCodeAdapter extends BaseAgentSession {
       '--output-format', 'stream-json',
       '--verbose',
       '--include-partial-messages',
-      '--permission-mode', d.permissionMode ?? 'default',
+      '--permission-mode', d.permissionMode ?? 'acceptEdits',
     ];
     if (d.model) args.push('--model', d.model);
     if (d.effort) args.push('--effort', d.effort);

@@ -1,9 +1,10 @@
 import { parseMentions } from './mentions.js';
+import type { MetaLLM } from '../search/meta-extract.js';
 
 export interface DelegationAgent {
   id: string;
   label?: string;
-  kind?: 'claude-code' | 'codex';
+  kind?: 'claude-code' | 'codex' | 'pi';
   connected: boolean;
 }
 
@@ -13,6 +14,37 @@ export interface DelegationIntent {
   originalRequest: string;
   task: string;
   trigger: 'mention' | 'natural-language';
+}
+
+export interface PendingDelegationConfirmation {
+  id: string;
+  targetIds: string[];
+  task: string;
+  originalRequest: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export type DelegationResolution =
+  | { kind: 'dispatch'; delegation: DelegationIntent }
+  | { kind: 'confirm'; pending: PendingDelegationConfirmation }
+  | { kind: 'none' };
+
+export const DELEGATION_CONFIRMATION_TTL_MS = 10 * 60 * 1000;
+
+const CLASSIFIER_PROMPT = `/no_think
+You are a JSON-only delegation intent classifier. Decide whether the user is explicitly asking Squirl to send work to one or more known agents. Discussion about an agent, questions about prior work, and hypothetical suggestions are not delegation. Requests to resume, continue, reassign, put an agent back on work, or otherwise direct an agent to act are delegation.
+
+Respond with exactly this JSON shape and no markdown:
+{"decision":"delegate|not_delegate|uncertain","confidence":"high|low","targetIds":["known-agent-id"],"task":"the work to send"}
+
+Use only agent ids supplied in the input. Never invent a target. Use high confidence only when the user clearly authorized immediate dispatch.`;
+
+interface RawDelegationClassification {
+  decision?: unknown;
+  confidence?: unknown;
+  targetIds?: unknown;
+  task?: unknown;
 }
 
 function aliasesFor(agent: DelegationAgent): string[] {
@@ -30,11 +62,15 @@ function aliasesFor(agent: DelegationAgent): string[] {
   } else if (agent.kind === 'codex') {
     aliases.add('codex');
     aliases.add('codex cli');
+  } else if (agent.kind === 'pi') {
+    aliases.add('pi');
+    aliases.add('pi agent');
+    aliases.add('pi coding agent');
   }
   return [...aliases];
 }
 
-function mentionedAgents(text: string, agents: DelegationAgent[]): DelegationAgent[] {
+export function mentionedAgents(text: string, agents: DelegationAgent[]): DelegationAgent[] {
   const lower = text.toLowerCase();
   return agents.map((agent) => {
     let position = Number.POSITIVE_INFINITY;
@@ -47,6 +83,122 @@ function mentionedAgents(text: string, agents: DelegationAgent[]): DelegationAge
   }).filter((match) => Number.isFinite(match.position))
     .sort((a, b) => a.position - b.position)
     .map((match) => match.agent);
+}
+
+function intentFor(targetIds: string[], originalRequest: string, task: string, agents: DelegationAgent[]): DelegationIntent {
+  const targets = targetIds.map((id) => agents.find((agent) => agent.id === id)!).filter(Boolean);
+  return {
+    targetIds: targets.filter((agent) => agent.connected).map((agent) => agent.id),
+    unavailableTargetIds: targets.filter((agent) => !agent.connected).map((agent) => agent.id),
+    originalRequest,
+    task,
+    trigger: 'natural-language',
+  };
+}
+
+function pendingConfirmation(targetIds: string[], originalRequest: string, task: string, now: Date): PendingDelegationConfirmation {
+  return {
+    id: crypto.randomUUID(),
+    targetIds,
+    task: task.trim() || originalRequest,
+    originalRequest,
+    createdAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + DELEGATION_CONFIRMATION_TTL_MS).toISOString(),
+  };
+}
+
+function parseClassification(raw: string): RawDelegationClassification | null {
+  try {
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+    const parsed = JSON.parse(cleaned) as RawDelegationClassification;
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve explicit syntax first, then use a guarded semantic classifier for named-agent requests. */
+export async function resolveDelegationIntent(
+  input: string,
+  agents: DelegationAgent[],
+  llm: MetaLLM | null,
+  now = new Date(),
+): Promise<DelegationResolution> {
+  const deterministic = parseDelegationIntent(input, agents);
+  if (deterministic) return { kind: 'dispatch', delegation: deterministic };
+
+  const originalRequest = input.trim();
+  const referenced = mentionedAgents(originalRequest, agents);
+  if (!originalRequest || referenced.length === 0) return { kind: 'none' };
+  const fallbackTargetIds = referenced.map((agent) => agent.id);
+
+  if (!llm) {
+    return { kind: 'confirm', pending: pendingConfirmation(fallbackTargetIds, originalRequest, originalRequest, now) };
+  }
+
+  try {
+    const raw = await llm.complete({
+      systemPrompt: CLASSIFIER_PROMPT,
+      messages: [{
+        role: 'user',
+        content: JSON.stringify({
+          request: originalRequest,
+          knownAgents: agents.map(({ id, label, kind, connected }) => ({ id, label, kind, connected })),
+          referencedAgentIds: fallbackTargetIds,
+        }),
+      }],
+    });
+    const parsed = parseClassification(raw);
+    const knownIds = new Set(agents.map((agent) => agent.id));
+    const rawTargetIds = Array.isArray(parsed?.targetIds)
+      ? parsed.targetIds.filter((id): id is string => typeof id === 'string')
+      : [];
+    const targetsValid = rawTargetIds.length > 0 && rawTargetIds.every((id) => knownIds.has(id));
+    const targetIds = targetsValid ? [...new Set(rawTargetIds)] : fallbackTargetIds;
+    const task = typeof parsed?.task === 'string' && parsed.task.trim() ? parsed.task.trim() : originalRequest;
+
+    if (parsed?.decision === 'not_delegate' && parsed.confidence === 'high') return { kind: 'none' };
+    if (parsed?.decision === 'delegate' && parsed.confidence === 'high' && targetsValid && task) {
+      return { kind: 'dispatch', delegation: intentFor(targetIds, originalRequest, task, agents) };
+    }
+    return { kind: 'confirm', pending: pendingConfirmation(targetIds, originalRequest, task, now) };
+  } catch {
+    return { kind: 'confirm', pending: pendingConfirmation(fallbackTargetIds, originalRequest, originalRequest, now) };
+  }
+}
+
+export function delegationConfirmationText(pending: PendingDelegationConfirmation): string {
+  const targets = pending.targetIds.map((id) => `@${id}`).join(' and ');
+  return `I think you want me to send this work to ${targets}, but I’m not fully certain. Should I dispatch it? Reply yes or no.`;
+}
+
+export function delegationConfirmationResponse(input: string): 'confirm' | 'cancel' | 'unrelated' {
+  const normalized = input.trim().toLowerCase().replace(/[.!?]+$/, '');
+  if (/^(?:y|yes|yeah|yep|sure|do it|proceed|confirm)$/.test(normalized)) return 'confirm';
+  if (/^(?:n|no|nope|cancel|don't|do not)$/.test(normalized)) return 'cancel';
+  return 'unrelated';
+}
+
+interface ConfirmationHistoryMessage {
+  role: string;
+  proactiveKind?: string;
+  delegationConfirmation?: PendingDelegationConfirmation;
+}
+
+/** Recover only the latest unanswered, unexpired confirmation from persisted history. */
+export function recoverPendingDelegation(
+  messages: ConfirmationHistoryMessage[],
+  now = new Date(),
+): PendingDelegationConfirmation | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.role === 'user') return null;
+    if (message.role !== 'assistant' || message.proactiveKind !== 'delegation-confirmation') continue;
+    const pending = message.delegationConfirmation;
+    if (!pending || !pending.id || pending.targetIds.length === 0 || !pending.task.trim()) return null;
+    return Date.parse(pending.expiresAt) > now.getTime() ? pending : null;
+  }
+  return null;
 }
 
 export function parseDelegationIntent(input: string, agents: DelegationAgent[]): DelegationIntent | null {
@@ -69,8 +221,9 @@ export function parseDelegationIntent(input: string, agents: DelegationAgent[]):
 
   const tellMatch = originalRequest.match(/\b(?:tell|ask|have)\s+(.+?)\s+to\s+([\s\S]+)$/i);
   const sendMatch = originalRequest.match(/\bsend\s+([\s\S]+?)\s+to\s+(.+)$/i);
-  const agentPhrase = tellMatch?.[1] ?? sendMatch?.[2];
-  const task = (tellMatch?.[2] ?? sendMatch?.[1])?.trim();
+  const assignMatch = originalRequest.match(/\b(?:put|get)\s+(.+?)\s+(?:back\s+)?(?:working\s+)?on\s+([\s\S]+)$/i);
+  const agentPhrase = tellMatch?.[1] ?? sendMatch?.[2] ?? assignMatch?.[1];
+  const task = (tellMatch?.[2] ?? sendMatch?.[1] ?? assignMatch?.[2])?.trim();
   if (!agentPhrase || !task) return null;
 
   const targets = mentionedAgents(agentPhrase, agents);

@@ -29,7 +29,7 @@ describe('participants', () => {
     expect(cc.color).not.toBe(codex.color);
     expect(cc.color).not.toBe(USER_PARTICIPANT.color);
     expect(cc.color).toBe('magenta');
-    expect(cc.mode).toBe('permission: default');
+    expect(cc.mode).toBe('permission: acceptEdits');
     expect(codex.mode).toBe('sandbox: workspace-write');
   });
 

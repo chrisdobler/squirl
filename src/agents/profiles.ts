@@ -34,6 +34,7 @@ export function profileFromDescriptor(descriptor: AgentDescriptor, profileId?: s
     cwd: descriptor.cwd,
     permissionMode: descriptor.permissionMode,
     sandbox: descriptor.sandbox,
+    piToolMode: descriptor.piToolMode,
     reconnect: true,
   };
 }

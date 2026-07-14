@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+export const CHATGPT_CODEX_BIN = '/Applications/ChatGPT.app/Contents/Resources/codex';
+
 export interface CodexModelOption {
   id: string;
   label: string;
@@ -11,6 +13,12 @@ export interface CodexModelOption {
 export interface CodexModelDiscovery {
   models: CodexModelOption[];
   defaultModel?: string;
+}
+
+/** Prefer an explicit override, then the newer Codex bundled with ChatGPT on macOS. */
+export function resolveCodexBinary(configured?: string, bundledPath = CHATGPT_CODEX_BIN): string {
+  if (configured?.trim()) return configured.trim();
+  return existsSync(bundledPath) ? bundledPath : 'codex';
 }
 
 interface CodexModelsCache {
