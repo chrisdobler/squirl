@@ -17,7 +17,7 @@ export interface AgentSummary {
   mode: string;
 }
 
-export type CommandSurface = 'settings' | 'model' | 'context' | 'memory' | 'eval' | 'rewind' | 'room' | 'agent' | 'system' | 'help';
+export type CommandSurface = 'settings' | 'model' | 'context' | 'memory' | 'eval' | 'rewind' | 'room' | 'agent' | 'system' | 'help' | 'overview';
 
 export interface CommandDescriptor {
   name: string;
@@ -54,6 +54,7 @@ export interface CommandContext {
   listAgents?: () => AgentSummary[];
   displayName?: string;
   participants?: Participant[];
+  generateScrum?: (dateInput: string) => Promise<string>;
 }
 
 function pushToolMessage(ctx: CommandContext, name: string, content: string): void {
@@ -70,17 +71,18 @@ function normalizeAgentKind(token?: string): AgentKind | null {
   const t = (token ?? '').toLowerCase();
   if (t === 'claude-code' || t === 'claude' || t === 'cc') return 'claude-code';
   if (t === 'codex') return 'codex';
+  if (t === 'pi' || t === 'pi-agent') return 'pi';
   return null;
 }
 
 function normalizeEffort(token?: string): EffortLevel | undefined {
   if (!token) return undefined;
-  if (['low', 'medium', 'high', 'xhigh', 'max'].includes(token)) return token as EffortLevel;
-  throw new Error(`Unknown effort "${token}". Use low, medium, high, xhigh, or max.`);
+  if (['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(token)) return token as EffortLevel;
+  throw new Error(`Unknown effort "${token}". Use off, minimal, low, medium, high, xhigh, or max.`);
 }
 
 function formatAgentList(agents: AgentSummary[]): string {
-  if (agents.length === 0) return 'No agents connected. Add one with /agent add claude-code or /agent add codex.';
+  if (agents.length === 0) return 'No agents connected. Add one with /agent add claude-code, /agent add codex, or /agent add pi.';
   return agents.map((a) => `@${a.id} — ${a.label} [${a.status}] ${a.mode}`).join('\n');
 }
 
@@ -99,6 +101,16 @@ function showRewindUsage(ctx: CommandContext, content = 'Usage: /rewind, /rewind
 }
 
 const commands: SlashCommand[] = [
+  {
+    name: 'overview',
+    description: 'Show how Squirl connects your intent to an ecosystem of agents',
+    usage: '/overview',
+    surface: 'overview',
+    execute: (ctx) => {
+      if (ctx.openCommandSurface) ctx.openCommandSurface('overview');
+      else pushToolMessage(ctx, 'overview', 'The Squirl overview is available in the web and Electron UI.');
+    },
+  },
   {
     name: 'context',
     description: 'Manage files and context sent to the model',
@@ -297,7 +309,7 @@ const commands: SlashCommand[] = [
       if (sub === 'add') {
         const kind = normalizeAgentKind(tokens[2]);
         if (!kind) {
-          pushToolMessage(ctx, 'agent', 'Usage: /agent add <claude-code|codex> [id] [model] [effort]');
+          pushToolMessage(ctx, 'agent', 'Usage: /agent add <claude-code|codex|pi> [id] [model] [effort]');
           return;
         }
         let effort: EffortLevel | undefined;
@@ -419,6 +431,24 @@ const commands: SlashCommand[] = [
     execute: (ctx) => {
       if (ctx.openCommandSurface) ctx.openCommandSurface('memory');
       else pushToolMessage(ctx, 'memory', 'Use /recall <query> to search memory in the terminal UI.');
+    },
+  },
+  {
+    name: 'scrum',
+    description: 'Summarize inferred work as a daily standup',
+    usage: '/scrum [yesterday|today|<weekday>|YYYY-MM-DD]',
+    argumentTemplate: '/scrum yesterday',
+    execute: async (ctx) => {
+      if (!ctx.generateScrum) {
+        pushToolMessage(ctx, 'scrum', 'Scrum reports are not available in this session.');
+        return;
+      }
+      const dateInput = (ctx.commandInput ?? '').trim().split(/\s+/).slice(1).join(' ');
+      try {
+        pushToolMessage(ctx, 'scrum', await ctx.generateScrum(dateInput));
+      } catch (error) {
+        pushToolMessage(ctx, 'scrum', error instanceof Error ? error.message : String(error));
+      }
     },
   },
   {

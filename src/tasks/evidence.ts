@@ -9,11 +9,7 @@ function validTimestamp(value: string): number | null {
 }
 
 /** Build timestamp-preserving activity records, including a trailing unanswered request. */
-export function buildRecentTaskEvidence(
-  entries: LogEntry[],
-  now = Date.now(),
-  windowMs = TASK_ACTIVITY_WINDOW_MS,
-): TaskActivityEvidence[] {
+export function buildTaskEvidence(entries: LogEntry[]): TaskActivityEvidence[] {
   const ordered = entries
     .filter((entry) => validTimestamp(entry.timestamp) != null)
     .slice()
@@ -32,15 +28,15 @@ export function buildRecentTaskEvidence(
     const tools: string[] = [];
     const participants = new Set<string>();
     if (user.message.participantId) participants.add(user.message.participantId);
-    let lastTimestamp = user.timestamp;
+    let activeTimestamp = user.timestamp;
     index += 1;
 
     while (index < ordered.length && ordered[index]!.message.role !== 'user') {
       const current = ordered[index]!;
-      lastTimestamp = current.timestamp;
       if (current.message.participantId) participants.add(current.message.participantId);
-      if (current.message.role === 'assistant' && current.message.content.trim()) {
+      if (current.message.role === 'assistant' && current.message.proactiveKind !== 'task-clarification' && current.message.content.trim()) {
         assistant.push(current.message.content.trim());
+        if (current.message.participantId && current.message.participantId !== 'squirl') activeTimestamp = current.timestamp;
       } else if (current.message.role === 'tool') {
         const content = current.message.content.replace(/\s+/g, ' ').trim().slice(0, 500);
         tools.push(`${current.message.toolName}: ${content}`);
@@ -48,11 +44,12 @@ export function buildRecentTaskEvidence(
       index += 1;
     }
 
-    const activeAt = validTimestamp(lastTimestamp)!;
-    if (activeAt < now - windowMs || activeAt > now + 60_000) continue;
+    // User messages and explicit background-agent responses are activity.
+    // Local Squirl replies, tool chatter, and refreshes can enrich the evidence
+    // but must not move the task clock forward while everyone is idle.
     evidence.push({
       id: user.message.id,
-      timestamp: lastTimestamp,
+      timestamp: activeTimestamp,
       userText: user.message.content,
       ...(assistant.length ? { assistantText: assistant.join('\n') } : {}),
       ...(tools.length ? { toolSummary: tools.join('\n') } : {}),
@@ -61,6 +58,28 @@ export function buildRecentTaskEvidence(
   }
 
   return evidence;
+}
+
+/** Select task evidence whose activity timestamp falls in [start, end). */
+export function buildTaskEvidenceForRange(
+  entries: LogEntry[],
+  start: Date | number,
+  end: Date | number,
+): TaskActivityEvidence[] {
+  const startMs = typeof start === 'number' ? start : start.getTime();
+  const endMs = typeof end === 'number' ? end : end.getTime();
+  return buildTaskEvidence(entries).filter((item) => {
+    const timestamp = validTimestamp(item.timestamp)!;
+    return timestamp >= startMs && timestamp < endMs;
+  });
+}
+
+export function buildRecentTaskEvidence(
+  entries: LogEntry[],
+  now = Date.now(),
+  windowMs = TASK_ACTIVITY_WINDOW_MS,
+): TaskActivityEvidence[] {
+  return buildTaskEvidenceForRange(entries, now - windowMs, now + 60_000);
 }
 
 export function taskEvidenceWatermark(evidence: TaskActivityEvidence[]): string {

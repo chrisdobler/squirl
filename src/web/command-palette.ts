@@ -4,6 +4,7 @@ const SURFACES: Partial<Record<string, CommandSurface>> = {
   setup: 'settings', settings: 'settings', model: 'model', models: 'model', context: 'context',
   memory: 'memory', eval: 'eval', rewind: 'rewind', room: 'room', agents: 'room', agent: 'agent',
   system: 'system', help: 'help',
+  overview: 'overview',
 };
 
 export function filterCommandPalette(commands: CommandDescriptor[], input: string): CommandDescriptor[] {

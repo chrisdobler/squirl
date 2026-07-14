@@ -25,7 +25,7 @@ describe('current task classifier', () => {
       evidence,
       embedder,
       vectorStore: store([memory]),
-      llm: llm(JSON.stringify({ confidence: 'high', tasks: [{ title: 'Build durable current tasks', evidenceIds: ['u1', 'u2'] }] })),
+      llm: llm(JSON.stringify({ confidence: 'high', tasks: [{ title: 'Build durable current tasks', summary: 'Squirl is building a durable feed of active work and displaying it below the agent roster.', evidenceIds: ['u1', 'u2'] }] })),
       previous: null,
       now: new Date('2026-07-13T18:00:00.000Z'),
     });
@@ -33,6 +33,7 @@ describe('current task classifier', () => {
     expect(result.tasks).toHaveLength(1);
     expect(result.tasks[0]).toMatchObject({
       title: 'Build durable current tasks',
+      summary: 'Squirl is building a durable feed of active work and displaying it below the agent roster.',
       lastActiveAt: '2026-07-13T17:55:00.000Z',
       participantIds: ['squirl', 'codex'],
       evidenceIds: ['u1', 'u2'],
@@ -44,7 +45,20 @@ describe('current task classifier', () => {
       .rejects.toThrow('No relevant semantic memory');
     await expect(classifyCurrentTasks({ evidence, embedder, vectorStore: store([memory]), llm: llm('{"confidence":"low","tasks":[]}'), previous: null }))
       .rejects.toBeInstanceOf(TaskClassificationError);
-    await expect(classifyCurrentTasks({ evidence, embedder, vectorStore: store([memory]), llm: llm('{"confidence":"high","tasks":[{"title":"Made up","evidenceIds":["missing"]}]}'), previous: null }))
+    await expect(classifyCurrentTasks({ evidence, embedder, vectorStore: store([memory]), llm: llm('{"confidence":"high","tasks":[{"title":"Made up","summary":"Unsupported work.","evidenceIds":["missing"]}]}'), previous: null }))
       .rejects.toThrow('invalid recent evidence');
+  });
+
+  it('validates calendar evidence and retains semantic links for calendar-wins merging', async () => {
+    const calendarEvents = [{ calendarId: 'primary', eventId: 'event-1', title: 'Squirl', startAt: '2026-07-13T18:00:00Z', endAt: '2026-07-13T19:00:00Z', allDay: false }];
+    const valid = await classifyCurrentTasks({
+      evidence, calendarEvents, embedder, vectorStore: store([memory]), previous: null,
+      llm: llm('{"confidence":"high","tasks":[{"title":"Build Squirl","summary":"The current Squirl sidebar work is being implemented.","evidenceIds":["u2"],"calendarEventIds":["calendar:primary:event-1"]}]}'),
+    });
+    expect(valid.tasks[0]?.calendarEventIds).toEqual(['calendar:primary:event-1']);
+    await expect(classifyCurrentTasks({
+      evidence, calendarEvents, embedder, vectorStore: store([memory]), previous: null,
+      llm: llm('{"confidence":"high","tasks":[{"title":"Build Squirl","summary":"The current Squirl sidebar work is being implemented.","evidenceIds":["u2"],"calendarEventIds":["calendar:primary:unknown"]}]}'),
+    })).rejects.toThrow('unknown calendar event');
   });
 });

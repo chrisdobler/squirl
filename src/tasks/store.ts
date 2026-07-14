@@ -14,19 +14,21 @@ function isTask(value: unknown): value is TaskActivityItem {
   const task = value as Partial<TaskActivityItem>;
   return typeof task.id === 'string'
     && typeof task.title === 'string'
+    && (task.summary == null || typeof task.summary === 'string')
     && typeof task.lastActiveAt === 'string'
     && Number.isFinite(Date.parse(task.lastActiveAt))
     && Array.isArray(task.participantIds)
     && task.participantIds.every((id) => typeof id === 'string')
     && Array.isArray(task.evidenceIds)
-    && task.evidenceIds.every((id) => typeof id === 'string');
+    && task.evidenceIds.every((id) => typeof id === 'string')
+    && (task.calendarEventIds == null || (Array.isArray(task.calendarEventIds) && task.calendarEventIds.every((id) => typeof id === 'string')));
 }
 
 export function loadTaskActivitySnapshot(path = taskActivityPath()): TaskActivitySnapshot | null {
   if (!existsSync(path)) return null;
   try {
     const value = JSON.parse(readFileSync(path, 'utf-8')) as Partial<TaskActivitySnapshot>;
-    if (value.version !== 1 || typeof value.generatedAt !== 'string' || !Number.isFinite(Date.parse(value.generatedAt)) || typeof value.sourceWatermark !== 'string') return null;
+    if ((value.version !== 1 && value.version !== 2) || typeof value.generatedAt !== 'string' || !Number.isFinite(Date.parse(value.generatedAt)) || typeof value.sourceWatermark !== 'string') return null;
     if (!Array.isArray(value.tasks) || !value.tasks.every(isTask)) return null;
     return value as TaskActivitySnapshot;
   } catch {

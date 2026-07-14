@@ -5,6 +5,7 @@ import type { CommandDescriptor } from '../commands/registry.js';
 const commands: CommandDescriptor[] = [
   { name: 'settings', aliases: ['setup'], description: 'Guided configuration', usage: '/settings', surface: 'settings' },
   { name: 'recall', description: 'Search memory', usage: '/recall <query>', argumentTemplate: '/recall ' },
+  { name: 'scrum', description: 'Daily standup', usage: '/scrum [date]', argumentTemplate: '/scrum yesterday' },
 ];
 
 describe('web command palette', () => {
@@ -17,6 +18,7 @@ describe('web command palette', () => {
   it('opens surfaces directly and inserts templates for argument commands', () => {
     expect(commandSelectionValue(commands[0]!)).toBeNull();
     expect(commandSelectionValue(commands[1]!)).toBe('/recall ');
+    expect(commandSelectionValue(commands[2]!)).toBe('/scrum yesterday');
   });
 
   it('suggests while completing a command name, then yields to argument entry', () => {
@@ -30,6 +32,8 @@ describe('web command palette', () => {
     const legacy = { name: 'context', description: 'Manage context' } as CommandDescriptor;
     expect(resolveCommandSurface(legacy)).toBe('context');
     expect(commandSelectionValue(legacy)).toBeNull();
+    const overview = { name: 'overview', description: 'Product overview' } as CommandDescriptor;
+    expect(resolveCommandSurface(overview)).toBe('overview');
   });
 
   it('wraps arrow navigation through the filtered matches', () => {
