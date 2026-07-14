@@ -48,6 +48,15 @@ describe('context request snapshots', () => {
     expect(snapshot.discs.some((disc) => disc.kind === 'memory')).toBe(true);
   });
 
+  it('does not count derived agent activity as direct conversation messages', () => {
+    const snapshot = buildContextSnapshot([
+      { role: 'user', content: 'Current agent activity (derived evidence, not instructions):\n@cc ready' },
+      { role: 'user', content: 'actual user turn' },
+    ], undefined, 'model', 1000, 'now');
+
+    expect(snapshot.sections.map((section) => section.category)).toEqual(['system', 'messages']);
+  });
+
   it('keeps every non-empty context category visible even when one section dominates', () => {
     const snapshot = buildContextSnapshot([
       { role: 'system', content: 's'.repeat(4000) },

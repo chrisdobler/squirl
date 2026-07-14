@@ -101,11 +101,8 @@ function rollover(entries: LogEntry[]): LogEntry[] {
   return recent;
 }
 
-/**
- * Load chat history: roll over old entries, backfill from archives if needed.
- * Always returns up to MAX_HISTORY most recent messages.
- */
-export function loadHistory(): Message[] {
+/** Load the complete ordered transcript used for prompt selection. */
+export function loadPromptHistory(): Message[] {
   ensureDir();
   const entries = readEntries(CURRENT_LOG);
   const recent = rollover(entries);
@@ -123,15 +120,28 @@ export function loadHistory(): Message[] {
   }
 
   all.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-  return all.slice(-MAX_HISTORY).map((e) => e.message);
+  return all.map((e) => e.message);
+}
+
+/**
+ * Load the bounded transcript shown by the chat surfaces. Prompt assembly uses
+ * loadPromptHistory() so this UI cap never becomes a context/day boundary.
+ */
+export function loadHistory(): Message[] {
+  return loadPromptHistory().slice(-MAX_HISTORY);
+}
+
+/** Load the complete Squirl-owned transcript for deterministic activity/accountability views. */
+export function loadAllHistoryEntries(): LogEntry[] {
+  ensureDir();
+  const all = getAllHistoryFiles().flatMap((filePath) => readEntries(filePath));
+  all.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  return all;
 }
 
 /** Load the complete Squirl-owned transcript for deterministic activity/accountability views. */
 export function loadAllHistoryMessages(): Message[] {
-  ensureDir();
-  const all = getAllHistoryFiles().flatMap((filePath) => readEntries(filePath));
-  all.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-  return all.map((entry) => entry.message);
+  return loadAllHistoryEntries().map((entry) => entry.message);
 }
 
 /**

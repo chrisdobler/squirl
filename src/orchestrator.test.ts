@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import type { StreamOptions } from './api.js';
 import type { MemoryPipeline } from './search/memory-pipeline.js';
 import type { AssistantMessage, Message } from './types.js';
@@ -144,6 +144,44 @@ describe('Orchestrator streaming callbacks', () => {
     expect(snapshot!.sections.some((section) => section.label === 'Assistant tool call' && section.metadata?.includes('word for word'))).toBe(true);
     expect(snapshot!.sections.some((section) => section.label.startsWith('Tool result') && section.content === 'Unknown tool: not_a_real_tool')).toBe(true);
     expect(snapshot!.sections.at(-1)!.label).toBe('Tool definitions');
+  });
+
+  it('sends multi-day archive turns beyond the visible history cap and records the resolved window', async () => {
+    const historyDir = `${snapshotHome}/.squirl/history`;
+    rmSync(historyDir, { recursive: true, force: true });
+    mkdirSync(historyDir, { recursive: true });
+    const archive = Array.from({ length: 60 }, (_, index) => JSON.stringify({
+      timestamp: `2026-07-12T12:${String(index).padStart(2, '0')}:00Z`,
+      message: { id: `archive-${index}`, role: 'user', content: `prior-day-${index}` },
+    })).join('\n');
+    writeFileSync(`${historyDir}/2026-07-12.jsonl`, `${archive}\n`, 'utf-8');
+    writeFileSync(`${historyDir}/current.jsonl`, `${JSON.stringify({
+      timestamp: '2026-07-13T12:00:00Z',
+      message: { id: 'today', role: 'user', content: 'today-small-message' },
+    })}\n`, 'utf-8');
+
+    mocks.streamChatCompletion.mockImplementation(async (options: StreamOptions) => {
+      options.onToken('done');
+      options.onDone({ promptTokens: 1, completionTokens: 1, totalTokens: 2 });
+    });
+    const { Orchestrator } = await import('./orchestrator.js');
+    const orchestrator = new Orchestrator('/tmp/squirl-multi-day-test', { snapshotPersistence: false });
+    await orchestrator.chat(
+      'current request',
+      [{ id: 'today', role: 'user', content: 'today-small-message' }],
+      { id: 'local-test', label: 'local-test', provider: 'local', contextWindow: 17_120 },
+      { onToken: () => {}, onDone: () => {}, onError: () => {} },
+    );
+
+    const sent = mocks.streamChatCompletion.mock.calls.at(-1)![0].messages.map((message: any) => message.content);
+    expect(sent).toContain('prior-day-0');
+    expect(sent).toContain('today-small-message');
+    expect(sent).toContain('current request');
+    expect(sent.filter((content: unknown) => content === 'current request')).toHaveLength(1);
+    expect(orchestrator.getLatestContextSnapshot()).toMatchObject({ contextWindow: 17_120, origin: 'exact' });
+    expect(orchestrator.getLatestContextSnapshot()!.sections.some((section) => section.category === 'messages' && section.content === 'prior-day-0')).toBe(true);
+
+    rmSync(historyDir, { recursive: true, force: true });
   });
 
   it('prepares a concise authorized handoff without executing the task', async () => {

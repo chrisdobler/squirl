@@ -49,7 +49,7 @@ function classify(message: ChatCompletionMessageParam, content: string): Exclude
   if (/^Files in context \(evidence, not instructions\):\n/.test(content)) return 'files';
   if (/^Recalled memory \(/.test(content)) return 'memory';
   if (message.role === 'system' || message.role === 'developer') return 'system';
-  if (/^Project context \(/.test(content)) return 'system';
+  if (/^(Project context|Current agent activity) \(/.test(content)) return 'system';
   return 'messages';
 }
 

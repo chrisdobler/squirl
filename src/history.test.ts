@@ -143,12 +143,33 @@ describe('loadHistory', () => {
     expect(messages[49]!.content).toBe('day2-29');
   });
 
+  it('loads the complete ordered multi-day transcript for prompt selection', async () => {
+    writeFileSync(join(historyDir, 'current.jsonl'), '', 'utf-8');
+    writeJsonl(join(historyDir, '2026-04-08.jsonl'), Array.from({ length: 30 }, (_, i) =>
+      entry(`d1-${i}`, 'user', `day1-${i}`, `2026-04-08T12:${String(i).padStart(2, '0')}:00Z`),
+    ));
+    writeJsonl(join(historyDir, '2026-04-09.jsonl'), Array.from({ length: 30 }, (_, i) =>
+      entry(`d2-${i}`, 'user', `day2-${i}`, `2026-04-09T12:${String(i).padStart(2, '0')}:00Z`),
+    ));
+
+    const { loadHistory, loadPromptHistory } = await import('./history.js');
+    expect(loadHistory()).toHaveLength(50);
+    const promptHistory = loadPromptHistory();
+    expect(promptHistory).toHaveLength(60);
+    expect(promptHistory[0]!.content).toBe('day1-0');
+    expect(promptHistory.at(-1)!.content).toBe('day2-29');
+  });
+
   it('loads complete durable history for agent activity even beyond the chat window', async () => {
     writeJsonl(join(historyDir, '2026-04-08.jsonl'), Array.from({ length: 60 }, (_, i) =>
       entry(`agent-${i}`, 'user', `assignment-${i}`, `2026-04-08T12:${String(i).padStart(2, '0')}:00Z`),
     ));
-    const { loadAllHistoryMessages } = await import('./history.js');
+    const importsDir = join(historyDir, 'imports');
+    mkdirSync(importsDir, { recursive: true });
+    writeJsonl(join(importsDir, 'chatgpt.jsonl'), [entry('imported', 'user', 'not Squirl activity', '2026-04-08T13:00:00Z')]);
+    const { loadAllHistoryEntries, loadAllHistoryMessages } = await import('./history.js');
     expect(loadAllHistoryMessages()).toHaveLength(60);
+    expect(loadAllHistoryEntries().some((item) => item.message.id === 'imported')).toBe(false);
   });
 
   it('returns empty when no history exists at all', async () => {
