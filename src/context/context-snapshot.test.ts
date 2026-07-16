@@ -67,4 +67,53 @@ describe('context request snapshots', () => {
     const kinds = new Set(snapshot.discs.filter((disc) => disc.start != null).map((disc) => disc.kind));
     expect(kinds).toEqual(new Set(['system', 'memory', 'files', 'messages']));
   });
+
+  it('separates prompt headroom from the response reserve across the full model window', () => {
+    const snapshot = buildContextSnapshot(
+      [{ role: 'user', content: 'x'.repeat(15_800) }],
+      undefined,
+      'model',
+      8_192,
+      'now',
+      'exact',
+      { completionReserveTokens: 4_096 },
+    );
+
+    expect(snapshot.completionReserveTokens).toBe(4_096);
+    expect(snapshot.promptBudgetTokens).toBe(4_096);
+    expect(snapshot.promptAvailableTokens).toBeGreaterThanOrEqual(100);
+    expect(snapshot.promptAvailableTokens).toBeLessThan(200);
+    expect(snapshot.promptOverageTokens).toBe(0);
+    expect(snapshot.discs.filter((disc) => disc.kind === 'response-reserve')).toHaveLength(50);
+    expect(snapshot.discs.filter((disc) => disc.kind === 'available').length).toBeGreaterThan(0);
+  });
+
+  it('clamps small-window reserves and reports prompt overage without negative availability', () => {
+    const snapshot = buildContextSnapshot(
+      [{ role: 'user', content: 'mandatory request' }],
+      undefined,
+      'model',
+      1_000,
+      'now',
+      'exact',
+      { completionReserveTokens: 4_096 },
+    );
+
+    expect(snapshot.completionReserveTokens).toBe(1_000);
+    expect(snapshot.promptBudgetTokens).toBe(0);
+    expect(snapshot.promptAvailableTokens).toBe(0);
+    expect(snapshot.promptOverageTokens).toBeGreaterThan(0);
+    expect(snapshot.discs.some((disc) => disc.kind === 'messages')).toBe(true);
+    expect(snapshot.discs.some((disc) => disc.kind === 'response-reserve')).toBe(true);
+    expect(snapshot.discs.some((disc) => disc.kind === 'available')).toBe(false);
+  });
+
+  it('keeps reserve allocation bounded when there are more sections than prompt cells', () => {
+    const messages = Array.from({ length: 60 }, (_, index) => ({ role: 'user' as const, content: `message ${index}` }));
+    const snapshot = buildContextSnapshot(messages, undefined, 'model', 8_192, 'now', 'exact', { completionReserveTokens: 4_096 });
+
+    expect(snapshot.discs).toHaveLength(100);
+    expect(snapshot.discs.filter((disc) => disc.start != null)).toHaveLength(50);
+    expect(snapshot.discs.filter((disc) => disc.kind === 'response-reserve')).toHaveLength(50);
+  });
 });

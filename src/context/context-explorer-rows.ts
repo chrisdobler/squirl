@@ -6,7 +6,7 @@ export type ContextExplorerRow =
     kind: 'section';
     key: string;
     sectionId: string;
-    category: Exclude<DiscKind, 'available'>;
+    category: Exclude<DiscKind, 'available' | 'response-reserve'>;
     label: string;
     role: string;
     approximateTokens: number;

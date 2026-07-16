@@ -32,6 +32,9 @@ describe('truncateToFit context roles', () => {
     expect(result.messages.some((message) => message.content === 'optional recalled memory')).toBe(false);
     expect(result.droppedMessageCount).toBe(2);
     expect(result.droppedEvidenceCount).toBe(1);
+    expect(result.droppedEvidence).toEqual([
+      expect.objectContaining({ approximateTokens: expect.any(Number), reason: 'exceeds-prompt-budget' }),
+    ]);
   });
 
   it('keeps recent conversation before optional evidence', () => {
@@ -121,5 +124,22 @@ describe('truncateToFit context roles', () => {
     expect(result.messages).not.toContainEqual(memory);
     expect(result.messages.some((message) => message.content === 'current request')).toBe(true);
     expect(result.messages.some((message) => typeof message.content === 'string' && message.content.startsWith('prior question'))).toBe(false);
+  });
+
+  it('returns the exact oversized evidence message for observability', () => {
+    const research = { role: 'user' as const, content: `Current web research evidence:\n${'r'.repeat(32_000)}` };
+    const result = truncateToFit(
+      [{ role: 'system', content: 'behavior' }],
+      [research],
+      [{ role: 'user', content: 'current request' }],
+      [],
+      8_192,
+    );
+
+    expect(result.messages).not.toContain(research);
+    expect(result.droppedEvidence).toEqual([
+      { message: research, approximateTokens: expect.any(Number), reason: 'exceeds-prompt-budget' },
+    ]);
+    expect(result.droppedEvidence[0]!.approximateTokens).toBeGreaterThan(4_096);
   });
 });

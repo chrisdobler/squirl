@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, wri
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { buildSnapshotDiscs, type ContextSnapshot } from './context-snapshot.js';
+import { DEFAULT_COMPLETION_RESERVE_TOKENS } from './truncation.js';
 
 const SCHEMA_VERSION = 1;
 
@@ -45,10 +46,22 @@ export function loadContextSnapshot(workingDir: string): ContextSnapshot | null 
     const sections = snapshot.sections.map((section) => section.label === 'Recalled memory'
       ? { ...section, category: 'memory' as const }
       : section);
+    const completionReserveTokens = Math.min(
+      Math.max(0, typeof snapshot.completionReserveTokens === 'number' ? snapshot.completionReserveTokens : DEFAULT_COMPLETION_RESERVE_TOKENS),
+      Math.max(0, snapshot.contextWindow),
+    );
+    const promptBudgetTokens = Math.max(0, snapshot.contextWindow - completionReserveTokens);
+    const promptAvailableTokens = Math.max(0, promptBudgetTokens - snapshot.approximateTokens);
+    const promptOverageTokens = Math.max(0, snapshot.approximateTokens - promptBudgetTokens);
     return {
       ...snapshot,
+      completionReserveTokens,
+      promptBudgetTokens,
+      promptAvailableTokens,
+      promptOverageTokens,
+      droppedEvidence: Array.isArray(snapshot.droppedEvidence) ? snapshot.droppedEvidence : [],
       sections,
-      discs: buildSnapshotDiscs(sections, snapshot.renderedDocument.length, snapshot.approximateTokens, snapshot.contextWindow),
+      discs: buildSnapshotDiscs(sections, snapshot.renderedDocument.length, snapshot.approximateTokens, snapshot.contextWindow, 100, completionReserveTokens),
     };
   } catch {
     return null;

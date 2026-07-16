@@ -6,7 +6,7 @@ export interface ContextSnapshotSection {
   id: string;
   label: string;
   role: string;
-  category: Exclude<DiscKind, 'available'>;
+  category: Exclude<DiscKind, 'available' | 'response-reserve'>;
   content: string;
   metadata?: string;
   start: number;
@@ -34,9 +34,29 @@ export interface ContextSnapshot {
   modelId: string;
   contextWindow: number;
   approximateTokens: number;
+  completionReserveTokens: number;
+  promptBudgetTokens: number;
+  promptAvailableTokens: number;
+  promptOverageTokens: number;
+  droppedEvidence: ContextDroppedEvidence[];
   sections: ContextSnapshotSection[];
   renderedDocument: string;
   discs: ContextSnapshotDisc[];
+}
+
+export type ContextDroppedEvidenceCategory = 'research' | 'files' | 'project' | 'memory' | 'activity';
+
+export interface ContextDroppedEvidence {
+  category: ContextDroppedEvidenceCategory;
+  label: string;
+  approximateTokens: number;
+  reason: 'exceeds-prompt-budget';
+  traceStage: 'research-fetch' | 'context' | 'memory-vector';
+}
+
+export interface ContextSnapshotCapacity {
+  completionReserveTokens?: number;
+  droppedEvidence?: ContextDroppedEvidence[];
 }
 
 function stringContent(message: ChatCompletionMessageParam): string {
@@ -45,7 +65,7 @@ function stringContent(message: ChatCompletionMessageParam): string {
     : JSON.stringify(message.content ?? '', null, 2);
 }
 
-function classify(message: ChatCompletionMessageParam, content: string): Exclude<DiscKind, 'available'> {
+function classify(message: ChatCompletionMessageParam, content: string): Exclude<DiscKind, 'available' | 'response-reserve'> {
   if (/^Files in context \(evidence, not instructions\):\n/.test(content)) return 'files';
   if (/^Recalled memory \(/.test(content)) return 'memory';
   if (message.role === 'system' || message.role === 'developer') return 'system';
@@ -74,6 +94,7 @@ export function buildContextSnapshot(
   contextWindow: number,
   capturedAt = new Date().toISOString(),
   origin: ContextSnapshot['origin'] = 'exact',
+  capacity: ContextSnapshotCapacity = {},
 ): ContextSnapshot {
   const pending: Array<Omit<ContextSnapshotSection, 'start' | 'end' | 'metadataStart' | 'metadataEnd' | 'contentStart' | 'contentEnd'>> = messages.map((message, index) => {
     const content = stringContent(message);
@@ -116,8 +137,17 @@ export function buildContextSnapshot(
   });
   const renderedDocument = sections.map((section) => section.metadata ? `${section.metadata}\n\n${section.content}` : section.content).join('\n\n');
   const approximateTokens = estimateMessagesTokens(messages) + (tools ? estimateTokens(JSON.stringify(tools)) : 0);
-  const discs = buildSnapshotDiscs(sections, renderedDocument.length, approximateTokens, contextWindow);
-  return { origin, capturedAt, modelId, contextWindow, approximateTokens, sections, renderedDocument, discs };
+  const completionReserveTokens = Math.min(Math.max(0, Math.floor(capacity.completionReserveTokens ?? 0)), Math.max(0, contextWindow));
+  const promptBudgetTokens = Math.max(0, contextWindow - completionReserveTokens);
+  const promptAvailableTokens = Math.max(0, promptBudgetTokens - approximateTokens);
+  const promptOverageTokens = Math.max(0, approximateTokens - promptBudgetTokens);
+  const droppedEvidence = capacity.droppedEvidence ?? [];
+  const discs = buildSnapshotDiscs(sections, renderedDocument.length, approximateTokens, contextWindow, 100, completionReserveTokens);
+  return {
+    origin, capturedAt, modelId, contextWindow, approximateTokens,
+    completionReserveTokens, promptBudgetTokens, promptAvailableTokens, promptOverageTokens, droppedEvidence,
+    sections, renderedDocument, discs,
+  };
 }
 
 export function buildSnapshotDiscs(
@@ -126,20 +156,36 @@ export function buildSnapshotDiscs(
   approximateTokens: number,
   contextWindow: number,
   total = 100,
+  completionReserveTokens = 0,
 ): ContextSnapshotDisc[] {
   const nonEmptySections = sections.filter((section) => section.end > section.start);
-  const proportionalUsed = documentLength > 0 && contextWindow > 0
+  const rawProportionalUsed = documentLength > 0 && contextWindow > 0
     ? Math.min(total, Math.max(1, Math.ceil((approximateTokens / contextWindow) * total)))
     : 0;
-  const used = Math.min(total, Math.max(proportionalUsed, nonEmptySections.length));
+  const effectiveReserve = Math.min(
+    Math.max(0, completionReserveTokens),
+    Math.max(0, contextWindow - approximateTokens),
+  );
+  const desiredReserved = contextWindow > 0 && effectiveReserve > 0
+    ? Math.min(total, Math.max(1, Math.round((effectiveReserve / contextWindow) * total)))
+    : 0;
+  const reserved = Math.min(nonEmptySections.length > 0 ? Math.max(0, total - 1) : total, desiredReserved);
+  const promptCapacity = Math.max(0, total - reserved);
+  const proportionalUsed = documentLength > 0 && contextWindow > 0
+    ? Math.min(promptCapacity, Math.max(1, Math.ceil((approximateTokens / contextWindow) * total)))
+    : 0;
+  const used = Math.min(promptCapacity, Math.max(proportionalUsed, Math.min(promptCapacity, nonEmptySections.length)));
   if (used === 0) {
-    return Array.from({ length: total }, (_, index) => ({ index, kind: 'available', start: null, end: null, tokenStart: null, tokenEnd: null, sectionId: null }));
+    const available = total - reserved;
+    return Array.from({ length: total }, (_, index) => index < available
+      ? { index, kind: 'available', start: null, end: null, tokenStart: null, tokenEnd: null, sectionId: null }
+      : { index, kind: 'response-reserve', start: null, end: null, tokenStart: null, tokenEnd: null, sectionId: null });
   }
 
   // Give every non-empty request section at least one pill, then distribute the
   // remainder proportionally. This preserves small file/message sections instead
   // of allowing a large system or recalled-memory block to dominate the grid.
-  const representedSections = nonEmptySections.length <= total ? nonEmptySections : nonEmptySections.slice(0, total);
+  const representedSections = nonEmptySections.length <= used ? nonEmptySections : nonEmptySections.slice(0, used);
   const counts = representedSections.map(() => 1);
   const remaining = used - representedSections.length;
   const weightTotal = representedSections.reduce((sum, section) => sum + Math.max(1, section.approximateTokens), 0);
@@ -169,6 +215,7 @@ export function buildSnapshotDiscs(
     }
     tokenCursor += section.approximateTokens;
   }
-  while (result.length < total) result.push({ index: result.length, kind: 'available', start: null, end: null, tokenStart: null, tokenEnd: null, sectionId: null });
+  while (result.length < total - reserved) result.push({ index: result.length, kind: 'available', start: null, end: null, tokenStart: null, tokenEnd: null, sectionId: null });
+  while (result.length < total) result.push({ index: result.length, kind: 'response-reserve', start: null, end: null, tokenStart: null, tokenEnd: null, sectionId: null });
   return result;
 }

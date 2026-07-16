@@ -38,6 +38,7 @@ const DISC_STYLE: Record<DiscKind, { char: string; color: string }> = {
   files: { char: '■', color: 'yellow' },
   messages: { char: '■', color: 'green' },
   available: { char: '□', color: 'gray' },
+  'response-reserve': { char: '■', color: 'magenta' },
 };
 
 export const ContextPicker: React.FC<ContextPickerProps> = ({
@@ -191,9 +192,10 @@ export const ContextPicker: React.FC<ContextPickerProps> = ({
     files: snapshot.sections.filter((entry) => entry.category === 'files').reduce((sum, entry) => sum + entry.approximateTokens, 0),
     messages: snapshot.sections.filter((entry) => entry.category === 'messages').reduce((sum, entry) => sum + entry.approximateTokens, 0),
     available: 0,
+    'response-reserve': Math.max(0, snapshot.completionReserveTokens - snapshot.promptOverageTokens),
   };
   const usedTokens = amounts.system + amounts.memory + amounts.files + amounts.messages;
-  amounts.available = Math.max(0, snapshot.contextWindow - usedTokens);
+  amounts.available = snapshot.promptAvailableTokens;
   const gridWidth = 10;
   const rows = 10;
 
@@ -221,7 +223,7 @@ export const ContextPicker: React.FC<ContextPickerProps> = ({
       {/* Token grid header */}
       <Box paddingBottom={0}>
         <Text bold>
-          Context {formatTokenCount(usedTokens)} / {formatTokenCount(snapshot.contextWindow)} tokens
+          Prompt {formatTokenCount(snapshot.approximateTokens)} / {formatTokenCount(snapshot.promptBudgetTokens)} · response reserve {formatTokenCount(snapshot.completionReserveTokens)} · window {formatTokenCount(snapshot.contextWindow)}
         </Text>
       </Box>
 
@@ -237,7 +239,16 @@ export const ContextPicker: React.FC<ContextPickerProps> = ({
         <Text><Text color="yellow">■</Text> files {formatTokenCount(amounts.files)}</Text>
         <Text><Text color="green">■</Text> messages {formatTokenCount(amounts.messages)}</Text>
         <Text><Text color="gray">□</Text> available {formatTokenCount(amounts.available)}</Text>
+        <Text><Text color="magenta">■</Text> response reserve {formatTokenCount(amounts['response-reserve'])}</Text>
       </Box>
+
+      {snapshot.promptOverageTokens > 0 && <Text color="red">Prompt exceeds its allocation by ~{formatTokenCount(snapshot.promptOverageTokens)} tokens.</Text>}
+      {snapshot.droppedEvidence.length > 0 && <Box flexDirection="column" paddingBottom={1}>
+        <Text color="yellow" bold>Dropped before request</Text>
+        {snapshot.droppedEvidence.map((item, index) => <Text key={`${item.category}-${index}`} dimColor>
+          {item.label} · ~{formatTokenCount(item.approximateTokens)} tokens · exceeded prompt budget · trace: {item.traceStage}
+        </Text>)}
+      </Box>}
 
       {mode === 'explorer' ? (
         <Box flexDirection="column" flexGrow={1}>

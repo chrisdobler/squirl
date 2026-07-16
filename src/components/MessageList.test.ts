@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { computeScrollbarLayout, computeViewportLayout, viewportRowsForHeight } from './MessageList.js';
+import { buildMessageLines, computeScrollbarLayout, computeViewportLayout, viewportRowsForHeight } from './MessageList.js';
+import { SQUIRL_PARTICIPANT, USER_PARTICIPANT, participantFromDescriptor } from '../agents/participants.js';
+import type { Message } from '../types.js';
+
+const cc = participantFromDescriptor({ id: 'cc', kind: 'claude-code', label: 'claude-code', transport: 'local', cwd: '/repo' }, 'magenta');
+
+function messageLines(messages: Message[]) {
+  return buildMessageLines({
+    messages, showThinking: false, dimmed: false, isRewindMode: false,
+    rewindCandidateIds: new Set(), rewindTargetMessageId: null,
+    participants: [USER_PARTICIPANT, SQUIRL_PARTICIPANT, cc],
+  });
+}
 
 describe('viewportRowsForHeight', () => {
   it('keeps the viewport at least one row tall', () => {
@@ -83,5 +95,24 @@ describe('computeViewportLayout', () => {
     const layout = computeViewportLayout<string>([], 0, 0, ' ');
 
     expect(layout.rows).toEqual([' ']);
+  });
+});
+
+describe('confidence metadata in the TUI', () => {
+  it('adds confidence to local assistant headers only', () => {
+    const localRows = messageLines([{ id: 'm-confidence', role: 'assistant', content: 'hi', responseMeta: { model: 'local', confidence: 63 } }]);
+    const remoteRows = messageLines([{ id: 'm-remote-confidence', role: 'assistant', content: 'hi', participantId: 'cc', responseMeta: { model: 'claude', confidence: 63 } }]);
+    expect(localRows.find((row) => row.messageId === 'm-confidence' && row.text === 'squirl')?.suffix).toBe('local · 63% confidence');
+    expect(remoteRows.find((row) => row.messageId === 'm-remote-confidence' && row.text === 'claude-code')?.suffix).toBe('claude');
+  });
+
+  it('shows unavailable confidence in the local assistant header', () => {
+    const rows = messageLines([{ id: 'm-confidence-unavailable', role: 'assistant', content: 'hi', responseMeta: { model: 'local', confidence: null } }]);
+    expect(rows.find((row) => row.messageId === 'm-confidence-unavailable' && row.text === 'squirl')?.suffix).toBe('local · confidence ?');
+  });
+
+  it('shows pending confidence in the local assistant header', () => {
+    const rows = messageLines([{ id: 'm-confidence-pending', role: 'assistant', content: 'hi', responseMeta: { model: 'local', confidenceState: 'pending' } }]);
+    expect(rows.find((row) => row.messageId === 'm-confidence-pending' && row.text === 'squirl')?.suffix).toBe('local · confidence …');
   });
 });

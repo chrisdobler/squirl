@@ -4,6 +4,7 @@ import type { Message } from '../types.js';
 import type { Participant, ParticipantColor } from '../agents/types.js';
 import { PARTICIPANT_COLOR_VALUE, SQUIRL_PARTICIPANT, USER_PARTICIPANT, addressedParticipantLabel, buildRegistry, resolveParticipant } from '../agents/participants.js';
 import { toolActivitySummary } from '../tool-activity.js';
+import { presentedConversation } from '../conversation-presentation.js';
 
 interface MessageListProps {
   messages: Message[];
@@ -200,11 +201,31 @@ export function buildMessageLines({
   };
 
   let activeParticipant: string | null = null;
-  for (const msg of messages) {
+  for (const msg of presentedConversation(messages)) {
     const isRewindCandidate = rewindCandidateIds.has(msg.id);
     const isRewindTarget = rewindTargetMessageId === msg.id;
     const muted = dimmed || (isRewindMode && !isRewindCandidate);
     const base = { messageId: msg.id, dim: muted };
+
+    if (msg.role === 'activity') {
+      activeParticipant = null;
+      const card = msg.activity;
+      const state = card.state === 'succeeded' ? '✓' : card.state === 'failed' || card.state === 'cancelled' ? '✕' : card.state === 'blocked' || card.state === 'stalled' ? '!' : '●';
+      const progress = card.progress
+        ? [card.progress.completed !== undefined ? `${card.progress.completed} completed` : '', card.progress.active !== undefined ? `${card.progress.active} active` : '', card.progress.unfinished !== undefined ? `${card.progress.unfinished} unfinished` : ''].filter(Boolean).join(' · ')
+        : '';
+      add({ ...base, text: `┌─ ${state} ${card.title} · ${card.state}`, color: card.state === 'failed' || card.state === 'blocked' ? 'yellow' : undefined, bold: true }, 0);
+      if (!card.collapsed && card.summary) add({ ...base, text: `│  ${card.summary}` }, 1);
+      if (!card.collapsed && (card.phase || progress)) add({ ...base, text: `│  ${[card.phase, progress].filter(Boolean).join(' · ')}`, dim: true }, 2);
+      if (!card.collapsed && card.workers?.length) {
+        card.workers.slice(0, 4).forEach((worker, index) => add({ ...base, text: `│    ● ${worker.label} (${worker.id.slice(0, 8)})`, dim: true }, 3 + index));
+        if (card.workers.length > 4) add({ ...base, text: `│    +${card.workers.length - 4} more ${card.state === 'stalled' ? 'unfinished' : 'running'}`, dim: true }, 7);
+      }
+      if (!card.collapsed && card.error) add({ ...base, text: `│  ${card.error}`, color: 'yellow' }, 3);
+      add({ ...base, text: '└─' }, 4);
+      add({ text: ' ', messageId: msg.id }, 5);
+      continue;
+    }
 
     if (msg.role === 'user') {
       activeParticipant = null;
@@ -228,11 +249,18 @@ export function buildMessageLines({
 
     if (msg.role === 'assistant') {
       const { thinkContent, visibleContent, thinkingInProgress } = parseThinkBlocks(msg.content);
+      if (!msg.isStreaming && !visibleContent.trim() && msg.toolCalls?.length) continue;
       const hasThinking = thinkContent.length > 0 || thinkingInProgress;
       const participant = resolveParticipant(msg, registry);
       const isLocal = participant.kind === 'local-llm';
       const responseMeta = msg.responseMeta
-        ? `${msg.responseMeta.model}${msg.responseMeta.effort ? ` · ${msg.responseMeta.effort}` : ''}`
+        ? [
+            msg.responseMeta.model,
+            msg.responseMeta.effort,
+            isLocal && (msg.responseMeta.confidenceState === 'pending' || Object.prototype.hasOwnProperty.call(msg.responseMeta, 'confidence'))
+              ? msg.responseMeta.confidenceState === 'pending' ? 'confidence …' : msg.responseMeta.confidence === null ? 'confidence ?' : `${msg.responseMeta.confidence}% confidence`
+              : '',
+          ].filter(Boolean).join(' · ')
         : undefined;
       const participantKey = msg.participantId ?? 'squirl';
       if (activeParticipant !== participantKey) {
@@ -268,6 +296,10 @@ export function buildMessageLines({
     activeParticipant = msg.participantId ?? 'squirl';
     const expanded = expandedToolIds.has(msg.id);
     const selected = isToolMode && selectedToolId === msg.id;
+    if (msg.toolRejection) {
+      add({ ...base, text: `  ⊘ ${toolActivitySummary(msg)} rejected — ${msg.toolRejection.summary}`, color: 'yellow', bold: selected }, 0);
+      continue;
+    }
     const state = msg.toolStatus === 'running' ? '●' : msg.toolStatus === 'error' ? '✕' : '✓';
     const cursor = selected ? '›' : ' ';
     add({ ...base, text: `${cursor} ${expanded ? '▼' : '▶'} ${state} ${toolActivitySummary(msg)}`, color: msg.toolStatus === 'error' ? 'yellow' : undefined, bold: selected }, 0);

@@ -61,10 +61,20 @@ describe('context snapshot persistence', () => {
     stored.snapshot.discs.forEach((disc: { kind: string }) => {
       if (disc.kind === 'memory') disc.kind = 'system';
     });
+    delete stored.snapshot.completionReserveTokens;
+    delete stored.snapshot.promptBudgetTokens;
+    delete stored.snapshot.promptAvailableTokens;
+    delete stored.snapshot.promptOverageTokens;
+    delete stored.snapshot.droppedEvidence;
     writeFileSync(path, JSON.stringify(stored), 'utf-8');
 
     const loaded = store.loadContextSnapshot('/workspace/a');
     expect(loaded?.sections[0]?.category).toBe('memory');
     expect(loaded?.discs.some((disc) => disc.kind === 'memory')).toBe(true);
+    expect(loaded?.completionReserveTokens).toBe(1_000);
+    expect(loaded?.promptBudgetTokens).toBe(0);
+    expect(loaded?.promptAvailableTokens).toBe(0);
+    expect(loaded?.droppedEvidence).toEqual([]);
+    expect(loaded?.discs.some((disc) => disc.kind === 'response-reserve')).toBe(true);
   });
 });

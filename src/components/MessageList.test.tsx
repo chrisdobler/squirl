@@ -87,4 +87,34 @@ describe('buildMessageLines tool activity rendering', () => {
     ]);
     expect(rows.filter((row) => row.text === 'claude-code')).toHaveLength(1);
   });
+
+  it('hides empty tool-call assistants and keeps policy rejection to one row', () => {
+    const rejected: Message = {
+      id: 't-rejected', role: 'tool', toolCallId: 'call', toolName: 'run_command', content: '{"ok":false}',
+      toolStatus: 'error', toolRejection: { reason: 'not-allowed', summary: 'this turn did not request workspace execution' },
+    };
+    const rows = activityLines([
+      { id: 'a-empty', role: 'assistant', content: '', toolCalls: [{ id: 'call', name: 'run_command', arguments: '{}' }] },
+      rejected,
+    ]);
+    expect(rows.some((row) => row.messageId === 'a-empty')).toBe(false);
+    expect(rows.filter((row) => row.messageId === 't-rejected')).toHaveLength(1);
+    expect(rows[0]?.text).toContain('Run Command rejected — this turn did not request workspace execution');
+  });
+});
+
+describe('buildMessageLines durable activity rendering', () => {
+  it('renders an expanded compact research block with aggregate progress', () => {
+    const rows = lines([{
+      id: 'activity-1', role: 'activity', content: 'Deep research is running', participantId: 'cc',
+      activity: {
+        version: 1, kind: 'research', state: 'running', title: 'Deep research is running',
+        summary: 'Comparing the available approaches.', participantId: 'cc', phase: 'Background workflow',
+        progress: { completed: 4, active: 2 }, updatedAt: '2026-07-14T12:00:00.000Z', actions: ['check-status'], collapsed: false,
+        provider: { kind: 'claude-code', taskId: 'task-1' },
+      },
+    }]);
+    expect(rows.some((row) => row.text === '┌─ ● Deep research is running · running')).toBe(true);
+    expect(rows.some((row) => row.text.includes('4 completed · 2 active'))).toBe(true);
+  });
 });

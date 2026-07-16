@@ -1,4 +1,4 @@
-export type DiscKind = 'system' | 'memory' | 'files' | 'messages' | 'available';
+export type DiscKind = 'system' | 'memory' | 'files' | 'messages' | 'available' | 'response-reserve';
 
 /**
  * Allocate `total` discs (default 100) across the context window as a sequence:

@@ -4,8 +4,17 @@ import { estimateMessagesTokens } from './token-estimator.js';
 export interface TruncationResult {
   messages: ChatCompletionMessageParam[];
   droppedEvidenceCount: number;
+  droppedEvidence: DroppedEvidenceMessage[];
   droppedMessageCount: number;
 }
+
+export interface DroppedEvidenceMessage {
+  message: ChatCompletionMessageParam;
+  approximateTokens: number;
+  reason: 'exceeds-prompt-budget';
+}
+
+export const DEFAULT_COMPLETION_RESERVE_TOKENS = 4096;
 
 export function truncateToFit(
   baseMessages: ChatCompletionMessageParam[],
@@ -13,11 +22,12 @@ export function truncateToFit(
   conversationMessages: ChatCompletionMessageParam[],
   supplementalEvidenceMessages: ChatCompletionMessageParam[],
   maxTokens: number,
-  reserveForCompletion: number = 4096,
+  reserveForCompletion: number = DEFAULT_COMPLETION_RESERVE_TOKENS,
 ): TruncationResult {
   const budget = Math.max(0, maxTokens - reserveForCompletion);
   let used = estimateMessagesTokens(baseMessages);
   let droppedEvidenceCount = 0;
+  const droppedEvidence: DroppedEvidenceMessage[] = [];
   let droppedMessageCount = 0;
 
   const turns = conversationTurns(conversationMessages);
@@ -39,6 +49,7 @@ export function truncateToFit(
       used += cost;
     } else {
       droppedEvidenceCount++;
+      droppedEvidence.push({ message, approximateTokens: cost, reason: 'exceeds-prompt-budget' });
     }
   }
 
@@ -77,6 +88,7 @@ export function truncateToFit(
       used += cost;
     } else {
       droppedEvidenceCount++;
+      droppedEvidence.push({ message, approximateTokens: cost, reason: 'exceeds-prompt-budget' });
     }
   }
 
@@ -84,7 +96,7 @@ export function truncateToFit(
   if (omissionMessage) messages.push(omissionMessage);
   messages.push(...includedTurns.flat());
 
-  return { messages, droppedEvidenceCount, droppedMessageCount };
+  return { messages, droppedEvidenceCount, droppedEvidence, droppedMessageCount };
 }
 
 /** Split API history into user-led turns and remove orphaned tool protocol rows. */
