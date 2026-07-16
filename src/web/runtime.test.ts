@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { Participant } from '../agents/types.js';
+import { MemoryRoomStore } from '../persistence/memory-room-store.js';
 
 let testHome: string;
 let historyDir: string;
@@ -13,7 +14,14 @@ let mockDetectedModels: Array<{ id: string; contextWindow?: number }> = [];
 let mockAssistantContent = 'ok';
 let preparedHandoffs: Array<{ target: any; originalRequest: string; task: string }> = [];
 let mockDelegationClassification = '{"decision":"not_delegate","confidence":"high","targetIds":[],"task":""}';
+let mockActionDecision: any = { type: 'respond' };
+let mockAnswerAssessment: any = { confidence: 90 };
 let mockCodexBin = '';
+let mockContextSnapshot: any = null;
+let beforeAssistantToken: (() => void | Promise<void>) | null = null;
+let mockResearchEvidence: any = null;
+let capturedAssessmentResearch: any = null;
+let answerAssessmentImplementation: ((...args: any[]) => Promise<any>) | null = null;
 
 // Use timestamps relative to "now" so fixture entries stay inside history.ts's 24h
 // rollover window regardless of the calendar date the suite runs on (otherwise rollover
@@ -48,7 +56,8 @@ vi.mock('../orchestrator.js', () => ({
     setMemoryPipeline() {}
     setIdentityContext() {}
     getContextFiles() { return new Map(this.contextFiles); }
-    getContextSnapshot() { return null; }
+    getLatestContextSnapshot() { return mockContextSnapshot; }
+    getContextSnapshot() { return mockContextSnapshot; }
     addContextFile(path: string) { this.contextFiles.set(path, 'content'); }
     removeContextFile(path: string) { this.contextFiles.delete(path); }
     clearContextFiles() { this.contextFiles.clear(); }
@@ -63,17 +72,21 @@ vi.mock('../orchestrator.js', () => ({
       const user = { id: 'web-user', role: 'user', content: input };
       const assistant = { id: 'web-assistant', role: 'assistant', content: '', isStreaming: true };
       callbacks.onNewMessage(user);
-      callbacks.onNewMessage({ ...assistant });
+      await callbacks.onNewMessage({ ...assistant });
+      if (mockResearchEvidence) await callbacks.onNewMessage(mockResearchEvidence);
+      await beforeAssistantToken?.();
       if (mockAssistantContent) {
         assistant.content = mockAssistantContent;
         callbacks.onToken(mockAssistantContent, { ...assistant });
       }
       assistant.isStreaming = false;
-      callbacks.onDone({ promptTokens: 1, completionTokens: 1, totalTokens: 2 });
-      return [user, { ...assistant, content: mockAssistantContent, isStreaming: false }];
+      await callbacks.onDone({ promptTokens: 1, completionTokens: 1, totalTokens: 2 }, { ...assistant });
+      return [user, ...(mockResearchEvidence ? [mockResearchEvidence] : []), { ...assistant, content: mockAssistantContent, isStreaming: false }];
     }
   },
 }));
+
+beforeEach(() => { mockContextSnapshot = null; });
 
 vi.mock('../api.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api.js')>();
@@ -89,8 +102,22 @@ vi.mock('../search/meta-llm.js', async (importOriginal) => {
   return {
     ...actual,
     createConfiguredMetaLLM: () => ({ complete: async () => mockDelegationClassification }),
+    createConfiguredTaskMetaLLM: () => ({ complete: async () => mockDelegationClassification }),
   };
 });
+
+vi.mock('../agents/action-model.js', () => ({
+  probeModelActionCapabilities: async () => ({ nativeToolCalls: false, structuredOutput: true }),
+  decideSquirlAction: async () => mockActionDecision,
+}));
+
+vi.mock('../agents/answer-assessment.js', () => ({
+  HANDOFF_CONFIDENCE_THRESHOLD: 80,
+  assessSquirlAnswer: async (...args: any[]) => {
+    capturedAssessmentResearch = args[4];
+    return answerAssessmentImplementation ? answerAssessmentImplementation(...args) : mockAnswerAssessment;
+  },
+}));
 
 vi.mock('../agents/codex-models.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../agents/codex-models.js')>();
@@ -123,15 +150,29 @@ function entry(id: string, role: 'user' | 'assistant', content: string, timestam
   return { timestamp, message: { id, role, content } };
 }
 
-async function loadRuntime() {
+async function loadRuntime(roomStore?: MemoryRoomStore) {
   vi.resetModules();
   capturedHistory = [];
   capturedModel = null;
   preparedHandoffs = [];
   mockDelegationClassification = '{"decision":"not_delegate","confidence":"high","targetIds":[],"task":""}';
+  mockActionDecision = { type: 'respond' };
+  mockAnswerAssessment = { confidence: 90 };
+  beforeAssistantToken = null;
+  mockResearchEvidence = null;
+  capturedAssessmentResearch = null;
+  answerAssessmentImplementation = null;
   mkdirSync('/tmp/squirl-web-runtime-test', { recursive: true });
   const { SquirlRuntime } = await import('./runtime.js');
-  return new SquirlRuntime('/tmp/squirl-web-runtime-test');
+  return new SquirlRuntime('/tmp/squirl-web-runtime-test', roomStore);
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for asynchronous runtime state.');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 describe('SquirlRuntime shared history', () => {
@@ -162,6 +203,291 @@ describe('SquirlRuntime shared history', () => {
     ]);
 
     expect(runtime.getState().messages.map((message) => message.content)).toContain('terminal message');
+  });
+
+  it.each([
+    [true, 'allowed', true],
+    [false, 'denied', false],
+  ] as const)('persists first-use web research consent when approval is %s', async (approved, consent, enabled) => {
+    const runtime = await loadRuntime();
+    let resolved: boolean | undefined;
+    (runtime as any).pendingApprovals.set('research-consent', {
+      request: { id: 'research-consent', toolName: 'web_search', command: 'California BIC EBT current guidance' },
+      resolve: (value: boolean) => { resolved = value; },
+    });
+
+    expect(runtime.approveToolRequest('research-consent', approved)).toBe(true);
+    expect(resolved).toBe(approved);
+    expect(runtime.getState().config.research).toMatchObject({ consent, enabled, mode: 'automatic', maxResults: 5 });
+    expect(JSON.parse(readFileSync(join(testHome, '.squirl', 'config.json'), 'utf-8')).research).toMatchObject({ consent, enabled });
+  });
+
+  it('does not create memory chunks when their exact source message write failed', async () => {
+    const roomStore = new MemoryRoomStore();
+    const runtime = await loadRuntime(roomStore);
+    await runtime.ready();
+    const insert = vi.spyOn(roomStore, 'insertMessage')
+      .mockRejectedValueOnce(new Error('postgres offline'))
+      .mockResolvedValueOnce(undefined);
+    const replace = vi.spyOn(roomStore, 'replaceMemoryChunks').mockResolvedValue(undefined);
+    const internals = runtime as unknown as {
+      config: { index?: { enabled: boolean } };
+      persistMessage: (message: { id: string; role: 'user'; content: string }) => Promise<void>;
+      memoryPersistenceTail: Promise<void>;
+    };
+    internals.config.index = { enabled: true };
+
+    const failed = internals.persistMessage({ id: 'failed-source', role: 'user', content: 'not durable' });
+    const succeeded = internals.persistMessage({ id: 'durable-source', role: 'user', content: 'durable' });
+
+    await expect(failed).rejects.toThrow('postgres offline');
+    await expect(succeeded).resolves.toBeUndefined();
+    await internals.memoryPersistenceTail;
+    expect(insert).toHaveBeenCalledTimes(2);
+    expect(replace).not.toHaveBeenCalledWith('failed-source', expect.anything());
+    expect(replace).toHaveBeenCalledWith('durable-source', expect.anything());
+    await runtime.shutdown();
+  });
+
+  it('keeps routine active and queued assignment cards collapsed', async () => {
+    const runtime = await loadRuntime();
+    await runtime.ready();
+    const internals = runtime as unknown as {
+      createTurnActivity: (turn: { id: string; participantId: string; input: string; enqueuedAt: string }, started: boolean) => void;
+      syncWorkActivities: (work: {
+        active: Array<{ participantId: string; turnId: string; phase: 'preparing'; queueDepth: number; cancellable: boolean }>;
+        queued: Array<{ id: string; participantId: string; input: string; enqueuedAt: string }>;
+        interrupted: never[];
+        failed: never[];
+      }) => void;
+    };
+    const active = { id: 'turn-active', participantId: 'squirl', input: 'hello', enqueuedAt: TS_EARLY };
+    const queued = { id: 'turn-queued', participantId: 'squirl', input: 'next', enqueuedAt: TS_LATE };
+    internals.createTurnActivity(active, true);
+    internals.createTurnActivity(queued, false);
+    internals.syncWorkActivities({
+      active: [{ participantId: 'squirl', turnId: active.id, phase: 'preparing', queueDepth: 1, cancellable: true }],
+      queued: [queued], interrupted: [], failed: [],
+    });
+
+    const cards = runtime.getState().messages.filter((message) => message.role === 'activity');
+    expect(cards).toHaveLength(2);
+    expect(cards.every((message) => message.role === 'activity' && message.activity.collapsed)).toBe(true);
+  });
+
+  it.each([
+    ['interrupted', 'stalled'],
+    ['failed', 'failed'],
+  ] as const)('keeps the generic %s turn activity routine so recovery has one card', async (collection, state) => {
+    const runtime = await loadRuntime();
+    await runtime.ready();
+    const internals = runtime as unknown as {
+      createTurnActivity: (turn: { id: string; participantId: string; input: string; enqueuedAt: string }, started: boolean) => void;
+      syncWorkActivities: (work: {
+        active: never[]; queued: never[];
+        interrupted: Array<{ id: string; participantId: string; input: string; enqueuedAt: string; lastError: string }>;
+        failed: Array<{ id: string; participantId: string; input: string; enqueuedAt: string; lastError: string }>;
+      }) => void;
+    };
+    const turn = { id: `turn-${collection}`, participantId: 'squirl', input: 'hello', enqueuedAt: TS_EARLY, lastError: 'Server restarted' };
+    internals.createTurnActivity(turn, true);
+    internals.syncWorkActivities({
+      active: [], queued: [],
+      interrupted: collection === 'interrupted' ? [turn] : [],
+      failed: collection === 'failed' ? [turn] : [],
+    });
+
+    const card = runtime.getState().messages.find((message) => message.id === `activity-turn-${turn.id}`);
+    expect(card).toMatchObject({
+      role: 'activity',
+      activity: { kind: 'assignment', state, actions: [], collapsed: true },
+    });
+  });
+
+  it('adopts a previously launched Claude workflow as a durable research activity on startup', async () => {
+    const launchNarrative = 'The deep-research workflow is now running in the background (task `wd8ujffoh`). It will use multiple research agents.';
+    writeJsonl(join(historyDir, 'current.jsonl'), [
+      { timestamp: TS_EARLY, message: { id: 'workflow-narrative', role: 'assistant', participantId: 'cc-squirl-fable', content: launchNarrative } },
+      { timestamp: TS_LATE, message: {
+        id: 'workflow-tool', role: 'tool', toolCallId: 'workflow-1', toolName: 'cc-squirl-fable:Workflow',
+        participantId: 'cc-squirl-fable', toolStatus: 'success',
+        content: [
+          'Workflow launched in background. Task ID: wd8ujffoh',
+          'Run ID: wf_639dee03-5ac',
+          'Summary: Deep research on durable activity cards',
+        ].join('\n'),
+      } },
+    ]);
+    const runtime = await loadRuntime();
+    await runtime.ready();
+
+    expect(runtime.getState().messages).toContainEqual(expect.objectContaining({
+      id: 'activity-job-cc-squirl-fable-wd8ujffoh', role: 'activity', participantId: 'cc-squirl-fable',
+      activity: expect.objectContaining({
+        kind: 'research', state: 'running', actions: ['check-status'], detail: launchNarrative,
+        provider: expect.objectContaining({ taskId: 'wd8ujffoh', runId: 'wf_639dee03-5ac', workflowName: 'deep-research' }),
+      }),
+    }));
+  });
+
+  it('adopts a live Workflow tool result when structured async metadata is absent', async () => {
+    const runtime = await loadRuntime();
+    await runtime.ready();
+    const internals = runtime as unknown as { handleAgentEvent: (event: unknown) => void };
+    internals.handleAgentEvent({ type: 'tool-start', participantId: 'cc-squirl-fable', toolId: 'workflow-live', toolName: 'Workflow', input: {} });
+    internals.handleAgentEvent({
+      type: 'tool-end', participantId: 'cc-squirl-fable', toolId: 'workflow-live', toolName: 'Workflow', ok: true,
+      result: [
+        'Workflow launched in background. Task ID: task-live',
+        'Summary: Deep research on voice options',
+        'Transcript dir: /tmp/workflows/wf-live',
+        'Script file: /tmp/scripts/deep-research-wf-live.js',
+        'Run ID: wf-live',
+      ].join('\n'),
+    });
+    expect(runtime.getState().messages).toContainEqual(expect.objectContaining({
+      id: 'activity-job-cc-squirl-fable-task-live', role: 'activity',
+      activity: expect.objectContaining({
+        kind: 'research', state: 'running', actions: ['check-status'],
+        provider: expect.objectContaining({ taskId: 'task-live', runId: 'wf-live', scriptPath: '/tmp/scripts/deep-research-wf-live.js' }),
+      }),
+    }));
+  });
+
+  it('settles a completed Claude result card from the provider-native final response', async () => {
+    const runtime = await loadRuntime();
+    await runtime.ready();
+    const internals = runtime as unknown as { handleAgentEvent: (event: unknown) => void };
+    internals.handleAgentEvent({
+      type: 'background-job', participantId: 'cc-squirl-fable', state: 'started',
+      taskId: 'task-native', runId: 'wf-native', workflowName: 'deep-research',
+    });
+    internals.handleAgentEvent({
+      type: 'background-job', participantId: 'cc-squirl-fable', state: 'completed', taskId: 'task-native',
+    });
+    expect(runtime.getState().messages).toContainEqual(expect.objectContaining({
+      id: 'activity-job-cc-squirl-fable-task-native-result',
+      activity: expect.objectContaining({ state: 'waiting', phase: 'Preparing final response' }),
+    }));
+
+    internals.handleAgentEvent({ type: 'message-start', participantId: 'cc-squirl-fable', messageId: 'native-report' });
+    internals.handleAgentEvent({
+      type: 'message-end', participantId: 'cc-squirl-fable', messageId: 'native-report',
+      content: 'The provider-native final research report.',
+    });
+    expect(runtime.getState().messages).toContainEqual(expect.objectContaining({
+      id: 'activity-job-cc-squirl-fable-task-native-result',
+      activity: expect.objectContaining({ state: 'waiting' }),
+    }));
+    internals.handleAgentEvent({ type: 'turn-end', participantId: 'cc-squirl-fable' });
+
+    expect(runtime.getState().messages).toContainEqual(expect.objectContaining({
+      id: 'activity-job-cc-squirl-fable-task-native-result',
+      activity: expect.objectContaining({ state: 'succeeded', phase: 'Final response posted', collapsed: true }),
+    }));
+  });
+
+  it('does not mistake interim text before a tool call for the final research response', async () => {
+    const runtime = await loadRuntime();
+    await runtime.ready();
+    const internals = runtime as unknown as { handleAgentEvent: (event: unknown) => void };
+    internals.handleAgentEvent({
+      type: 'background-job', participantId: 'cc-squirl-fable', state: 'started',
+      taskId: 'task-interim', runId: 'wf-interim', workflowName: 'deep-research',
+    });
+    internals.handleAgentEvent({
+      type: 'background-job', participantId: 'cc-squirl-fable', state: 'completed', taskId: 'task-interim',
+    });
+    internals.handleAgentEvent({ type: 'message-start', participantId: 'cc-squirl-fable', messageId: 'interim' });
+    internals.handleAgentEvent({
+      type: 'message-end', participantId: 'cc-squirl-fable', messageId: 'interim',
+      content: 'Let me inspect the workflow output.',
+    });
+    internals.handleAgentEvent({
+      type: 'tool-start', participantId: 'cc-squirl-fable', toolId: 'read-result', toolName: 'Bash', input: {},
+    });
+    internals.handleAgentEvent({ type: 'turn-end', participantId: 'cc-squirl-fable' });
+
+    expect(runtime.getState().messages).toContainEqual(expect.objectContaining({
+      id: 'activity-job-cc-squirl-fable-task-interim-result',
+      activity: expect.objectContaining({ state: 'waiting', phase: 'Preparing final response' }),
+    }));
+  });
+
+  it('loads the authoritative completed result for a tool-free handback and finalizes journal progress', async () => {
+    const runtime = await loadRuntime();
+    await runtime.ready();
+    const sessionDir = join(testHome, 'provider-session');
+    const transcriptDir = join(sessionDir, 'subagents', 'workflows', 'wf-result');
+    const outputPath = join(testHome, 'task-result.json');
+    mkdirSync(transcriptDir, { recursive: true });
+    writeFileSync(outputPath, JSON.stringify({ result: { summary: 'Verified result', findings: [{ claim: 'A' }] } }));
+    writeFileSync(`${sessionDir}.jsonl`, [
+      JSON.stringify({
+        content: `<task-notification><task-id>task-result</task-id><output-file>${outputPath}</output-file><status>completed</status></task-notification>`,
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        message: { stop_reason: 'tool_use', content: [{ type: 'text', text: 'Let me inspect the result.' }] },
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        message: { stop_reason: 'end_turn', content: [{ type: 'text', text: 'The final provider report.' }] },
+      }),
+    ].join('\n') + '\n');
+    writeFileSync(join(transcriptDir, 'journal.jsonl'), [
+      JSON.stringify({ type: 'started', key: 'one', agentId: 'a1' }),
+      JSON.stringify({ type: 'result', key: 'one', agentId: 'a1', result: { summary: 'Verified result' } }),
+    ].join('\n') + '\n');
+    const card = {
+      version: 1, kind: 'research', state: 'succeeded', title: 'Research complete',
+      participantId: 'cc-squirl-fable', startedAt: TS_EARLY, updatedAt: TS_LATE,
+      actions: [], collapsed: true,
+      progress: { completed: 0, active: 1, phase: 'Background workflow' },
+      provider: { kind: 'claude-code', taskId: 'task-result', transcriptDir },
+    } as any;
+    const privateRuntime = runtime as unknown as {
+      workflowResultForHandback: (card: any) => unknown;
+      completedWorkflowProgress: (card: any) => unknown;
+      workflowNativeHandbackText: (card: any) => string | null;
+      backgroundSynthesisPrompt: (source: any) => string;
+    };
+
+    expect(privateRuntime.workflowResultForHandback(card)).toEqual({
+      summary: 'Verified result', findings: [{ claim: 'A' }],
+    });
+    expect(privateRuntime.completedWorkflowProgress(card)).toEqual({
+      completed: 1, active: undefined, unfinished: undefined, phase: 'Background workflow',
+    });
+    expect(privateRuntime.workflowNativeHandbackText(card)).toBe('The final provider report.');
+    const prompt = privateRuntime.backgroundSynthesisPrompt({ id: 'source', role: 'activity', content: '', activity: card });
+    expect(prompt).toContain('<authoritative-workflow-result>');
+    expect(prompt).toContain('"summary":"Verified result"');
+    expect(prompt).toContain('Do not call tools');
+  });
+
+  it('retires failed recovery turns after their source activity succeeds', async () => {
+    const runtime = await loadRuntime();
+    await runtime.ready();
+    const removeQueued = vi.fn(async (_turnId: string) => true);
+    const internals = runtime as unknown as {
+      workState: any;
+      turnScheduler: { removeQueued: typeof removeQueued };
+      dismissSupersededBackgroundTurns: (sourceActivityId: string) => Promise<void>;
+    };
+    internals.workState = {
+      active: [], queued: [],
+      interrupted: [{ id: 'interrupted-match', metadata: { sourceActivityId: 'source-1' } }],
+      failed: [
+        { id: 'failed-match', metadata: { sourceActivityId: 'source-1' } },
+        { id: 'failed-unrelated', metadata: { sourceActivityId: 'source-2' } },
+      ],
+    };
+    internals.turnScheduler.removeQueued = removeQueued;
+
+    await internals.dismissSupersededBackgroundTurns('source-1');
+
+    expect(removeQueued.mock.calls.map(([id]) => id)).toEqual(['interrupted-match', 'failed-match']);
   });
 
   it('routes visual slash commands to typed web command surfaces', async () => {
@@ -199,10 +525,87 @@ describe('SquirlRuntime shared history', () => {
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line).message);
-    expect(entries.map((message) => `${message.role}:${message.content}`)).toEqual([
-      'user:web message',
-      'assistant:ok',
-    ]);
+    expect(entries[0]).toMatchObject({ role: 'user', content: 'web message' });
+    expect(entries.slice(1)).not.toHaveLength(0);
+    expect(entries.slice(1).every((message) => message.role === 'assistant' && message.content === 'ok')).toBe(true);
+    const materialized = [...new Map(entries.map((message) => [message.id, message])).values()];
+    expect(materialized.map((message) => `${message.role}:${message.content}`)).toEqual(['user:web message', 'assistant:ok']);
+  });
+
+  it('durably inserts the assistant shell before the first streamed token', async () => {
+    writeJsonl(join(historyDir, 'current.jsonl'), []);
+    const store = new MemoryRoomStore();
+    const runtime = await loadRuntime(store);
+    beforeAssistantToken = async () => {
+      const assistant = (await store.loadMessages()).find((item) => item.message.role === 'assistant');
+      expect(assistant?.message).toMatchObject({ content: '', isStreaming: true });
+      expect(assistant?.turnId).toBeTruthy();
+    };
+
+    await runtime.chat('web message', 'squirl', () => {});
+
+    const assistant = (await store.loadMessages()).find((item) => item.message.role === 'assistant');
+    expect(assistant?.message).toMatchObject({ content: 'ok', isStreaming: false, responseState: 'complete' });
+  });
+
+  it('fails the turn when the final assistant update is not durable', async () => {
+    writeJsonl(join(historyDir, 'current.jsonl'), []);
+    const store = new MemoryRoomStore();
+    const runtime = await loadRuntime(store);
+    beforeAssistantToken = () => {
+      store.updateMessage = async () => { throw new Error('final persistence unavailable'); };
+    };
+
+    await expect(runtime.chat('web message', 'squirl', () => {})).rejects.toThrow('final persistence unavailable');
+
+    expect(runtime.getState().work.failed).toContainEqual(expect.objectContaining({
+      input: 'web message', lastError: 'final persistence unavailable',
+    }));
+    expect((await store.loadMessages()).find((item) => item.message.role === 'assistant')?.message).toMatchObject({
+      content: '', isStreaming: true,
+    });
+  });
+
+  it('recovers a durable partial response after its turn is interrupted', async () => {
+    writeJsonl(join(historyDir, 'current.jsonl'), []);
+    const store = new MemoryRoomStore();
+    await store.initialize();
+    const queued = await store.enqueue({ participantId: 'squirl', input: 'explain STT', requestId: 'interrupted-request' });
+    const claimed = await store.claim('old-worker', 30_000);
+    expect(claimed?.id).toBe(queued.turn.id);
+    await store.insertMessage({
+      id: 'partial-assistant', role: 'assistant', content: 'STT converts speech', isStreaming: true,
+      responseMeta: { model: 'local' },
+    }, queued.turn.id);
+    await store.finish(queued.turn.id, 'old-worker', 'failed', 'The server restarted while this turn was active.');
+
+    const runtime = await loadRuntime(store);
+    await runtime.ready();
+
+    expect(runtime.getState().messages.find((message) => message.id === 'partial-assistant')).toMatchObject({
+      content: 'STT converts speech', isStreaming: false, responseState: 'interrupted',
+    });
+    expect((await store.loadMessages()).find((item) => item.message.id === 'partial-assistant')?.message).toMatchObject({
+      content: 'STT converts speech', isStreaming: false, responseState: 'interrupted',
+    });
+    expect(runtime.getState().work.failed).toContainEqual(expect.objectContaining({ id: queued.turn.id }));
+  });
+
+  it('replaces an interrupted empty shell with a durable explanation', async () => {
+    writeJsonl(join(historyDir, 'current.jsonl'), []);
+    const store = new MemoryRoomStore();
+    await store.initialize();
+    const queued = await store.enqueue({ participantId: 'squirl', input: 'hello', requestId: 'empty-interrupted-request' });
+    await store.claim('old-worker', 30_000);
+    await store.insertMessage({ id: 'empty-assistant', role: 'assistant', content: '', isStreaming: true }, queued.turn.id);
+    await store.finish(queued.turn.id, 'old-worker', 'failed', 'Model connection lost.');
+
+    const runtime = await loadRuntime(store);
+    await runtime.ready();
+
+    expect(runtime.getState().messages.find((message) => message.id === 'empty-assistant')).toMatchObject({
+      content: 'Response interrupted before generating text.', isStreaming: false, responseState: 'interrupted',
+    });
   });
 
   it('emits absolute assistant updates while streaming', async () => {
@@ -221,15 +624,32 @@ describe('SquirlRuntime shared history', () => {
   it('persists a clarification question after five minutes without a known task', async () => {
     writeJsonl(join(historyDir, 'current.jsonl'), []);
     const runtime = await loadRuntime();
+    await runtime.ready();
     const internals = runtime as unknown as {
-      taskUnknownSince: number;
+      taskClarificationState: { phase: string; unknownSince: number | null };
+      taskClarificationHydrated: boolean;
       taskRefreshRunning: boolean;
+      taskRefreshQueued: boolean;
+      taskRefreshScheduled: boolean;
+      taskRefreshFailed: boolean;
+      taskSourceDirty: boolean;
+      calendarRefreshRunning: boolean;
+      calendarRefreshQueued: boolean;
+      calendarRefreshFailed: boolean;
       messages: any[];
       checkTaskClarification: (now: number) => void;
     };
     const now = Date.now();
-    internals.taskUnknownSince = now;
+    internals.taskClarificationState = { phase: 'unknown-unasked', unknownSince: now };
+    internals.taskClarificationHydrated = true;
     internals.taskRefreshRunning = false;
+    internals.taskRefreshQueued = false;
+    internals.taskRefreshScheduled = false;
+    internals.taskRefreshFailed = false;
+    internals.taskSourceDirty = false;
+    internals.calendarRefreshRunning = false;
+    internals.calendarRefreshQueued = false;
+    internals.calendarRefreshFailed = false;
 
     internals.checkTaskClarification(now + 5 * 60 * 1000 - 1);
     expect(internals.messages).toHaveLength(0);
@@ -260,9 +680,17 @@ describe('SquirlRuntime shared history', () => {
     writeJsonl(join(historyDir, 'current.jsonl'), entries);
 
     const runtime = await loadRuntime();
+    await runtime.ready();
     const internals = runtime as unknown as {
-      taskUnknownSince: number;
+      taskClarificationState: { phase: string; unknownSince: number | null };
       taskRefreshRunning: boolean;
+      taskRefreshQueued: boolean;
+      taskRefreshScheduled: boolean;
+      taskRefreshFailed: boolean;
+      taskSourceDirty: boolean;
+      calendarRefreshRunning: boolean;
+      calendarRefreshQueued: boolean;
+      calendarRefreshFailed: boolean;
       messages: any[];
       checkTaskClarification: (now: number) => void;
     };
@@ -270,10 +698,84 @@ describe('SquirlRuntime shared history', () => {
     expect(internals.messages.some((message) => message.id === 'clarification')).toBe(false);
 
     internals.taskRefreshRunning = false;
+    internals.taskRefreshQueued = false;
+    internals.taskRefreshScheduled = false;
+    internals.taskRefreshFailed = false;
+    internals.taskSourceDirty = false;
+    internals.calendarRefreshRunning = false;
+    internals.calendarRefreshQueued = false;
+    internals.calendarRefreshFailed = false;
     internals.checkTaskClarification(Date.now() + 24 * 60 * 60_000);
 
     const persisted = readFileSync(join(historyDir, 'current.jsonl'), 'utf-8').trim().split('\n').map((line) => JSON.parse(line).message);
     expect(persisted.filter((message) => message.proactiveKind === 'task-clarification')).toHaveLength(1);
+    expect(internals.taskClarificationState.phase).toBe('unknown-asked');
+  });
+
+  it('does not ask while new task evidence is awaiting classification or a refresh has failed', async () => {
+    writeJsonl(join(historyDir, 'current.jsonl'), []);
+    const runtime = await loadRuntime();
+    await runtime.ready();
+    const internals = runtime as any;
+    const now = Date.now();
+    internals.taskClarificationHydrated = true;
+    internals.taskClarificationState = { phase: 'unknown-unasked', unknownSince: now - 10 * 60_000 };
+    internals.taskRefreshRunning = false;
+    internals.taskRefreshQueued = false;
+    internals.taskRefreshScheduled = false;
+    internals.taskRefreshFailed = false;
+    internals.taskSourceDirty = true;
+    internals.calendarRefreshRunning = false;
+    internals.calendarRefreshQueued = false;
+    internals.calendarRefreshFailed = false;
+
+    internals.checkTaskClarification(now);
+
+    expect(internals.messages.filter((message: any) => message.proactiveKind === 'task-clarification')).toHaveLength(0);
+    expect(internals.taskClarificationState.phase).toBe('unknown-unasked');
+
+    internals.taskSourceDirty = false;
+    internals.taskRefreshFailed = true;
+    internals.checkTaskClarification(now + 60_000);
+
+    expect(internals.messages.filter((message: any) => message.proactiveKind === 'task-clarification')).toHaveLength(0);
+    expect(internals.taskClarificationState.phase).toBe('unknown-unasked');
+  });
+
+  it('asks again only after confirmed awareness is lost for five minutes', async () => {
+    writeJsonl(join(historyDir, 'current.jsonl'), []);
+    const runtime = await loadRuntime();
+    await runtime.ready();
+    const internals = runtime as any;
+    const now = Date.now();
+    internals.taskClarificationHydrated = true;
+    internals.taskClarificationState = { phase: 'unknown-asked', unknownSince: now - 30 * 60_000 };
+    internals.taskRefreshRunning = false;
+    internals.taskRefreshQueued = false;
+    internals.taskRefreshScheduled = false;
+    internals.taskRefreshFailed = false;
+    internals.taskSourceDirty = false;
+    internals.calendarRefreshRunning = false;
+    internals.calendarRefreshQueued = false;
+    internals.calendarRefreshFailed = false;
+    internals.taskActivitySnapshot = {
+      version: 3,
+      generatedAt: new Date(now).toISOString(),
+      sourceWatermark: 'known',
+      tasks: [{ id: 't1', title: 'Known work', lastActiveAt: new Date(now - 60 * 60_000).toISOString(), participantIds: [], evidenceIds: [] }],
+    };
+
+    internals.checkTaskClarification(now);
+    expect(internals.taskClarificationState.phase).toBe('known');
+
+    internals.checkTaskClarification(now + 1);
+    expect(internals.taskClarificationState).toEqual({ phase: 'unknown-unasked', unknownSince: now });
+    internals.checkTaskClarification(now + 5 * 60_000 - 1);
+    expect(internals.messages.filter((message: any) => message.proactiveKind === 'task-clarification')).toHaveLength(0);
+
+    internals.checkTaskClarification(now + 5 * 60_000);
+    expect(internals.messages.filter((message: any) => message.proactiveKind === 'task-clarification')).toHaveLength(1);
+    expect(internals.taskClarificationState.phase).toBe('unknown-asked');
   });
 });
 
@@ -286,6 +788,7 @@ describe('SquirlRuntime agents', () => {
     installFakeCodex();
     writeFileSync(join(testHome, '.squirl', 'config.json'), JSON.stringify({ defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6', agents: { codexBin: mockCodexBin } }) + '\n', 'utf-8');
     writeJsonl(join(historyDir, 'current.jsonl'), []);
+    mockAssistantContent = 'ok';
   });
 
   afterEach(() => {
@@ -298,6 +801,31 @@ describe('SquirlRuntime agents', () => {
     expect(runtime.listAgents()).toEqual([]);
   });
 
+  it('remaps a provider message id collision instead of overwriting transcript history', async () => {
+    writeJsonl(join(historyDir, 'current.jsonl'), [{
+      timestamp: TS_EARLY,
+      message: { id: 'codex-squirl-1', role: 'assistant', participantId: 'codex-squirl', content: 'older durable reply' },
+    }]);
+    const runtime = await loadRuntime();
+    await runtime.ready();
+    const events: any[] = [];
+    const unsubscribe = runtime.subscribeEvents((event) => events.push(event));
+    const internals = runtime as unknown as { handleAgentEvent: (event: unknown) => void; persistenceTail: Promise<void> };
+    internals.handleAgentEvent({ type: 'message-start', participantId: 'codex-squirl', messageId: 'codex-squirl-1' });
+    internals.handleAgentEvent({ type: 'token', participantId: 'codex-squirl', messageId: 'codex-squirl-1', token: 'new reply' });
+    internals.handleAgentEvent({ type: 'message-end', participantId: 'codex-squirl', messageId: 'codex-squirl-1', content: 'new reply' });
+    await internals.persistenceTail;
+    unsubscribe();
+
+    const replies = runtime.getState().messages.filter((message) => message.role === 'assistant' && message.participantId === 'codex-squirl');
+    expect(replies).toEqual([
+      expect.objectContaining({ id: 'codex-squirl-1', content: 'older durable reply' }),
+      expect.objectContaining({ content: 'new reply' }),
+    ]);
+    expect(replies[1]!.id).toMatch(/^codex-squirl-[0-9a-f-]{36}$/);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'toast', message: expect.stringContaining('safe replacement') }));
+  });
+
   it('rehydrates queued agent permission prompts and handles duplicate responses idempotently', async () => {
     const runtime = await loadRuntime();
     const respond = vi.fn(async () => undefined);
@@ -307,6 +835,10 @@ describe('SquirlRuntime agents', () => {
     internals.handleAgentEvent({ type: 'interaction-request', participantId: 'codex', request });
     internals.handleAgentEvent({ type: 'interaction-request', participantId: 'codex', request });
     expect(runtime.getState().agentInteractions).toEqual([{ participantId: 'codex', request }]);
+    expect(runtime.getState().messages).toContainEqual(expect.objectContaining({
+      role: 'activity',
+      activity: expect.objectContaining({ actions: ['approve', 'reject'], provider: expect.objectContaining({ interactionMethod: 'permission' }) }),
+    }));
 
     await runtime.respondToAgentInteraction('codex', 'approval-1', { decision: 'allow-session' });
     await runtime.respondToAgentInteraction('codex', 'approval-1', { decision: 'deny' });
@@ -569,22 +1101,266 @@ describe('SquirlRuntime agents', () => {
     expect(runtime.getTaskActivityState().tasks.some((task) => task.title === 'Resume previous task')).toBe(false);
   });
 
-  it('persists uncertain delegation and dispatches it exactly once after yes', async () => {
+  it('creates a non-chat uncertain delegation prompt and dispatches it exactly once after yes', async () => {
     const runtime = await loadRuntime();
     await runtime.addAgent('codex', { id: 'codex-squirl' });
     mockDelegationClassification = '{"decision":"uncertain","confidence":"low","targetIds":["codex-squirl"],"task":"review the overview"}';
 
     await runtime.chat('Maybe codex squirrel should review the overview', 'squirl', () => undefined);
-    expect(runtime.getState().messages.at(-1)).toMatchObject({
-      role: 'assistant', proactiveKind: 'delegation-confirmation',
-      delegationConfirmation: { targetIds: ['codex-squirl'], task: 'review the overview' },
+    expect(runtime.getState().systemInteractions[0]).toMatchObject({
+      kind: 'handoff-confirmation',
+      pending: { targetIds: ['codex-squirl'], task: 'review the overview' },
     });
+    const interactionId = runtime.getState().systemInteractions[0]!.id;
+    expect(runtime.getState().messages.some((message) => message.role === 'assistant' && message.proactiveKind === 'delegation-confirmation')).toBe(false);
 
     const dispatchTo = vi.fn(async () => undefined);
     (runtime as unknown as { coordinator: { dispatchTo: typeof dispatchTo } }).coordinator.dispatchTo = dispatchTo;
     await runtime.chat('yes', 'squirl', () => undefined);
     expect(dispatchTo).toHaveBeenCalledOnce();
     expect(preparedHandoffs.at(-1)).toMatchObject({ task: 'review the overview' });
+    expect(runtime.getState().systemInteractions).toEqual([]);
+    expect(runtime.getState().messages.some((message) => message.role === 'user' && message.content === 'yes')).toBe(false);
+    await expect(runtime.respondToSystemInteraction(interactionId, true)).rejects.toThrow('no longer pending');
+    expect(dispatchTo).toHaveBeenCalledOnce();
+  });
+
+  it('dispatches a contextual approval to the confidently selected project agent', async () => {
+    const runtime = await loadRuntime();
+    await runtime.addAgent('codex', { id: 'codex-k8s', cwd: '/tmp' });
+    await runtime.addAgent('codex', { id: 'codex-squirl', cwd: '/tmp/squirl-web-runtime-test' });
+    const dispatchTo = vi.fn(async () => undefined);
+    const internals = runtime as unknown as { coordinator: { dispatchTo: typeof dispatchTo }; messages: any[] };
+    internals.coordinator.dispatchTo = dispatchTo;
+    internals.messages = [{
+      id: 'recommendation', role: 'assistant', participantId: 'codex-k8s',
+      content: 'Recommended fix: give Scrum a dedicated 60-second timeout and verify the command.',
+    }];
+    mockDelegationClassification = '{"decision":"delegate","confidence":"high","targetIds":["codex-squirl"],"task":"Implement the recommended Scrum timeout fix and verify it."}';
+
+    await runtime.chat("yeah let's do it", 'squirl', () => undefined);
+
+    expect(preparedHandoffs.at(-1)).toMatchObject({ target: expect.objectContaining({ id: 'codex-squirl' }), task: 'Implement the recommended Scrum timeout fix and verify it.' });
+    expect(dispatchTo).toHaveBeenCalledOnce();
+    expect(runtime.getState().messages.find((message) => message.role === 'assistant' && message.handoff?.state === 'dispatched')).toMatchObject({
+      handoff: { targetId: 'codex-squirl', state: 'dispatched' },
+    });
+  });
+
+  it('turns an explicit retry of a legacy handoff card into one durable dispatch', async () => {
+    const runtime = await loadRuntime();
+    await runtime.addAgent('codex', { id: 'codex-squirl' });
+    const dispatchTo = vi.fn(async () => undefined);
+    const internals = runtime as unknown as { coordinator: { dispatchTo: typeof dispatchTo }; messages: any[] };
+    internals.coordinator.dispatchTo = dispatchTo;
+    internals.messages = [{
+      id: 'orphan', role: 'assistant',
+      content: 'Handoff to @codex-squirl\n\nGoal: Implement the Scrum timeout fix.\n\nOriginal request: Implement the recommended fix.',
+    }];
+
+    await runtime.chat('retry that last handoff?', 'squirl', () => undefined);
+
+    expect(dispatchTo).toHaveBeenCalledOnce();
+    expect(preparedHandoffs.at(-1)).toMatchObject({ target: expect.objectContaining({ id: 'codex-squirl' }), task: 'Implement the Scrum timeout fix.' });
+  });
+
+  it('retries the latest failed durable handoff without creating a new handoff', async () => {
+    const runtime = await loadRuntime();
+    const retry = vi.fn(async () => true);
+    const internals = runtime as unknown as { roomStore: { latestHandoff: () => Promise<any> }; turnScheduler: { retry: typeof retry } };
+    internals.roomStore.latestHandoff = async () => ({ id: 'failed-handoff', participantId: 'codex-squirl', status: 'failed' });
+    internals.turnScheduler.retry = retry;
+
+    await runtime.chat('retry the last handoff', 'squirl', () => undefined);
+
+    expect(retry).toHaveBeenCalledWith('failed-handoff');
+    expect(preparedHandoffs).toEqual([]);
+    expect(runtime.getState().messages.at(-1)?.content).toBe('Retrying the handoff to @codex-squirl.');
+  });
+
+  it.each([
+    ['queued', 'already queued'],
+    ['running', 'already running'],
+    ['succeeded', 'already completed'],
+  ])('does not duplicate a %s durable handoff', async (status, expected) => {
+    const runtime = await loadRuntime();
+    const retry = vi.fn(async () => true);
+    const internals = runtime as unknown as { roomStore: { latestHandoff: () => Promise<any> }; turnScheduler: { retry: typeof retry } };
+    internals.roomStore.latestHandoff = async () => ({ id: 'existing-handoff', participantId: 'codex-squirl', status });
+    internals.turnScheduler.retry = retry;
+
+    await runtime.chat('retry the last handoff', 'squirl', () => undefined);
+
+    expect(retry).not.toHaveBeenCalled();
+    expect(runtime.getState().messages.at(-1)?.content).toContain(expected);
+  });
+
+  it('does not turn model-authored handoff prose into delivery state', async () => {
+    const runtime = await loadRuntime();
+    await runtime.addAgent('codex', { id: 'codex-squirl' });
+    const dispatchTo = vi.fn(async () => undefined);
+    (runtime as unknown as { coordinator: { dispatchTo: typeof dispatchTo } }).coordinator.dispatchTo = dispatchTo;
+    mockAssistantContent = 'Handoff to @codex-squirl\n\nGoal: Implement the fix.';
+
+    await runtime.chat('What should happen next?', 'squirl', () => undefined);
+
+    expect(dispatchTo).not.toHaveBeenCalled();
+    const last = runtime.getState().messages.find((message) => message.id === 'web-assistant');
+    expect(last).toMatchObject({ content: mockAssistantContent });
+    expect(last?.role === 'assistant' ? last.handoff : undefined).toBeUndefined();
+  });
+
+  it('routes an ordinary request directly to Squirl before specialist verification', async () => {
+    const runtime = await loadRuntime();
+    await runtime.addAgent('codex', { id: 'codex-squirl' });
+    const events: any[] = [];
+
+    await runtime.chat('Answer this directly', 'squirl', (event) => events.push(event));
+
+    const routing = events
+      .filter((event) => event.type === 'semantic-progress' && event.progress?.stage === 'action-plan')
+      .map((event) => event.progress);
+    expect(routing[0]).toMatchObject({ state: 'running', label: 'Checking for explicit delegation…' });
+    expect(routing).toContainEqual(expect.objectContaining({
+      state: 'complete', label: 'Request routing', summary: 'Squirl will answer before considering specialist verification.', output: { kind: 'none' },
+    }));
+    expect(runtime.getState().messages.find((message) => message.id === 'web-assistant')).toMatchObject({ content: 'ok' });
+  });
+
+  it('does not let a proactive action replace an informational answer', async () => {
+    const runtime = await loadRuntime();
+    await runtime.addAgent('codex', { id: 'codex-squirl' });
+    mockActionDecision = { type: 'action', action: {
+      type: 'handoff', targetId: 'codex-squirl', task: 'Answer the BIC card question',
+      context: 'The user has a California BIC card.', successCriteria: 'Explain whether EBT needs a separate card.',
+    } };
+
+    await runtime.chat('Can I use my BIC card for EBT?', 'squirl', () => undefined);
+    expect(runtime.getState().systemInteractions).toHaveLength(0);
+    expect(runtime.getState().messages.find((message) => message.id === 'web-assistant')).toMatchObject({ content: 'ok' });
+    expect(preparedHandoffs).toEqual([]);
+  });
+
+  it.each([80, 91])('persists %s%% answer confidence without opening a handoff dialogue', async (confidence) => {
+    const runtime = await loadRuntime();
+    await runtime.addAgent('codex', { id: 'codex-squirl' });
+    mockAnswerAssessment = { confidence, action: { type: 'handoff', targetId: 'codex-squirl', task: 'Verify it' } };
+
+    await runtime.chat('Answer this question', 'squirl', () => undefined);
+    await waitFor(() => runtime.getState().messages.some((message) => message.id === 'web-assistant' && message.role === 'assistant' && message.responseMeta?.confidenceState !== 'pending'));
+
+    const answer = runtime.getState().messages.find((message) => message.id === 'web-assistant');
+    expect(answer).toMatchObject({ content: 'ok', responseMeta: { confidence } });
+    expect(runtime.getState().messages.filter((message) => message.role === 'assistant' && message.proactiveKind === 'delegation-confirmation')).toHaveLength(0);
+  });
+
+  it('persists current-turn research provenance and gives it to confidence assessment', async () => {
+    const runtime = await loadRuntime();
+    mockResearchEvidence = {
+      id: 'research-tool', role: 'tool', toolCallId: 'search-1', toolName: 'web_search', content: '{}',
+      webResearch: { kind: 'search', query: 'current BIC EBT guidance', sources: [{ title: 'Agency', url: 'https://agency.gov/bic', domain: 'agency.gov' }] },
+    };
+
+    await runtime.chat('Can I use a BIC card for EBT?', 'squirl', () => undefined);
+    await waitFor(() => capturedAssessmentResearch !== null);
+
+    expect(capturedAssessmentResearch).toEqual({
+      queries: ['current BIC EBT guidance'],
+      sources: [{ title: 'Agency', url: 'https://agency.gov/bic', domain: 'agency.gov', fetched: false }],
+      citedSourceCount: 0,
+    });
+    expect(runtime.getState().messages.find((message) => message.id === 'web-assistant')).toMatchObject({
+      responseMeta: { research: { queries: ['current BIC EBT guidance'], sources: [{ domain: 'agency.gov' }] } },
+    });
+  });
+
+  it('preserves a low-confidence answer and dispatches its durable handoff after yes', async () => {
+    const runtime = await loadRuntime();
+    await runtime.addAgent('codex', { id: 'codex-squirl' });
+    mockAssistantContent = 'A BIC and EBT card are generally separate, but the details vary by state.';
+    mockAnswerAssessment = { confidence: 63, action: {
+      type: 'handoff', targetId: 'codex-squirl', task: 'Verify whether the BIC can be used for EBT',
+      context: 'The rules may vary by state.', successCriteria: 'Give a clear current answer.',
+    } };
+
+    await runtime.chat('Can I use my BIC card for EBT?', 'squirl', () => undefined);
+    await waitFor(() => runtime.getState().systemInteractions.length > 0);
+
+    expect(runtime.getState().messages.find((message) => message.id === 'web-assistant')).toMatchObject({
+      content: mockAssistantContent, responseMeta: { confidence: 63 },
+    });
+    expect(runtime.getState().systemInteractions[0]).toMatchObject({
+      kind: 'handoff-confirmation',
+      pending: { action: { type: 'handoff', targetId: 'codex-squirl' } },
+    });
+
+    const dispatchTo = vi.fn(async () => undefined);
+    (runtime as unknown as { coordinator: { dispatchTo: typeof dispatchTo } }).coordinator.dispatchTo = dispatchTo;
+    mockAnswerAssessment = { confidence: 95 };
+    await runtime.chat('yes', 'squirl', () => undefined);
+
+    expect(dispatchTo).toHaveBeenCalledOnce();
+    expect(preparedHandoffs.at(-1)?.task).toContain("Squirl's preliminary answer (63% confidence)");
+  });
+
+  it('keeps low confidence without inventing a handoff target', async () => {
+    const runtime = await loadRuntime();
+    mockAnswerAssessment = { confidence: 42 };
+    await runtime.chat('Uncertain question', 'squirl', () => undefined);
+    await waitFor(() => runtime.getState().messages.some((message) => message.id === 'web-assistant' && message.role === 'assistant' && message.responseMeta?.confidence === 42));
+    expect(runtime.getState().messages.find((message) => message.id === 'web-assistant')).toMatchObject({ responseMeta: { confidence: 42 } });
+    expect(runtime.getState().messages.some((message) => message.id === 'web-assistant')).toBe(true);
+  });
+
+  it('persists unavailable confidence without opening a handoff dialogue', async () => {
+    const runtime = await loadRuntime();
+    mockAnswerAssessment = { confidence: null };
+    await runtime.chat('Uncertain question', 'squirl', () => undefined);
+    await waitFor(() => runtime.getState().messages.some((message) => message.id === 'web-assistant' && message.role === 'assistant' && message.responseMeta?.confidenceState === 'unavailable'));
+    expect(runtime.getState().messages.find((message) => message.id === 'web-assistant')).toMatchObject({ responseMeta: { confidence: null } });
+    const last = runtime.getState().messages.at(-1);
+    expect(last?.role === 'assistant' ? last.proactiveKind : undefined).toBeUndefined();
+  });
+
+  it('cancels pending confidence when a new Squirl message is submitted and ignores the late result', async () => {
+    const runtime = await loadRuntime();
+    let resolveAssessment!: (value: any) => void;
+    let assessmentSignal: AbortSignal | undefined;
+    answerAssessmentImplementation = async (...args: any[]) => {
+      assessmentSignal = args[5];
+      return new Promise((resolve) => { resolveAssessment = resolve; });
+    };
+
+    await runtime.chat('first question', 'squirl', () => undefined);
+    expect(runtime.getState().messages.find((message) => message.id === 'web-assistant')).toMatchObject({ responseMeta: { confidenceState: 'pending' } });
+
+    await runtime.submitChat('follow up', 'squirl', 'follow-up-request');
+    expect(assessmentSignal?.aborted).toBe(true);
+    expect(runtime.getState().messages.find((message) => message.id === 'web-assistant')).toMatchObject({ responseMeta: { confidenceState: 'canceled' } });
+
+    resolveAssessment({ confidence: 12, action: { type: 'handoff', targetId: 'codex-squirl', task: 'Late handoff' } });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const answer = runtime.getState().messages.find((message) => message.id === 'web-assistant');
+    expect(answer?.role === 'assistant' ? answer.responseMeta?.confidence : undefined).not.toBe(12);
+    expect(runtime.getState().systemInteractions).toHaveLength(0);
+  });
+
+  it('keeps pending Squirl confidence running when a message targets another agent', async () => {
+    const runtime = await loadRuntime();
+    await runtime.addAgent('codex', { id: 'codex-squirl' });
+    let resolveAssessment!: (value: any) => void;
+    let assessmentSignal: AbortSignal | undefined;
+    answerAssessmentImplementation = async (...args: any[]) => {
+      assessmentSignal = args[5];
+      return new Promise((resolve) => { resolveAssessment = resolve; });
+    };
+
+    await runtime.chat('first question', 'squirl', () => undefined);
+    await runtime.submitChat('work on this separately', 'codex-squirl', 'specialist-request');
+    expect(assessmentSignal?.aborted).toBe(false);
+
+    resolveAssessment({ confidence: 88 });
+    await waitFor(() => runtime.getState().messages.some((message) => message.id === 'web-assistant' && message.role === 'assistant' && message.responseMeta?.confidence === 88));
   });
 
   it('cancels an uncertain delegation after no', async () => {
@@ -595,9 +1371,24 @@ describe('SquirlRuntime agents', () => {
 
     const dispatchTo = vi.fn(async () => undefined);
     (runtime as unknown as { coordinator: { dispatchTo: typeof dispatchTo } }).coordinator.dispatchTo = dispatchTo;
+    const before = runtime.getState().messages.length;
     await runtime.chat('no', 'squirl', () => undefined);
     expect(dispatchTo).not.toHaveBeenCalled();
-    expect(runtime.getState().messages.at(-1)?.content).toBe('Okay, I won’t dispatch that work.');
+    expect(runtime.getState().systemInteractions).toEqual([]);
+    expect(runtime.getState().messages).toHaveLength(before);
+  });
+
+  it('rejects an approved prompt safely when its target disconnected', async () => {
+    const runtime = await loadRuntime();
+    await runtime.addAgent('codex', { id: 'codex-squirl' });
+    mockDelegationClassification = '{"decision":"uncertain","confidence":"low","targetIds":["codex-squirl"],"task":"review this"}';
+    await runtime.chat('Maybe codex squirrel should review this', 'squirl', () => undefined);
+    const interactionId = runtime.getState().systemInteractions[0]!.id;
+    await runtime.stopAgent('codex-squirl');
+
+    await expect(runtime.respondToSystemInteraction(interactionId, true)).rejects.toThrow('not connected');
+    expect(runtime.getState().systemInteractions).toEqual([]);
+    expect(runtime.getState().messages.some((message) => message.role === 'assistant' && message.handoff?.state === 'dispatched')).toBe(false);
   });
 
   it('recovers an unexpired delegation confirmation after restart', async () => {
@@ -612,6 +1403,26 @@ describe('SquirlRuntime agents', () => {
     (second as unknown as { coordinator: { dispatchTo: typeof dispatchTo } }).coordinator.dispatchTo = dispatchTo;
     await second.chat('yes', 'squirl', () => undefined);
     expect(dispatchTo).toHaveBeenCalledOnce();
+  });
+
+  it('migrates an unexpired legacy confirmation card and hides it from the transcript', async () => {
+    const now = new Date();
+    writeJsonl(join(historyDir, 'current.jsonl'), [{
+      timestamp: now.toISOString(),
+      message: {
+        id: 'legacy-confirmation', role: 'assistant', content: 'Should I dispatch it? Reply yes or no.',
+        proactiveKind: 'delegation-confirmation',
+        delegationConfirmation: {
+          id: 'legacy-pending', targetIds: ['codex-squirl'], task: 'Review this', originalRequest: 'Maybe Codex should review this',
+          createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60_000).toISOString(),
+        },
+      },
+    }]);
+    const runtime = await loadRuntime();
+    await runtime.ready();
+
+    expect(runtime.getState().systemInteractions).toEqual([expect.objectContaining({ id: 'legacy-pending', kind: 'handoff-confirmation' })]);
+    expect(runtime.getState().messages.some((message) => message.id === 'legacy-confirmation')).toBe(false);
   });
 
   it('reconciles direct assignments and final agent responses without provisional titles', async () => {
@@ -674,6 +1485,95 @@ describe('SquirlRuntime agents', () => {
     internals.taskRefreshFailed = false;
     internals.taskSourceDirty = false;
     expect(runtime.getTaskActivityState(Date.parse('2026-07-13T18:00:00.000Z'))).toMatchObject({ status: 'ready', tasks: [] });
+  });
+
+  it('keeps a dedicated task model without semantic indexing', async () => {
+    const runtime = await loadRuntime();
+    const internals = runtime as unknown as { taskMetaLLM: unknown; routingMetaLLM: unknown };
+    expect(internals.taskMetaLLM).toBeTruthy();
+    expect(internals.taskMetaLLM).not.toBe(internals.routingMetaLLM);
+  });
+
+  it('preserves reliable tasks, reports timeouts, and retries before calendar sync', async () => {
+    const recent = new Date().toISOString();
+    writeJsonl(join(historyDir, 'current.jsonl'), [entry('retry-task-user', 'user', 'research durable voice options', recent)]);
+    const runtime = await loadRuntime();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    vi.useFakeTimers();
+    try {
+      let classifications = 0;
+      const refreshCalendar = vi.fn(async () => undefined);
+      const internals = runtime as unknown as {
+        config: any;
+        taskMetaLLM: any;
+        taskActivitySnapshot: any;
+        taskRefreshFailed: boolean;
+        taskSourceDirty: boolean;
+        taskRefreshRunning: boolean;
+        taskRefreshQueued: boolean;
+        taskRefreshScheduled: boolean;
+        taskRefreshRetryAttempt: number;
+        taskRefreshRetryTimer: unknown;
+        markTaskActivityChanged: () => void;
+        refreshCalendar: typeof refreshCalendar;
+      };
+      internals.config.calendar = { syncInferredTasks: true };
+      internals.refreshCalendar = refreshCalendar;
+      internals.taskActivitySnapshot = {
+        version: 3, generatedAt: recent, sourceWatermark: 'reliable',
+        tasks: [{ id: 'reliable', title: 'Preserve reliable task state', summary: 'This task must survive a failed refresh.', lastActiveAt: recent, participantIds: [], evidenceIds: ['old'] }],
+      };
+      internals.taskRefreshFailed = false;
+      internals.taskSourceDirty = false;
+      internals.taskRefreshRunning = false;
+      internals.taskRefreshQueued = false;
+      internals.taskRefreshScheduled = false;
+      internals.taskMetaLLM = { complete: async () => {
+        classifications += 1;
+        if (classifications <= 4) throw new Error('Request timed out. secret=https://private.invalid');
+        return JSON.stringify({ confidence: 'high', tasks: [{
+          title: 'Research durable voice options',
+          summary: 'Current work is comparing voice options for Squirl.',
+          evidenceIds: ['retry-task-user'], previousTaskIds: [],
+        }] });
+      } };
+
+      internals.markTaskActivityChanged();
+      await vi.runAllTicks();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(runtime.getTaskActivityState()).toMatchObject({
+        status: 'stale',
+        error: 'Task classification timed out; retrying automatically.',
+        tasks: [{ title: 'Preserve reliable task state' }],
+      });
+      expect(internals.taskRefreshRetryAttempt).toBe(1);
+      expect(internals.taskRefreshRetryTimer).toBeTruthy();
+      expect(refreshCalendar).not.toHaveBeenCalled();
+
+      for (const [index, delay] of [30_000, 60_000, 120_000, 300_000].entries()) {
+        await vi.advanceTimersByTimeAsync(delay);
+        await vi.runAllTicks();
+        await Promise.resolve();
+        expect(classifications).toBe(index + 2);
+        if (index < 3) {
+          expect(runtime.getTaskActivityState()).toMatchObject({ status: 'stale', tasks: [{ title: 'Preserve reliable task state' }] });
+          expect(internals.taskRefreshRetryAttempt).toBe(index + 2);
+          expect(refreshCalendar).not.toHaveBeenCalled();
+        }
+      }
+
+      expect(classifications).toBe(5);
+      expect(runtime.getTaskActivityState()).toMatchObject({
+        status: 'ready', error: null, tasks: [{ title: 'Research durable voice options' }],
+      });
+      expect(internals.taskRefreshRetryAttempt).toBe(0);
+      expect(internals.taskRefreshRetryTimer).toBeNull();
+      expect(refreshCalendar).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('coalesces task refreshes and emits a streamed task snapshot', async () => {
@@ -746,6 +1646,23 @@ describe('SquirlRuntime context window', () => {
     writeConfig({ defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6' });
     const runtime = await loadRuntime();
     expect(runtime.getStatus().contextWindow).toBe(200_000);
+    expect(runtime.getStatus().contextOrigin).toBe('preview');
+  });
+
+  it('uses the latest exact request for both displayed usage and window', async () => {
+    writeConfig({ defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6' });
+    const runtime = await loadRuntime();
+    mockContextSnapshot = {
+      origin: 'exact', capturedAt: '2026-07-14T17:30:00.524Z', modelId: 'local-test',
+      approximateTokens: 8_744, contextWindow: 17_120, sections: [], renderedDocument: '', discs: [],
+    };
+
+    expect(runtime.getStatus()).toMatchObject({
+      tokenCount: 8_744,
+      contextWindow: 17_120,
+      contextOrigin: 'exact',
+      contextCapturedAt: '2026-07-14T17:30:00.524Z',
+    });
   });
 
   it('reports null when a local model window is unknown so the UI can show "?"', async () => {
@@ -842,6 +1759,51 @@ describe('SquirlRuntime empty responses', () => {
     await runtime.chat('hello', 'squirl', (event) => { events.push(event); });
 
     expect(events.some((e) => e.type === 'toast')).toBe(false);
-    expect(events.find((e) => e.type === 'assistant-final')?.message.responseMeta).toEqual({ model: 'claude-sonnet-4-6' });
+    expect(events.find((e) => e.type === 'assistant-final')?.message.responseMeta).toEqual({ model: 'claude-sonnet-4-6', confidenceState: 'pending' });
+  });
+});
+
+describe('SquirlRuntime durable pipeline traces', () => {
+  beforeEach(() => {
+    testCounter++;
+    testHome = join(tmpdir(), `squirl-web-traces-${process.pid}-${testCounter}`);
+    historyDir = join(testHome, '.squirl', 'history');
+    mkdirSync(historyDir, { recursive: true });
+    writeFileSync(join(testHome, '.squirl', 'config.json'), JSON.stringify({ defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6' }) + '\n', 'utf-8');
+    writeJsonl(join(historyDir, 'current.jsonl'), []);
+  });
+
+  afterEach(() => { rmSync(testHome, { recursive: true, force: true }); });
+
+  it('retains a completed trace after work settles and restores it in a new runtime', async () => {
+    const store = new MemoryRoomStore();
+    const first = await loadRuntime(store);
+    await first.ready();
+    await first.chat('trace this turn', 'squirl', () => undefined);
+    await waitFor(() => first.getStatus().recentPipelineTraces[0]?.stages.some((stage) => stage.id === 'confidence' && stage.state === 'succeeded') ?? false);
+    const completed = first.getState();
+    expect(completed.work.active).toEqual([]);
+    expect(completed.status.recentPipelineTraces[0]).toMatchObject({
+      state: 'succeeded', assistantMessageId: 'web-assistant', request: 'trace this turn',
+    });
+    await first.shutdown();
+
+    const restored = await loadRuntime(store);
+    await restored.ready();
+    expect(restored.getStatus().recentPipelineTraces[0]).toMatchObject({
+      state: 'succeeded', assistantMessageId: 'web-assistant', request: 'trace this turn',
+    });
+    await restored.shutdown();
+  });
+
+  it('closes an orphaned running trace during restart recovery', async () => {
+    const store = new MemoryRoomStore();
+    const { createTurnPipelineTrace } = await import('../pipeline-trace.js');
+    await store.savePipelineTrace(createTurnPipelineTrace('orphaned-turn', 'interrupted request'), 10);
+    const runtime = await loadRuntime(store);
+    await runtime.ready();
+    expect(runtime.getStatus().recentPipelineTraces[0]).toMatchObject({ turnId: 'orphaned-turn', state: 'failed' });
+    expect((await store.loadRecentPipelineTraces(10))[0]).toMatchObject({ turnId: 'orphaned-turn', state: 'failed' });
+    await runtime.shutdown();
   });
 });

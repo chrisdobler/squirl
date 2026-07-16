@@ -10,16 +10,18 @@ import { spawn, type ChildProcess } from 'node:child_process';
 const bin = (name: string) => new URL(`../../node_modules/.bin/${name}`, import.meta.url).pathname;
 const apiPort = process.env.SQUIRL_API_PORT ?? '4174';
 const apiUrl = `http://127.0.0.1:${apiPort}`;
+const webPort = process.env.SQUIRL_WEB_DEV_PORT ?? '5173';
+const webOrigin = `http://127.0.0.1:${webPort}`;
 
 // Backend: restarts itself on changes to its import graph; client files aren't in that graph.
 const api = spawn(bin('tsx'), ['watch', 'src/web/dev-api.ts'], {
   stdio: 'inherit',
-  env: { ...process.env, SQUIRL_API_PORT: apiPort },
+  env: { ...process.env, SQUIRL_API_PORT: apiPort, SQUIRL_WEB_DEV_ORIGIN: webOrigin },
 });
 
-// Frontend: stable Vite dev server, told where the API lives. `--strictPort` makes a busy 5173
-// fail loudly (a leftover process) instead of silently crawling up to 5174, 5175, ...
-const vite = spawn(bin('vite'), ['--host', '127.0.0.1', '--port', '5173', '--strictPort'], {
+// Frontend: stable Vite dev server, told where the API lives. `--strictPort` makes a busy dev
+// port fail loudly (usually a leftover process) instead of silently selecting another port.
+const vite = spawn(bin('vite'), ['--host', '127.0.0.1', '--port', webPort, '--strictPort'], {
   stdio: 'inherit',
   env: { ...process.env, VITE_SQUIRL_API_BASE: apiUrl },
 });

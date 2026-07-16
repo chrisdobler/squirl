@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
 import { PresentationOverview } from './PresentationOverview.js';
+import { createTurnPipelineTrace, finishTurnPipelineTrace, updateTurnPipelineTrace } from '../pipeline-trace.js';
 
 const renderOverview = (mode: 'landing' | 'surface' = 'landing') => renderToStaticMarkup(
   React.createElement(PresentationOverview, { onStart: vi.fn(), mode }),
@@ -47,5 +48,36 @@ describe('PresentationOverview', () => {
     const html = renderOverview();
     expect(html).toContain('>Start with an idea</span>');
     expect(html).toContain('<button type="button" class="overviewStart"');
+  });
+
+  it('renders the active trace and inspectable deterministic intent JSON', () => {
+    const trace = updateTurnPipelineTrace(createTurnPipelineTrace('turn-1', 'Can I use a BIC card for EBT?'), {
+      id: 'turn-intent', state: 'running', service: 'deterministic policy', input: { request: 'Can I use a BIC card for EBT?' },
+    });
+    const html = renderToStaticMarkup(React.createElement(PresentationOverview, { onStart: vi.fn(), mode: 'surface', trace }));
+    expect(html).toContain('Inside this Squirl turn');
+    expect(html).toContain('Deterministic turn intent');
+    expect(html).toContain('deterministic policy');
+    expect(html).toContain('Copy JSON');
+    expect(html).toContain('&quot;request&quot;');
+  });
+
+  it('keeps raw request-routing output available in Inspect', () => {
+    const trace = updateTurnPipelineTrace(createTurnPipelineTrace('turn-2', 'Answer this directly'), {
+      id: 'action-plan', state: 'succeeded', service: 'routing model', output: { kind: 'none' },
+    });
+    const html = renderToStaticMarkup(React.createElement(PresentationOverview, { onStart: vi.fn(), mode: 'surface', trace }));
+    expect(html).toContain('Request routing');
+    expect(html).toContain('&quot;kind&quot;');
+    expect(html).toContain('&quot;none&quot;');
+  });
+
+  it('labels a completed retained trace as saved execution with timestamps', () => {
+    const trace = finishTurnPipelineTrace(createTurnPipelineTrace('turn-saved', 'Look back at this'), 'succeeded');
+    const html = renderToStaticMarkup(React.createElement(PresentationOverview, { onStart: vi.fn(), mode: 'surface', trace }));
+    expect(html).toContain('Saved execution');
+    expect(html).toContain('traceOverall traceOverall--succeeded');
+    expect(html).toContain('Started <time');
+    expect(html).toContain('Finished <time');
   });
 });

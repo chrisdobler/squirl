@@ -25,7 +25,15 @@ function MarkdownCode(props: React.ComponentProps<'code'> & ExtraProps) {
   );
 }
 
-export function MarkdownContent({ children }: { children: string }) {
+export interface MarkdownContentProps {
+  children: string;
+}
+
+export function areMarkdownContentPropsEqual(previous: MarkdownContentProps, next: MarkdownContentProps): boolean {
+  return previous.children === next.children;
+}
+
+export const MarkdownContent = React.memo(function MarkdownContent({ children }: MarkdownContentProps) {
   return (
     <ReactMarkdown
       remarkPlugins={[...markdownRemarkPlugins]}
@@ -35,4 +43,4 @@ export function MarkdownContent({ children }: { children: string }) {
       {children}
     </ReactMarkdown>
   );
-}
+}, areMarkdownContentPropsEqual);

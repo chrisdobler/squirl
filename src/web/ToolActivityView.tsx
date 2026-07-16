@@ -7,6 +7,14 @@ export function ToolActivityView({ message }: { message: Extract<Message, { role
   const failed = message.toolStatus === 'error';
   const input = message.toolInput === undefined ? '' : JSON.stringify(message.toolInput, null, 2);
   const summary = toolActivitySummary(message);
+  if (message.toolRejection) {
+    const label = `${summary} rejected — ${message.toolRejection.summary}`;
+    return <div className="toolActivity toolRejected" role="status" aria-label={label}>
+      <span className="toolState" aria-hidden="true">⊘</span>
+      <span className="toolSummary">{label}</span>
+      <span className="toolResultState">rejected</span>
+    </div>;
+  }
   return <details className={`toolActivity${running ? ' running' : ''}${failed ? ' failed' : ''}`}>
     <summary aria-label={`${summary}; ${running ? 'running' : failed ? 'failed' : 'completed'}`}>
       <span className="toolChevron" aria-hidden="true"/>

@@ -26,4 +26,16 @@ describe('ToolActivityView', () => {
     expect(html).toContain('Run false; failed');
     expect(html).toContain('exit 1');
   });
+
+  it('renders a policy rejection as one compact, non-expandable row', () => {
+    const html = renderToStaticMarkup(React.createElement(ToolActivityView, { message: {
+      id: 't3', role: 'tool', toolCallId: 'call', toolName: 'run_command', content: '{"ok":false}',
+      toolInput: '{"command":"ebt balance"}', toolStatus: 'error',
+      toolRejection: { reason: 'not-allowed', summary: 'this turn did not request workspace execution' },
+    } }));
+    expect(html).toContain('Run Command rejected — this turn did not request workspace execution');
+    expect(html).toContain('class="toolActivity toolRejected"');
+    expect(html).not.toContain('<details');
+    expect(html).not.toContain('ebt balance');
+  });
 });

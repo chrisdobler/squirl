@@ -36,25 +36,36 @@ export function sidebarDestination(participant: Participant): 'agent' | 'model' 
   return participant.kind === 'local-llm' ? 'model' : 'agent';
 }
 
+export function contextParticipantDestination(participant: Participant): string | null {
+  return participant.kind === 'local-llm' ? null : participant.id;
+}
+
 function fidelityLabel(preview: ParticipantContextPreview): string {
   if (preview.fidelity === 'inspected-estimate') return 'inspected estimate';
   if (preview.fidelity === 'exact') return 'exact request';
   return preview.fidelity;
 }
 
-export function ContextPreviewCard({ participant, preview, loading, position, onPointerEnter, onPointerLeave }: {
+export function ContextPreviewCard({ participant, preview, loading, position, operation, busy, onTerminal, onCompact, onOpenContext, onPointerEnter, onPointerLeave, onFocus, onBlur }: {
   participant: Participant;
   preview: ParticipantContextPreview | null;
   loading: boolean;
   position: { left: number; top: number };
+  operation?: { operation: 'terminal' | 'compact'; state: string; message?: string };
+  busy?: boolean;
+  onTerminal?: () => void;
+  onCompact?: () => void;
+  onOpenContext?: () => void;
   onPointerEnter?: React.PointerEventHandler<HTMLElement>;
   onPointerLeave?: React.PointerEventHandler<HTMLElement>;
+  onFocus?: React.FocusEventHandler<HTMLElement>;
+  onBlur?: React.FocusEventHandler<HTMLElement>;
 }) {
   const usageOnly = preview?.matrixMode === 'usage';
   const availableTokens = preview?.contextWindow != null && preview.usedTokens != null
     ? Math.max(0, preview.contextWindow - preview.usedTokens)
     : null;
-  return <aside className="agentContextPopover" style={position} role="tooltip" onPointerEnter={onPointerEnter} onPointerLeave={onPointerLeave}>
+  return <aside className="agentContextPopover" style={position} role={participant.kind === 'local-llm' ? 'tooltip' : 'dialog'} aria-label={participant.kind === 'local-llm' ? undefined : `${participant.label} agent actions`} onPointerEnter={onPointerEnter} onPointerLeave={onPointerLeave} onFocus={onFocus} onBlur={onBlur}>
     <header>
       <ParticipantIdentity participant={participant} />
       <div><ParticipantIdentity participant={participant} text={participant.label} marker={false} className="rosterName"/><span>@{participant.id} · {kindLabel(participant)}</span></div>
@@ -69,7 +80,7 @@ export function ContextPreviewCard({ participant, preview, loading, position, on
         <span>source</span><strong>{fidelityLabel(preview)}</strong>
         <span>updated</span><strong>{preview.capturedAt ? new Date(preview.capturedAt).toLocaleTimeString() : 'unknown'}</strong>
       </div>
-      <ContextMatrix compact tone={usageOnly ? 'neutral' : 'categorized'} label={`${participant.label} context matrix preview`} cells={preview.discs.map((kind, index) => ({ index, kind }))} />
+      <ContextMatrix compact tone={usageOnly ? 'neutral' : 'categorized'} label={`Open ${participant.label} context`} onActivate={onOpenContext} cells={preview.discs.map((kind, index) => ({ index, kind }))} />
       {usageOnly ? <div className="contextUsageLegend" aria-label="Context usage legend">
         <span><i className="used" />used {fmt(preview.usedTokens)}</span>
         <span><i className="available" />available {fmt(availableTokens)}</span>
@@ -77,15 +88,29 @@ export function ContextPreviewCard({ participant, preview, loading, position, on
       </div> : <ContextLegend compact amounts={{ ...preview.buckets, available: availableTokens ?? undefined }} formatAmount={fmt} />}
       {loading && <span className="agentContextRefreshing">refreshing…</span>}
     </> : <div className="agentContextUnavailable"><strong>Context unavailable</strong></div>}
+    {participant.kind !== 'local-llm' && <footer className="agentContextActions">
+      <button type="button" className="primary" disabled={busy || participant.controlMode === 'compacting'} onClick={onTerminal}>
+        {participant.controlMode === 'terminal' ? 'Return to terminal' : 'Switch to terminal mode'}
+      </button>
+      <button type="button" className="chip" disabled={(participant.controlMode ?? 'headless') !== 'headless' || (operation?.operation === 'compact' && (operation.state === 'queued' || operation.state === 'running'))} onClick={onCompact}>
+        {operation?.operation === 'compact' && operation.state === 'queued' ? 'Compact queued' : operation?.operation === 'compact' && operation.state === 'running' ? 'Compacting…' : 'Compact'}
+      </button>
+      {operation?.message && <span role={operation.state === 'error' ? 'alert' : 'status'}>{operation.message}</span>}
+    </footer>}
   </aside>;
 }
 
-export function RoomSidebarRoster({ participants, healthEntries, squirlDependenciesExpanded, onSquirlDependenciesExpandedChange, onSelectParticipant, loadPreview }: {
+export function RoomSidebarRoster({ participants, activeParticipantIds, agentOperations, healthEntries, squirlDependenciesExpanded, onSquirlDependenciesExpandedChange, onSelectParticipant, onOpenTerminal, onCompact, onOpenContext, loadPreview }: {
   participants: Participant[];
+  activeParticipantIds: ReadonlySet<string>;
+  agentOperations?: Readonly<Record<string, { operation: 'terminal' | 'compact'; state: string; message?: string }>>;
   healthEntries: HealthEntry[];
   squirlDependenciesExpanded: boolean;
   onSquirlDependenciesExpandedChange: (expanded: boolean) => void;
   onSelectParticipant: (participant: Participant) => void;
+  onOpenTerminal?: (participant: Participant) => void;
+  onCompact?: (participant: Participant) => void;
+  onOpenContext?: (participant: Participant) => void;
   loadPreview: (participantId: string, signal: AbortSignal) => Promise<ParticipantContextPreview>;
 }) {
   const members = useMemo(() => roomMembers(participants), [participants]);
@@ -124,7 +149,7 @@ export function RoomSidebarRoster({ participants, healthEntries, squirlDependenc
     openTimer.current = window.setTimeout(() => {
       const rect = element.getBoundingClientRect();
       const width = 300;
-      const height = 310;
+      const height = participant.kind === 'local-llm' ? 310 : 390;
       setPosition({
         left: Math.max(8, Math.min(window.innerWidth - width - 8, rect.right + 10)),
         top: Math.max(8, Math.min(rect.top - 8, window.innerHeight - height - 8)),
@@ -153,28 +178,31 @@ export function RoomSidebarRoster({ participants, healthEntries, squirlDependenc
     <div className="roomRailList">
       {members.map((participant) => {
         const isSquirl = participant.kind === 'local-llm';
+        const effectiveStatus = activeParticipantIds.has(participant.id) ? 'busy' : participant.status ?? 'ready';
         return <div className={`roomRailNode${isSquirl ? ' squirlNode' : ''}`} key={participant.id}>
           <div className={`roomRailNodeRow${isSquirl ? ' hasDisclosure' : ''}`}>
             <button
               type="button"
               className={`roomRailAgent${activeId === participant.id ? ' active' : ''}`}
-              aria-label={`${participant.label} @${participant.id} · ${participant.status ?? 'ready'} ${isSquirl ? 'local' : participant.kind === 'claude-code' ? 'Claude' : participant.kind === 'codex' ? 'Codex' : 'PI'}`}
+              aria-label={`${participant.label} @${participant.id} · ${effectiveStatus} ${isSquirl ? 'local' : participant.kind === 'claude-code' ? 'Claude' : participant.kind === 'codex' ? 'Codex' : 'PI'}`}
               aria-describedby={activeId === participant.id ? 'agent-context-preview' : undefined}
               onPointerEnter={(event) => open(participant, event.currentTarget, 180)}
               onPointerLeave={() => close(220)}
               onFocus={(event) => open(participant, event.currentTarget, 0)}
-              onBlur={() => close(0)}
+              // Give focus time to move into the adjacent action card. Its
+              // pointer/focus handlers cancel this delayed close.
+              onBlur={() => close(220)}
               data-destination={sidebarDestination(participant)}
               onClick={() => {
                 close(0);
                 onSelectParticipant(participant);
               }}
             >
-              <span className="roomRailIdentity" style={{ borderColor: PARTICIPANT_COLOR_VALUE[participant.color] }} aria-hidden="true">
+              <span className="roomRailIdentity" data-status={effectiveStatus} style={{ borderColor: PARTICIPANT_COLOR_VALUE[participant.color] }} aria-hidden="true">
                 <ParticipantKindIcon kind={participant.kind} />
-                <span className="roomRailStatus" style={{ background: STATUS_COLOR[participant.status ?? 'ready'] }} />
+                <span className="roomRailStatus" style={{ background: STATUS_COLOR[effectiveStatus] }} />
               </span>
-              <span className="roomRailText"><ParticipantIdentity participant={participant} text={participant.label} marker={false} className="roomRailName"/><small>@{participant.id} · {participant.status ?? 'ready'}</small></span>
+              <span className="roomRailText"><ParticipantIdentity participant={participant} text={participant.label} marker={false} className="roomRailName"/><small>@{participant.id} · {effectiveStatus}</small></span>
               <span className="roomRailKind">{isSquirl ? 'local' : participant.kind === 'claude-code' ? 'Claude' : participant.kind === 'codex' ? 'Codex' : 'PI'}</span>
             </button>
             {isSquirl && <button
@@ -202,7 +230,21 @@ export function RoomSidebarRoster({ participants, healthEntries, squirlDependenc
         </div>;
       })}
     </div>
-    {activeParticipant && <div id="agent-context-preview"><ContextPreviewCard participant={activeParticipant} preview={preview} loading={loading} position={position} onPointerEnter={keepOpen} onPointerLeave={() => close(160)} /></div>}
+    {activeParticipant && <div id="agent-context-preview"><ContextPreviewCard
+      participant={activeParticipant}
+      preview={preview}
+      loading={loading}
+      position={position}
+      operation={agentOperations?.[activeParticipant.id]}
+      busy={activeParticipantIds.has(activeParticipant.id)}
+      onOpenContext={onOpenContext ? () => { close(0); onOpenContext(activeParticipant); } : undefined}
+      onTerminal={() => { keepOpen(); onOpenTerminal?.(activeParticipant); }}
+      onCompact={() => { keepOpen(); onCompact?.(activeParticipant); }}
+      onPointerEnter={keepOpen}
+      onPointerLeave={() => close(160)}
+      onFocus={keepOpen}
+      onBlur={() => close(160)}
+    /></div>}
   </section>;
 }
 
@@ -382,6 +424,7 @@ export function CurrentTasks({ activity, heightRatio, onHeightRatioChange, resiz
         setDragging(false);
       }}
     ><h3>Current tasks</h3>{statusLabel && <span className={`taskActivityStatus ${activity.status}`}>{statusLabel}</span>}</header>
+    {activity.error && <div className="currentTaskError" role="status">{activity.error}</div>}
     <div className="currentTaskList">
       {activity.tasks.map((task, index) => <React.Fragment key={task.id}>
         {showNoCurrentTask && index === insertionIndex && noCurrentTask}

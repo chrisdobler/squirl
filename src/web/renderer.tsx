@@ -2,14 +2,16 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { createRoot } from 'react-dom/client';
 import type { AgentProfile, SquirlConfig } from '../config.js';
 import type { SelectedModel } from '../components/ModelPicker.js';
-import type { EffortLevel, Message } from '../types.js';
+import type { ActivityMessage, EffortLevel, Message } from '../types.js';
 import type { AppState, ChatAccepted, ChatEvent, ContextFileSummary, ParticipantContextPreview, RuntimeStatus, ToolApprovalRequest, EvalEvent, EvalRunRequest, HistoryEntry, JudgeSummary } from './types.js';
 import type { AgentKind, Participant } from '../agents/types.js';
 import type { AgentInteractionRequest, AgentInteractionResponse, ClaudePermissionMode, CodexApprovalPolicy, CodexSandbox, PiApprovalMode, PiToolMode } from '../agents/types.js';
 import type { CommandDescriptor, CommandSurface } from '../commands/registry.js';
+import type { SystemInteraction } from '../agents/system-interactions.js';
+import { presentedConversation } from '../conversation-presentation.js';
 import { PARTICIPANT_COLOR_VALUE, SQUIRL_PARTICIPANT, USER_PARTICIPANT, addressedParticipantLabel, buildRegistry, resolveParticipant, roomMembers } from '../agents/participants.js';
 import { EvalDashboard } from './EvalDashboard.js';
-import { ContextView } from './ContextView.js';
+import { AgentContextSummary, ContextView } from './ContextView.js';
 import { EvalRunView } from './EvalRunView.js';
 import { MarkdownContent } from './MarkdownContent.js';
 import { commandSelectionValue, filterCommandPalette, moveCommandSelection, resolveCommandSurface, shouldShowCommandPalette } from './command-palette.js';
@@ -17,17 +19,25 @@ import { parseMemoryLookup } from './memory-lookup.js';
 import { restoredChatScrollTop, type ChatViewportSnapshot } from './chat-viewport.js';
 import { groupMessageTurns } from '../tool-activity.js';
 import { ToolActivityView } from './ToolActivityView.js';
-import { participantActivityLabel } from './chat-activity.js';
-import { CurrentTasks, RoomSidebarRoster } from './RoomSidebarRoster.js';
+import { AgentActivityCardView } from './AgentActivityCardView.js';
+import { participantActivityLabel, withoutRoutineAssignmentCards } from './chat-activity.js';
+import { contextParticipantDestination, CurrentTasks, RoomSidebarRoster } from './RoomSidebarRoster.js';
 import { defaultUiState, type UiStatePatch, type UiStateV1 } from './ui-state.js';
 import { ParticipantIdentity } from './ParticipantIdentity.js';
 import { AcornIcon } from './ParticipantIcon.js';
 import { PresentationOverview } from './PresentationOverview.js';
+import { ThroughputPanel } from './ThroughputPanel.js';
 import type { TaskActivityState } from '../tasks/types.js';
 import { consumeChatEventStream } from './chat-stream.js';
+import { parseThemePreference, readThemePreference, writeThemePreference, THEME_PREFERENCE_KEY, type ThemePreference } from './theme-preference.js';
+import { formatSemanticProgress, type TurnSemanticProgress } from '../semantic-progress.js';
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import '@xterm/xterm/css/xterm.css';
 import './styles.css';
 
 const API_BASE = import.meta.env.VITE_SQUIRL_API_BASE || (typeof window === 'undefined' ? '' : window.location.origin);
+const IS_MAC_DESKTOP = typeof window !== 'undefined' && window.squirlDesktop?.platform === 'darwin';
 
 const PROVIDERS = [
   { id: 'anthropic', label: 'Anthropic', models: ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'] },
@@ -68,15 +78,92 @@ function defaultStatus(): RuntimeStatus {
     workingDir: '',
     tokenCount: 0,
     contextWindow: null,
+    contextOrigin: 'preview',
+    contextCapturedAt: null,
     contextBreakdown: { system: 0, files: 0, messages: 0 },
     isStreaming: false,
     toolStatus: '',
     tokensPerSecond: 0,
+    outputThroughput: null,
     indexEnabled: false,
     storeName: '',
     embedderName: '',
     pipelineStatus: null,
+    pipelineTrace: null,
+    recentPipelineTraces: [],
+    semanticProgress: null,
   };
+}
+
+interface AgentTerminalView {
+  participant: Participant;
+  capability: string;
+  output: string;
+  cols: number;
+  rows: number;
+}
+
+function AgentTerminalModal({ session, onReady, onReturn }: {
+  session: AgentTerminalView;
+  onReady: (terminal: Terminal | null) => void;
+  onReturn: () => void;
+}) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      onReturn();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onReturn]);
+  useEffect(() => {
+    if (!hostRef.current) return;
+    const terminal = new Terminal({
+      cursorBlink: true, convertEol: false, scrollback: 10_000,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+      theme: { background: '#0b0f13', foreground: '#dce5ec', cursor: '#fb923c', selectionBackground: '#334155' },
+    });
+    const fit = new FitAddon();
+    terminal.loadAddon(fit);
+    terminal.open(hostRef.current);
+    if (session.output) terminal.write(session.output);
+    fit.fit();
+    terminal.focus();
+    onReady(terminal);
+    const input = terminal.onData((data) => {
+      void api('/api/agents/terminal/input', { method: 'POST', body: JSON.stringify({ id: session.participant.id, capability: session.capability, data }) });
+    });
+    let last = { cols: terminal.cols, rows: terminal.rows };
+    const sendSize = () => {
+      fit.fit();
+      if (last.cols === terminal.cols && last.rows === terminal.rows) return;
+      last = { cols: terminal.cols, rows: terminal.rows };
+      void api('/api/agents/terminal/resize', { method: 'POST', body: JSON.stringify({ id: session.participant.id, capability: session.capability, ...last }) });
+    };
+    const observer = new ResizeObserver(sendSize);
+    observer.observe(hostRef.current);
+    sendSize();
+    return () => {
+      onReady(null);
+      observer.disconnect();
+      input.dispose();
+      terminal.dispose();
+    };
+  }, [session.capability, session.output, session.participant.id, onReady]);
+
+  return <div className="agentTerminalBackdrop" role="presentation">
+    <section className="agentTerminalModal" role="dialog" aria-modal="true" aria-label={`${session.participant.label} terminal mode`}>
+      <header>
+        <div><ParticipantIdentity participant={session.participant} text={session.participant.label}/><span>@{session.participant.id} · terminal mode</span></div>
+        <code title={session.participant.cwd}>{session.participant.cwd}</code>
+        <button type="button" className="primary" onClick={onReturn}>Return to headless</button>
+        <button type="button" className="agentTerminalClose" aria-label="Close terminal and return to headless" onClick={onReturn}>×</button>
+      </header>
+      <div className="agentTerminalHost" ref={hostRef} />
+    </section>
+  </div>;
 }
 
 function SettingsPanel({
@@ -109,6 +196,21 @@ function SettingsPanel({
 
   const updateAgents = (patch: Partial<NonNullable<SquirlConfig['agents']>>) => {
     setDraft((prev) => ({ ...prev, agents: { ...prev.agents, ...patch } }));
+  };
+
+  const updateResearch = (patch: Partial<NonNullable<SquirlConfig['research']>>) => {
+    setDraft((prev) => ({
+      ...prev,
+      research: {
+        enabled: prev.research?.enabled ?? false,
+        consent: prev.research?.consent ?? 'unknown',
+        mode: prev.research?.mode ?? 'automatic',
+        searxngUrl: prev.research?.searxngUrl ?? 'http://127.0.0.1:8081',
+        maxResults: prev.research?.maxResults ?? 5,
+        ...prev.research,
+        ...patch,
+      },
+    }));
   };
 
   return (
@@ -154,6 +256,17 @@ function SettingsPanel({
         Mouse scroll lines
         <input type="number" min="1" max="30" value={draft.mouseScrollLines ?? 5} onChange={(event) => setDraft({ ...draft, mouseScrollLines: Number(event.target.value) })} />
       </label>
+
+      <div className="divider" />
+      <div className="researchSettingsCard">
+        <h3>Web research</h3>
+        <p className="hint">Squirl searches through your SearXNG service. Queries may be forwarded to upstream search engines; fetched pages are treated as untrusted evidence.</p>
+        <label className="check"><input type="checkbox" checked={draft.research?.enabled ?? false} onChange={(event) => updateResearch({ enabled: event.target.checked, consent: event.target.checked ? 'allowed' : 'denied' })}/>Enable web research</label>
+        <label>Research behavior<select value={draft.research?.mode ?? 'automatic'} onChange={(event) => updateResearch({ mode: event.target.value as 'automatic' | 'explicit-only' })}><option value="automatic">Automatic when useful</option><option value="explicit-only">Only when explicitly requested</option></select></label>
+        <label>SearXNG URL<input value={draft.research?.searxngUrl ?? 'http://127.0.0.1:8081'} onChange={(event) => updateResearch({ searxngUrl: event.target.value })} /></label>
+        <label>Maximum results<input type="number" min="1" max="10" value={draft.research?.maxResults ?? 5} onChange={(event) => updateResearch({ maxResults: Math.max(1, Math.min(10, Number(event.target.value))) })} /></label>
+        {(draft.research?.consent ?? 'unknown') === 'unknown' && <p className="hint">Squirl will ask before its first outbound search.</p>}
+      </div>
 
       <div className="divider" />
       <div className="calendarSettingsCard">
@@ -776,9 +889,33 @@ export function AgentPanel({ participants, profiles, selectedAgentId, defaultCwd
   </div>;
 }
 
-function MessageView({ message, showThinking, registry, rewindCandidate, rewindSelected, showMeta = true }: { message: Message; showThinking: boolean; registry: Map<string, Participant>; rewindCandidate?: boolean; rewindSelected?: boolean; showMeta?: boolean }) {
+export interface MessageViewProps {
+  message: Message;
+  showThinking: boolean;
+  registry: Map<string, Participant>;
+  inspectTraceId?: string;
+  onInspectTrace?: (traceId: string) => void;
+  rewindCandidate?: boolean;
+  rewindSelected?: boolean;
+  showMeta?: boolean;
+}
+
+export function areMessageViewPropsEqual(previous: MessageViewProps, next: MessageViewProps): boolean {
+  return previous.message === next.message
+    && previous.showThinking === next.showThinking
+    && previous.registry === next.registry
+    && previous.inspectTraceId === next.inspectTraceId
+    && previous.onInspectTrace === next.onInspectTrace
+    && previous.rewindCandidate === next.rewindCandidate
+    && previous.rewindSelected === next.rewindSelected
+    && previous.showMeta === next.showMeta;
+}
+
+export const MessageView = React.memo(function MessageView({ message, showThinking, registry, inspectTraceId, onInspectTrace, rewindCandidate, rewindSelected, showMeta = true }: MessageViewProps) {
   const content = message.role === 'assistant' ? visibleAssistantContent(message.content, showThinking) : message.content;
-  const displayContent = content || (message.role === 'assistant' && message.isStreaming ? '_' : '');
+  if (message.role === 'assistant' && !message.isStreaming && !content.trim() && message.toolCalls?.length) return null;
+  const emptyStreaming = message.role === 'assistant' && message.isStreaming && !content;
+  const displayContent = content || '';
   const memoryLookup = message.role === 'tool' && message.toolCallId === 'memory' ? parseMemoryLookup(content) : null;
   const memoryQueries = message.role === 'tool' ? message.memoryLookup?.queries ?? [] : [];
   if (memoryLookup) {
@@ -794,9 +931,23 @@ function MessageView({ message, showThinking, registry, rewindCandidate, rewindS
     </article>;
   }
   if (message.role === 'tool') return <ToolActivityView message={message}/>
+  if (message.role === 'activity') return <AgentActivityCardView message={message}/>
   const participant = resolveParticipant(message, registry);
   const labelColor = participant.kind !== 'user' ? PARTICIPANT_COLOR_VALUE[participant.color] : undefined;
   const isSquirl = message.role === 'assistant' && participant.kind === 'local-llm';
+  const confidenceState = message.role === 'assistant' ? message.responseMeta?.confidenceState : undefined;
+  const hasConfidence = isSquirl && message.role === 'assistant' && message.responseMeta
+    ? confidenceState === 'pending' || confidenceState === 'complete' || confidenceState === 'unavailable'
+      || Object.prototype.hasOwnProperty.call(message.responseMeta, 'confidence')
+    : false;
+  const confidence = message.role === 'assistant' ? message.responseMeta?.confidence : undefined;
+  const confidenceTone = confidenceState === 'pending' ? 'pending' : confidence === null || confidence === undefined
+    ? 'unavailable'
+    : confidence >= 80 ? 'high' : confidence >= 50 ? 'medium' : 'low';
+  const confidenceText = confidenceState === 'pending' ? 'Assessing confidence' : confidence === null || confidence === undefined ? 'Confidence unavailable' : `${confidence}% confidence`;
+  const researchSourceCount = message.role === 'assistant'
+    ? message.responseMeta?.research?.citedSourceCount ?? message.responseMeta?.research?.sources.length ?? 0
+    : 0;
   return (
     <article id={`message-${message.id}`} className={`message ${message.role}${rewindCandidate ? ' rewindCandidate' : ''}${rewindSelected ? ' rewindSelected' : ''}`} data-participant={message.participantId ?? ''}>
       {showMeta && <div className="messageMeta">
@@ -811,36 +962,122 @@ function MessageView({ message, showThinking, registry, rewindCandidate, rewindS
             {message.responseMeta.model}{message.responseMeta.effort ? ` · ${message.responseMeta.effort}` : ''}
           </span>
         )}
+        {message.role === 'assistant' && message.handoff && (
+          <span className={`handoffDelivery ${message.handoff.state}`}>
+            {message.handoff.state === 'dispatched' ? `sent to @${message.handoff.targetId}` : `not sent · @${message.handoff.targetId}`}
+          </span>
+        )}
         {message.role === 'assistant' && message.isStreaming && <strong>streaming</strong>}
+        {message.role === 'assistant' && message.responseState === 'interrupted' && <strong className="responseInterrupted">interrupted · retry available</strong>}
       </div>}
-      <div className="messageBody">
-        <MarkdownContent>{message.role === 'user' ? `${addressedParticipantLabel(message, registry)} ${displayContent}` : displayContent}</MarkdownContent>
+      <div className={`messageBody${hasConfidence || researchSourceCount > 0 ? ' hasConfidence' : ''}`}>
+        {hasConfidence && (
+          <span
+            className={`confidenceBadge ${confidenceTone}`}
+            aria-label={confidenceText}
+            title={`${confidenceText}. Model-generated estimate, not a verified probability.`}
+          >
+            {confidenceState === 'pending' ? <><span className="confidenceSpinner" aria-hidden="true"/> confidence</> : confidence === null || confidence === undefined ? 'confidence ?' : `${confidence}%`}
+          </span>
+        )}
+        {researchSourceCount > 0 && <span className="researchSourceBadge" aria-label={`${researchSourceCount} web ${researchSourceCount === 1 ? 'source' : 'sources'}`} title="Web sources used as evidence for this response">{researchSourceCount} {researchSourceCount === 1 ? 'source' : 'sources'}</span>}
+        {emptyStreaming ? (
+          <div className="streamingDots" role="status" aria-label="Preparing response">
+            <span aria-hidden="true" />
+            <span aria-hidden="true" />
+            <span aria-hidden="true" />
+          </div>
+        ) : (
+          <MarkdownContent>{message.role === 'user' ? `${addressedParticipantLabel(message, registry)} ${displayContent}` : displayContent}</MarkdownContent>
+        )}
       </div>
+      {isSquirl && inspectTraceId && onInspectTrace && (
+        <button type="button" className="messageTraceInspect" aria-label="Inspect this Squirl execution" onClick={() => onInspectTrace(inspectTraceId)}>inspect</button>
+      )}
     </article>
   );
-}
+}, areMessageViewPropsEqual);
 
-function ChatActivity({ label }: { label: string }) {
-  return <div className="chatActivity" role="status" aria-live="polite">
-    <AcornIcon className="chatActivityAcorn" />
-    <span>{label}</span>
+export function ChatActivity({ label, activity, semanticProgress, onInspect }: { label: string; activity?: ActivityMessage; semanticProgress?: TurnSemanticProgress; onInspect?: () => void }) {
+  return <div className="chatActivityGroup">
+    <div className={`chatActivity${semanticProgress ? ' chatActivity--semantic' : ''}`}>
+      <div className="chatActivityStatus" role="status" aria-live="polite">
+        <AcornIcon className="chatActivityAcorn" />
+        {semanticProgress
+          ? <div className="semanticProgressContent"><MarkdownContent>{formatSemanticProgress(semanticProgress)}</MarkdownContent></div>
+          : <span>{label}</span>}
+      </div>
+      {onInspect && <button type="button" className="chatActivityInspect" aria-label="Inspect Squirl execution" onClick={onInspect}>inspect</button>}
+    </div>
+    {activity && <AgentActivityCardView message={activity}/>}
   </div>;
 }
 
-function TurnView({ turn, showThinking, registry, rewindCandidateIds, selectedMessageId }: {
+export interface TurnViewProps {
   turn: Message[]; showThinking: boolean; registry: Map<string, Participant>;
+  traceIdByMessageId?: ReadonlyMap<string, string>; onInspectTrace?: (traceId: string) => void;
   rewindCandidateIds: Set<string>; selectedMessageId?: string;
-}) {
+}
+
+export function areTurnViewPropsEqual(previous: TurnViewProps, next: TurnViewProps): boolean {
+  if (previous.showThinking !== next.showThinking
+    || previous.registry !== next.registry
+    || previous.traceIdByMessageId !== next.traceIdByMessageId
+    || previous.onInspectTrace !== next.onInspectTrace
+    || previous.rewindCandidateIds !== next.rewindCandidateIds
+    || previous.selectedMessageId !== next.selectedMessageId
+    || previous.turn.length !== next.turn.length) return false;
+  return previous.turn.every((message, index) => message === next.turn[index]);
+}
+
+const EMPTY_TRACE_IDS = new Map<string, string>();
+
+const TurnView = React.memo(function TurnView({ turn, showThinking, registry, traceIdByMessageId = EMPTY_TRACE_IDS, onInspectTrace, rewindCandidateIds, selectedMessageId }: TurnViewProps) {
   let metaShown = false;
   return <section className={`messageTurn ${turn[0]?.role === 'user' ? 'userTurn' : 'agentTurn'}`}>
     {turn.map((message) => {
-      const showMeta = message.role !== 'tool' && !metaShown;
+      const showMeta = message.role !== 'tool' && message.role !== 'activity' && !metaShown;
       if (showMeta) metaShown = true;
       return <MessageView key={message.id} message={message} showThinking={showThinking} registry={registry}
+        inspectTraceId={traceIdByMessageId.get(message.id)} onInspectTrace={onInspectTrace}
         showMeta={showMeta} rewindCandidate={rewindCandidateIds.has(message.id)} rewindSelected={selectedMessageId === message.id}/>;
     })}
   </section>;
+}, areTurnViewPropsEqual);
+
+export interface ConversationHistoryProps {
+  messages: Message[];
+  showThinking: boolean;
+  registry: Map<string, Participant>;
+  traceIdByMessageId?: ReadonlyMap<string, string>;
+  onInspectTrace?: (traceId: string) => void;
+  rewindCandidateIds: Set<string>;
+  selectedMessageId?: string;
 }
+
+export function areConversationHistoryPropsEqual(previous: ConversationHistoryProps, next: ConversationHistoryProps): boolean {
+  return previous.messages === next.messages
+    && previous.showThinking === next.showThinking
+    && previous.registry === next.registry
+    && previous.traceIdByMessageId === next.traceIdByMessageId
+    && previous.onInspectTrace === next.onInspectTrace
+    && previous.rewindCandidateIds === next.rewindCandidateIds
+    && previous.selectedMessageId === next.selectedMessageId;
+}
+
+const ConversationHistory = React.memo(function ConversationHistory({ messages, showThinking, registry, traceIdByMessageId = EMPTY_TRACE_IDS, onInspectTrace, rewindCandidateIds, selectedMessageId }: ConversationHistoryProps) {
+  const turns = useMemo(() => groupMessageTurns(presentedConversation(messages)), [messages]);
+  return <>{turns.map((turn) => <TurnView
+    key={turn.key}
+    turn={turn.messages}
+    showThinking={showThinking}
+    registry={registry}
+    traceIdByMessageId={traceIdByMessageId}
+    onInspectTrace={onInspectTrace}
+    rewindCandidateIds={rewindCandidateIds}
+    selectedMessageId={selectedMessageId}
+  />)}</>;
+}, areConversationHistoryPropsEqual);
 
 function ApprovalModal({ request, onRespond }: {
   request: ToolApprovalRequest;
@@ -892,34 +1129,37 @@ export function CalendarSelectionModal({ activity, onSave, onLater }: { activity
   </div></div>;
 }
 
-function AgentInteractionModal({ participantId, request, onRespond }: {
+export function AgentInteractionPrompt({ participantId, request, onRespond }: {
   participantId: string;
   request: AgentInteractionRequest;
   onRespond: (response: AgentInteractionResponse) => Promise<void>;
 }) {
   const [value, setValue] = useState(request.method === 'editor' ? request.prefill ?? '' : '');
-  return <div className="modalShade">
-    <div className="modal agentInteractionModal">
-      <h2>{request.title || `Request from @${participantId}`}</h2>
-      {request.message && <p>{request.message}</p>}
-      {request.method === 'permission' && <>
-        {request.resource && <pre>{request.resource}</pre>}
-        {request.input != null && <pre>{typeof request.input === 'string' ? request.input : JSON.stringify(request.input, null, 2)}</pre>}
-      </>}
+  const permissionDetail = request.method === 'permission'
+    ? request.resource || (request.input != null ? (typeof request.input === 'string' ? request.input : JSON.stringify(request.input, null, 2)) : '')
+    : '';
+  return <section className={`agentInteractionPrompt ${request.method}`} role="region" aria-label={request.title || `Request from @${participantId}`}>
+    <div className="interactionPromptMark" aria-hidden="true">?</div>
+    <div className="interactionPromptContent">
+      <div className="interactionPromptEyebrow"><span>@{participantId}</span><span>{request.method === 'permission' ? `Permission · ${request.toolName}` : request.method}</span></div>
+      <strong>{request.message || request.title || `Request from @${participantId}`}</strong>
+      {request.message && request.title && request.title !== request.message && <small>{request.title}</small>}
+      {permissionDetail && <details className="interactionPromptDetails"><summary>Review request</summary><pre>{permissionDetail}</pre></details>}
       {request.method === 'select' && <div className="interactionChoices">{request.options.map((option) => <button key={option} onClick={() => void onRespond({ value: option })}>{option}</button>)}</div>}
-      {request.method === 'input' && <input autoFocus value={value} placeholder={request.placeholder} onChange={(event) => setValue(event.target.value)} />}
-      {request.method === 'editor' && <textarea autoFocus value={value} onChange={(event) => setValue(event.target.value)} />}
-      <footer>
-        {request.method === 'permission' ? <>
+      {request.method === 'input' && <input value={value} placeholder={request.placeholder} onChange={(event) => setValue(event.target.value)} />}
+      {request.method === 'editor' && <textarea value={value} onChange={(event) => setValue(event.target.value)} />}
+    </div>
+    <footer className="interactionPromptActions">
+        {request.method === 'permission' && <>
           <button onClick={() => void onRespond({ decision: 'deny' })}>Deny</button>
           <button className="primary" onClick={() => void onRespond({ decision: 'allow-once' })}>Allow once</button>
-          {request.sessionScope && <button className="danger" onClick={() => void onRespond({ decision: 'allow-session' })}>{request.sessionScope.label}</button>}
-        </> : <button onClick={() => void onRespond({ cancelled: true })}>Cancel</button>}
+          {request.sessionScope && <button className="sessionAllow" title={request.sessionScope.label} onClick={() => void onRespond({ decision: 'allow-session' })}>Always allow this session</button>}
+        </>}
         {request.method === 'confirm' && <><button onClick={() => void onRespond({ confirmed: false })}>No</button><button className="primary" onClick={() => void onRespond({ confirmed: true })}>Yes</button></>}
-        {(request.method === 'input' || request.method === 'editor') && <button className="primary" onClick={() => void onRespond({ value })}>Submit</button>}
-      </footer>
-    </div>
-  </div>;
+        {(request.method === 'input' || request.method === 'editor') && <><button onClick={() => void onRespond({ cancelled: true })}>Cancel</button><button className="primary" onClick={() => void onRespond({ value })}>Submit</button></>}
+        {request.method === 'select' && <button onClick={() => void onRespond({ cancelled: true })}>Cancel</button>}
+    </footer>
+  </section>;
 }
 
 function RoomRosterDropdown({ participants, onClose, onRename, onManage }: {
@@ -985,13 +1225,29 @@ function RoomRosterDropdown({ participants, onClose, onRename, onManage }: {
   );
 }
 
+export function HandoffConfirmationBar({ interaction, busy, onRespond }: { interaction: SystemInteraction; busy: boolean; onRespond: (approved: boolean) => void }) {
+  const target = interaction.pending.targetIds.map((id) => `@${id}`).join(', ');
+  return <div className="systemInteractionBar" role="group" aria-label="Handoff confirmation">
+    <div className="systemInteractionCopy">
+      <strong>Send to {target}?</strong>
+      <span>{interaction.pending.task}</span>
+    </div>
+    <button type="button" disabled={busy} onClick={() => onRespond(false)}>No</button>
+    <button type="button" className="primary" disabled={busy} onClick={() => onRespond(true)}>Yes</button>
+  </div>;
+}
+
 function App() {
   const [uiState, setUiState] = useState<UiStateV1 | null>(null);
-  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+  const initialBrowserTheme = useMemo(readThemePreference, []);
+  const browserThemeRef = useRef<ThemePreference | null>(initialBrowserTheme);
+  const [theme, setTheme] = useState<ThemePreference>(browserThemeRef.current ?? 'dark');
   const [state, setState] = useState<AppState | null>(null);
   const clientIdRef = useRef(crypto.randomUUID());
   const [input, setInput] = useState('');
+  const [launchingMessage, setLaunchingMessage] = useState<{ id: string; text: string } | null>(null);
   const [activeSurface, setActiveSurface] = useState<CommandSurface | null>(null);
+  const [selectedPipelineTraceId, setSelectedPipelineTraceId] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [systemPrompt, setSystemPrompt] = useState('Loading system prompt…');
@@ -1008,12 +1264,20 @@ function App() {
   const [showThinking, setShowThinking] = useState(false);
   const [approval, setApproval] = useState<ToolApprovalRequest | null>(null);
   const [agentInteractions, setAgentInteractions] = useState<Array<{ participantId: string; request: AgentInteractionRequest }>>([]);
+  const [respondingSystemInteraction, setRespondingSystemInteraction] = useState<string | null>(null);
   const [rosterOpen, setRosterOpen] = useState(false);
   const [recipientId, setRecipientId] = useState(SQUIRL_PARTICIPANT.id);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [contextParticipantId, setContextParticipantId] = useState<string | null>(null);
   const [recipientMenuOpen, setRecipientMenuOpen] = useState(false);
   const [modeSwitching, setModeSwitching] = useState(false);
   const [toast, setToast] = useState('');
+  const [agentOperations, setAgentOperations] = useState<Record<string, { operation: 'terminal' | 'compact'; state: string; message?: string }>>({});
+  const [agentTerminal, setAgentTerminal] = useState<AgentTerminalView | null>(null);
+  const agentTerminalRef = useRef<AgentTerminalView | null>(null);
+  const terminalWriterRef = useRef<Terminal | null>(null);
+  const terminalPendingOutputRef = useRef('');
+  useEffect(() => { agentTerminalRef.current = agentTerminal; }, [agentTerminal]);
   const [rewindCandidates, setRewindCandidates] = useState<Array<{ label: string; preview: string; messageId: string; messageIndex: number; retainedCount: number; removedCount: number; targetMessageId: string | null }> | null>(null);
   const [rewindIndex, setRewindIndex] = useState(0);
   const [rewindConfirming, setRewindConfirming] = useState(false);
@@ -1024,6 +1288,7 @@ function App() {
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const sidebarWorkspaceRef = useRef<HTMLDivElement>(null);
   const savedChatScrollRef = useRef<ChatViewportSnapshot | null>(null);
+  const viewportRestoredRef = useRef(false);
   const stickToBottomRef = useRef(true);
   const didInitialScrollRef = useRef(false);
   const profilePromptedRef = useRef(false);
@@ -1072,13 +1337,16 @@ function App() {
     }
   }
 
-  const openCommandSurface = (surface: CommandSurface) => {
+  const openCommandSurface = (surface: CommandSurface, participantId: string | null = null, pipelineTraceId: string | null = null) => {
     if (surface === 'rewind') {
       void startRewindMode();
       return;
     }
+    if (surface === 'context') setContextParticipantId(participantId);
+    if (surface === 'overview') setSelectedPipelineTraceId(pipelineTraceId);
     const list = listRef.current;
     if (chatVisible && list && !savedChatScrollRef.current) {
+      viewportRestoredRef.current = false;
       const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
       const listRect = list.getBoundingClientRect();
       const anchor = Array.from(list.querySelectorAll<HTMLElement>('.message[id^="message-"]'))
@@ -1095,6 +1363,11 @@ function App() {
     setPaletteOpen(false);
     setActiveSurface(surface);
   };
+  const openCommandSurfaceRef = useRef(openCommandSurface);
+  openCommandSurfaceRef.current = openCommandSurface;
+  const inspectPipelineTrace = useCallback((traceId: string) => {
+    openCommandSurfaceRef.current('overview', null, traceId);
+  }, []);
 
   useEffect(() => {
     if (!state || !uiState || state.config.userProfile?.onboardingComplete || profilePromptedRef.current) return;
@@ -1106,6 +1379,27 @@ function App() {
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
   }, [theme]);
+
+  useEffect(() => {
+    const restoreThemeFromAnotherTab = (event: StorageEvent) => {
+      if (event.key !== THEME_PREFERENCE_KEY) return;
+      const restored = parseThemePreference(event.newValue);
+      if (!restored) return;
+      browserThemeRef.current = restored;
+      setTheme(restored);
+    };
+    window.addEventListener('storage', restoreThemeFromAnotherTab);
+    return () => window.removeEventListener('storage', restoreThemeFromAnotherTab);
+  }, []);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((current) => {
+      const next = current === 'dark' ? 'light' : 'dark';
+      browserThemeRef.current = next;
+      writeThemePreference(next);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     if (!uiState) return;
@@ -1132,6 +1426,8 @@ function App() {
   const messages = state?.messages ?? [];
   const participants = state?.participants ?? [USER_PARTICIPANT, SQUIRL_PARTICIPANT];
   const participantRegistry = useMemo(() => buildRegistry(participants), [participants]);
+  const traceIdByMessageId = useMemo(() => new Map(status.recentPipelineTraces.flatMap((trace) =>
+    trace.assistantMessageId ? [[trace.assistantMessageId, trace.turnId] as const] : [])), [status.recentPipelineTraces]);
   const recipients = roomMembers(participants);
   const selectedRecipient = recipients.find((participant) => participant.id === recipientId) ?? SQUIRL_PARTICIPANT;
   useEffect(() => {
@@ -1139,11 +1435,33 @@ function App() {
   }, [participants, recipientId]);
   const lastMessage = messages[messages.length - 1];
   const work = state?.work ?? { active: [], queued: [] };
+  const activeParticipantIds = useMemo(() => new Set(work.active.map((activity) => activity.participantId)), [work.active]);
   const selectedActivity = work.active.find((activity) => activity.participantId === recipientId);
+  const transcriptMessages = useMemo(() => withoutRoutineAssignmentCards(messages), [messages]);
+  const assignmentOrder = useMemo(() => new Map(messages.flatMap((message, index) =>
+    message.role === 'activity' && message.activity.kind === 'assignment' && message.activity.turnId
+      ? [[message.activity.turnId, index] as const]
+      : [])), [messages]);
   const activityRows = work.active.map((activity) => {
     const participant = participants.find((candidate) => candidate.id === activity.participantId);
     const label = participant?.label ?? activity.participantId;
-    return { ...activity, label: participantActivityLabel(activity.participantId, label, activity.detail, status.pipelineStatus) };
+    return {
+      ...activity,
+      messageIndex: assignmentOrder.get(activity.turnId) ?? Number.MAX_SAFE_INTEGER,
+      label: participantActivityLabel(activity.participantId, label, activity.detail, status.pipelineStatus),
+    };
+  }).sort((left, right) => left.messageIndex - right.messageIndex);
+  const blockingInteraction = agentInteractions[agentInteractions.length - 1];
+  const conversationMessages = blockingInteraction ? transcriptMessages.filter((message) => !(
+    message.role === 'activity'
+    && message.activity.provider?.interactionId === blockingInteraction.request.id
+    && message.activity.participantId === blockingInteraction.participantId
+  )) : transcriptMessages;
+  const visibleRecoveryTurns = [...(work.interrupted ?? []), ...(work.failed ?? [])].filter((turn) => {
+    const sourceActivityId = (turn.metadata as { sourceActivityId?: string } | undefined)?.sourceActivityId;
+    if (typeof sourceActivityId !== 'string') return true;
+    const source = messages.find((message) => message.role === 'activity' && message.id === sourceActivityId);
+    return source?.role !== 'activity' || source.activity.state !== 'succeeded';
   });
   const scrollSignature = `${messages.length}:${lastMessage?.id ?? ''}:${lastMessage?.content.length ?? 0}`;
 
@@ -1175,7 +1493,7 @@ function App() {
   useEffect(() => {
     void Promise.all([loadState(), api<UiStateV1>('/api/ui-state')]).then(([, restored]) => {
       setUiState(restored);
-      setTheme(restored.theme);
+      setTheme(browserThemeRef.current ?? restored.theme);
       setInput(restored.chat.draft);
       setActiveSurface(restored.activeSurface);
       setRecipientId(restored.chat.recipientId);
@@ -1203,10 +1521,11 @@ function App() {
 
   useLayoutEffect(() => {
     const list = listRef.current;
-    if (!list || messages.length === 0) return;
+    if (!list || !uiState || messages.length === 0) return;
 
     const saved = savedChatScrollRef.current;
     if (saved) {
+      viewportRestoredRef.current = false;
       const restore = () => {
         const listRect = list.getBoundingClientRect();
         const anchor = saved.anchorMessageId ? document.getElementById(`message-${saved.anchorMessageId}`) : null;
@@ -1226,6 +1545,7 @@ function App() {
         nestedFrame = window.requestAnimationFrame(() => {
           restore();
           savedChatScrollRef.current = null;
+          viewportRestoredRef.current = true;
         });
       });
       return () => {
@@ -1243,17 +1563,20 @@ function App() {
 
     let nestedFrame = 0;
     const frame = window.requestAnimationFrame(() => {
-      nestedFrame = window.requestAnimationFrame(() => scrollToLatest('auto'));
+      nestedFrame = window.requestAnimationFrame(() => {
+        scrollToLatest('auto');
+        viewportRestoredRef.current = true;
+      });
     });
     return () => {
       window.cancelAnimationFrame(frame);
       if (nestedFrame) window.cancelAnimationFrame(nestedFrame);
     };
-  }, [chatVisible, scrollSignature, messages.length]);
+  }, [chatVisible, scrollSignature, messages.length, Boolean(uiState)]);
 
   const handleMessageScroll = () => {
     const list = listRef.current;
-    if (!list) return;
+    if (!list || !viewportRestoredRef.current) return;
     const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
     const atLatest = distanceFromBottom < 32;
     stickToBottomRef.current = atLatest;
@@ -1276,13 +1599,14 @@ function App() {
       setState(event.state);
       setAgentInteractions(event.state.agentInteractions ?? []);
     }
+    if (event.type === 'system-interactions') setState((prev) => prev ? { ...prev, systemInteractions: event.systemInteractions } : prev);
     if (event.type === 'message') setState((prev) => prev ? {
       ...prev,
       messages: prev.messages.some((message) => message.id === event.message.id)
         ? prev.messages.map((message) => message.id === event.message.id ? event.message : message)
         : [...prev.messages, event.message],
     } : prev);
-    if (event.type === 'assistant-update' || event.type === 'assistant-final') {
+    if (event.type === 'assistant-update' || event.type === 'assistant-final' || event.type === 'activity-update') {
       setState((prev) => prev ? {
         ...prev,
         messages: prev.messages.some((message) => message.id === event.message.id)
@@ -1299,6 +1623,7 @@ function App() {
       } : prev);
     }
     if (event.type === 'status') setState((prev) => prev ? { ...prev, status: event.status } : prev);
+    if (event.type === 'semantic-progress') setState((prev) => prev ? { ...prev, status: { ...prev.status, semanticProgress: event.progress } } : prev);
     if (event.type === 'work-state') setState((prev) => prev ? { ...prev, work: event.work } : prev);
     if (event.type === 'agent-status') {
       setState((prev) => prev ? { ...prev, participants: prev.participants.map((participant) => participant.id === event.participantId ? { ...participant, status: event.status as Participant['status'] } : participant) } : prev);
@@ -1310,6 +1635,17 @@ function App() {
       setRecipientId(event.participantId);
       setInput(event.text);
       composerRef.current?.focus();
+    }
+    if (event.type === 'agent-terminal-output') {
+      if (agentTerminalRef.current?.participant.id === event.participantId && terminalWriterRef.current) terminalWriterRef.current.write(event.data);
+      else terminalPendingOutputRef.current = `${terminalPendingOutputRef.current}${event.data}`.slice(-262_144);
+    }
+    if (event.type === 'agent-terminal-exit' && agentTerminalRef.current?.participant.id === event.participantId) {
+      pushToast(`@${event.participantId} terminal exited (${event.code}). Returning to headless mode.`);
+    }
+    if (event.type === 'agent-operation') {
+      setAgentOperations((current) => ({ ...current, [event.participantId]: { operation: event.operation, state: event.state, ...(event.message ? { message: event.message } : {}) } }));
+      if (event.operation === 'terminal' && event.state === 'done') setAgentTerminal((current) => current?.participant.id === event.participantId ? null : current);
     }
     if (event.type === 'open-command') openCommandSurface(event.surface);
     if (event.type === 'toast' || event.type === 'error') pushToast(event.message);
@@ -1334,15 +1670,35 @@ function App() {
     const message = input.trim();
     if (!message) return;
     stickToBottomRef.current = true;
+    const launchId = crypto.randomUUID();
+    setLaunchingMessage({ id: launchId, text: message });
     setInput('');
     try {
       await api<ChatAccepted>('/api/chat', {
         method: 'POST',
-        body: JSON.stringify({ message, recipientId, clientId: clientIdRef.current }),
+        body: JSON.stringify({ message, recipientId, clientId: clientIdRef.current, requestId: crypto.randomUUID() }),
       });
     } catch (error) {
+      setLaunchingMessage((current) => current?.id === launchId ? null : current);
       setInput(message);
       pushToast(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const respondToSystemInteraction = async (interaction: SystemInteraction, approved: boolean) => {
+    if (respondingSystemInteraction) return;
+    setRespondingSystemInteraction(interaction.id);
+    try {
+      const response = await api<{ state: AppState }>(`/api/system-interactions/${encodeURIComponent(interaction.id)}/respond`, {
+        method: 'POST', body: JSON.stringify({ approved }),
+      });
+      setState(response.state);
+      if (!approved) pushToast('Not sent.');
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : String(error));
+      await loadState();
+    } finally {
+      setRespondingSystemInteraction(null);
     }
   };
 
@@ -1371,6 +1727,52 @@ function App() {
       throw error;
     }
   };
+
+  const openAgentTerminal = async (participant: Participant) => {
+    try {
+      const existing = agentTerminal?.participant.id === participant.id ? agentTerminal : null;
+      if (existing) return;
+      terminalPendingOutputRef.current = '';
+      const result = await api<{ participantId: string; capability: string; output: string; cols: number; rows: number }>('/api/agents/terminal/start', {
+        method: 'POST', body: JSON.stringify({ id: participant.id, cols: 110, rows: 34 }),
+      });
+      setAgentTerminal({ participant: { ...participant, controlMode: 'terminal' }, ...result });
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const compactRemoteAgent = async (participant: Participant) => {
+    try {
+      const result = await api<{ queued: boolean }>('/api/agents/compact', { method: 'POST', body: JSON.stringify({ id: participant.id }) });
+      if (result.queued) pushToast(`Compaction queued for @${participant.id}.`);
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const returnAgentHeadless = async () => {
+    const current = agentTerminal;
+    if (!current) return;
+    if (!window.confirm(`Close @${current.participant.id}'s terminal and return it to headless mode? Active terminal work will be interrupted.`)) return;
+    try {
+      const response = await api<{ state: AppState }>('/api/agents/terminal/stop', {
+        method: 'POST', body: JSON.stringify({ id: current.participant.id, capability: current.capability }),
+      });
+      setState(response.state);
+      setAgentTerminal(null);
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const handleTerminalReady = useCallback((terminal: Terminal | null) => {
+    terminalWriterRef.current = terminal;
+    if (terminal && terminalPendingOutputRef.current) {
+      terminal.write(terminalPendingOutputRef.current);
+      terminalPendingOutputRef.current = '';
+    }
+  }, []);
 
   const updateAgent = async (id: string, values: AgentEditValues): Promise<{ id: string }> => {
     try {
@@ -1458,6 +1860,13 @@ function App() {
     if (!approval) return;
     await api('/api/approve', { method: 'POST', body: JSON.stringify({ id: approval.id, approved }) });
     setApproval(null);
+  };
+
+  const respondToAgentInteraction = async (participantId: string, id: string, response: AgentInteractionResponse) => {
+    await api('/api/agents/interactions/respond', {
+      method: 'POST', body: JSON.stringify({ participantId, id, ...response }),
+    });
+    setAgentInteractions((items) => items.filter((item) => item.participantId !== participantId || item.request.id !== id));
   };
 
   const loadEvalHistory = async () => {
@@ -1588,11 +1997,15 @@ function App() {
     // 'context' is rendered as a chat-pane takeover (see ContextView), not in the right rail.
     if (activeSurface === 'agent') return <AgentPanel participants={participants} profiles={state.config.agents?.defaults ?? []} selectedAgentId={selectedAgentId} defaultCwd={state.status.workingDir} onAdd={addAgent} onUpdate={updateAgent} onStop={stopAgent} initialState={uiState?.agent ?? defaultUiState().agent} onStateChange={updateAgentState}/>;
     if (activeSurface === 'room') return <div className="roomSurface"><h3>Participants</h3>{roomMembers(participants).map((p) => <div className="rosterRow" key={p.id}><ParticipantIdentity participant={p} text={p.label} className="rosterName"/><code>{p.kind === 'user' || p.kind === 'local-llm' ? 'local' : `@${p.id}`}</code><span>{p.status ?? 'ready'}</span></div>)}</div>;
-    if (activeSurface === 'overview') return <PresentationOverview mode="surface" onStart={focusComposer} />;
+    if (activeSurface === 'overview') {
+      const selectedTrace = status.recentPipelineTraces.find((trace) => trace.turnId === selectedPipelineTraceId)
+        ?? status.pipelineTrace ?? status.recentPipelineTraces[0] ?? null;
+      return <PresentationOverview mode="surface" onStart={focusComposer} trace={selectedTrace} />;
+    }
     if (activeSurface === 'system') return <pre className="systemPromptView">{systemPrompt}</pre>;
     if (activeSurface === 'help') return <div className="helpGrid">{state.commands.map((command) => <button key={command.name} onClick={() => { const surface = resolveCommandSurface(command); if (surface) openCommandSurface(surface); }}><code>{command.usage}</code><span>{command.description}</span></button>)}</div>;
     return null;
-  }, [activeSurface, state, status.selectedModel, approval, evalHistory, evalRunning, evalProgress, evalError, participants, systemPrompt, recipientId, selectedAgentId, uiState, updateEvalState, updateMemoryState, updateModelState, updateAgentState, focusComposer]);
+  }, [activeSurface, state, status.selectedModel, status.pipelineTrace, status.recentPipelineTraces, selectedPipelineTraceId, approval, evalHistory, evalRunning, evalProgress, evalError, participants, systemPrompt, recipientId, selectedAgentId, uiState, updateEvalState, updateMemoryState, updateModelState, updateAgentState, focusComposer]);
 
   const paletteMatches = useMemo(() => {
     const needle = input.slice(1).toLowerCase();
@@ -1667,7 +2080,7 @@ function App() {
   }, [rewindCandidates, rewindConfirming, selectedRewindCandidate]);
 
   if (!state || !uiState) return (
-    <main className="appShell loadingScreen" data-theme={theme}>
+    <main className={`appShell loadingScreen${IS_MAC_DESKTOP ? ' electronWindow' : ''}`} data-theme={theme}>
       <div className="emptyState" role="status" aria-label="Loading Squirl">
         <AcornIcon className="loadingAcorn" />
       </div>
@@ -1675,7 +2088,7 @@ function App() {
   );
 
   return (
-    <main className="appShell" data-theme={theme}>
+    <main className={`appShell${IS_MAC_DESKTOP ? ' electronWindow' : ''}`} data-theme={theme}>
       <aside className="leftRail">
         <div className="brand">
           <img
@@ -1691,6 +2104,8 @@ function App() {
         >
           <RoomSidebarRoster
             participants={participants}
+            activeParticipantIds={activeParticipantIds}
+            agentOperations={agentOperations}
             healthEntries={state.health.entries}
             squirlDependenciesExpanded={uiState.sidebar.squirlDependenciesExpanded}
             onSquirlDependenciesExpandedChange={(expanded) => updateUiState({ sidebar: { squirlDependenciesExpanded: expanded } })}
@@ -1703,6 +2118,9 @@ function App() {
                 openCommandSurface('agent');
               }
             }}
+            onOpenTerminal={(participant) => void openAgentTerminal(participant)}
+            onCompact={(participant) => void compactRemoteAgent(participant)}
+            onOpenContext={(participant) => openCommandSurface('context', contextParticipantDestination(participant))}
             loadPreview={async (participantId, signal) => (
               await api<{ preview: ParticipantContextPreview }>(`/api/participants/${encodeURIComponent(participantId)}/context-preview`, { signal })
             ).preview}
@@ -1715,10 +2133,12 @@ function App() {
           />
         </div>
         <div className="telemetry">
-          <span>model</span><strong>{status.modelDisplay}</strong>
-          <span>context</span><strong>{formatTokens(status.tokenCount)} / {status.contextWindow == null ? '?' : formatTokens(status.contextWindow)}</strong>
-          <span>speed</span><strong>{status.tokensPerSecond} t/s</strong>
-          <span>memory</span><strong>{status.indexEnabled ? status.storeName || 'enabled' : 'off'}</strong>
+          {status.outputThroughput ? <ThroughputPanel status={status}/> : <>
+            <span>model</span><strong>{status.modelDisplay}</strong>
+            <span>context</span><strong title={status.contextCapturedAt ? `Captured ${new Date(status.contextCapturedAt).toLocaleString()}` : status.contextOrigin === 'preview' ? 'Preview; not yet sent' : 'Not yet sent'}>{formatTokens(status.tokenCount)} / {status.contextWindow == null ? '?' : formatTokens(status.contextWindow)}</strong>
+            <span>speed</span><strong>{status.tokensPerSecond} t/s</strong>
+            <span>memory</span><strong>{status.indexEnabled ? status.storeName || 'enabled' : 'off'}</strong>
+          </>}
         </div>
       </aside>
 
@@ -1733,7 +2153,13 @@ function App() {
             onClose={finishEvalRun}
           />
         ) : activeSurface === 'context' ? (
-          <ContextView
+          contextParticipantId && participants.find((participant) => participant.id === contextParticipantId) ? <AgentContextSummary
+            participant={participants.find((participant) => participant.id === contextParticipantId)!}
+            onLoadPreview={async () => (
+              await api<{ preview: ParticipantContextPreview }>(`/api/participants/${encodeURIComponent(contextParticipantId)}/context-preview`)
+            ).preview}
+            onClose={closeActiveSurface}
+          /> : <ContextView
             breakdown={status.contextBreakdown}
             window={status.contextWindow}
             files={state?.contextFiles ?? []}
@@ -1761,7 +2187,7 @@ function App() {
             <button
               className="themeToggle"
               type="button"
-              onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
+              onClick={toggleTheme}
               aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
               title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
             >
@@ -1805,11 +2231,41 @@ function App() {
           </div>
         </header>
 
-        <div className={`messageList${rewindCandidates ? ' rewindMode' : ''}`} ref={listRef} onScroll={handleMessageScroll}>
-          {messages.length === 0 ? (
+        <div className={`messageList${rewindCandidates ? ' rewindMode' : ''}${launchingMessage ? ' messageLaunch' : ''}`} ref={listRef} onScroll={handleMessageScroll}>
+          {conversationMessages.length === 0 ? (
             <PresentationOverview onStart={focusComposer} />
-          ) : groupMessageTurns(messages).map((turn) => <TurnView key={turn.key} turn={turn.messages} showThinking={showThinking} registry={participantRegistry} rewindCandidateIds={rewindCandidateIds} selectedMessageId={selectedRewindCandidate?.messageId}/>)}
-          {activityRows.map((activity) => <ChatActivity key={activity.turnId} label={activity.label}/>) }
+          ) : <ConversationHistory messages={conversationMessages} showThinking={showThinking} registry={participantRegistry}
+            traceIdByMessageId={traceIdByMessageId} onInspectTrace={inspectPipelineTrace}
+            rewindCandidateIds={rewindCandidateIds} selectedMessageId={selectedRewindCandidate?.messageId}/>}
+          {activityRows.map((activity) => <ChatActivity key={activity.turnId} label={activity.label}
+            semanticProgress={activity.participantId === SQUIRL_PARTICIPANT.id && status.semanticProgress?.turnId === activity.turnId ? status.semanticProgress : undefined}
+            onInspect={activity.participantId === SQUIRL_PARTICIPANT.id && status.pipelineTrace ? () => openCommandSurface('overview') : undefined}/>) }
+          {visibleRecoveryTurns.map((turn) => <article className="deliveryRecovery" key={`recovery-${turn.id}`}>
+            <strong>@{turn.participantId} {turn.status === 'interrupted' ? 'was interrupted by a restart' : 'failed'}</strong>
+            <span>{turn.input}</span>
+            {turn.lastError && <small>{turn.lastError}</small>}
+            <footer>
+              <button className="primary" onClick={() => void api('/api/turns/retry', { method: 'POST', body: JSON.stringify({ turnId: turn.id }) }).then(loadState)}>Retry</button>
+              <button onClick={() => void api('/api/turns/cancel', { method: 'POST', body: JSON.stringify({ turnId: turn.id }) }).then(loadState)}>Cancel</button>
+            </footer>
+          </article>)}
+          {work.queued.length > 0 && <div className="composerOutbox conversationOutbox" aria-label="Queued messages">
+            {work.queued.map((turn) => {
+              const sameParticipantQueue = work.queued.filter((candidate) => candidate.participantId === turn.participantId);
+              const position = sameParticipantQueue.findIndex((candidate) => candidate.id === turn.id) + 1;
+              return <div className="outboxItem" key={turn.id}>
+                <strong>@{turn.participantId}</strong>
+                <span>{turn.input}</span>
+                <small>queued {position}</small>
+                <button type="button" className="chip" onClick={() => void api('/api/turns/cancel', { method: 'POST', body: JSON.stringify({ turnId: turn.id }) }).then(loadState)}>Cancel</button>
+              </div>;
+            })}
+          </div>}
+          {blockingInteraction && <div className="activityInlineMirror"><AgentInteractionPrompt
+            participantId={blockingInteraction.participantId}
+            request={blockingInteraction.request}
+            onRespond={(response) => respondToAgentInteraction(blockingInteraction.participantId, blockingInteraction.request.id, response)}
+          /></div>}
           <div ref={bottomRef} className="bottomSentinel" aria-hidden="true" />
           {!isAtLatest && (
             <button className="latestButton" onClick={() => scrollToLatest('smooth')}>
@@ -1818,6 +2274,11 @@ function App() {
           )}
         </div>
 
+        {state.systemInteractions?.[0] && <HandoffConfirmationBar
+          interaction={state.systemInteractions[0]}
+          busy={respondingSystemInteraction === state.systemInteractions[0].id}
+          onRespond={(approved) => void respondToSystemInteraction(state.systemInteractions[0]!, approved)}
+        />}
         <footer className={`composer${selectedActivity ? ' composerActive' : ''}${rewindCandidates ? ' rewindComposer' : ''}`} onKeyDownCapture={(event) => {
           if (!paletteOpen) return;
           if (event.key === 'Escape') {
@@ -1849,18 +2310,7 @@ function App() {
           {paletteOpen && state && (
             <CommandPaletteView commands={state.commands} query={input} selected={paletteIndex} onSelected={setPaletteIndex} onChoose={chooseCommand}/>
           )}
-          {work.queued.length > 0 && <div className="composerOutbox" aria-label="Queued messages">
-            {work.queued.map((turn) => {
-              const sameParticipantQueue = work.queued.filter((candidate) => candidate.participantId === turn.participantId);
-              const position = sameParticipantQueue.findIndex((candidate) => candidate.id === turn.id) + 1;
-              return <div className="outboxItem" key={turn.id}>
-                <strong>@{turn.participantId}</strong>
-                <span>{turn.input}</span>
-                <small>queued {position}</small>
-                <button type="button" className="chip" onClick={() => void api('/api/queue/remove', { method: 'POST', body: JSON.stringify({ turnId: turn.id }) })}>Remove</button>
-              </div>;
-            })}
-          </div>}
+          {state && !state.storage.available && <div className="storageError" role="alert"><strong>Postgres unavailable</strong><span>{state.storage.error}</span></div>}
           <div className="recipientPicker">
             <button
               className="recipientButton"
@@ -1897,35 +2347,44 @@ function App() {
               </div>
             )}
           </div>
-          <textarea
-            ref={composerRef}
-            aria-controls={paletteOpen ? 'slash-command-list' : undefined}
-            aria-activedescendant={paletteOpen && paletteMatches[paletteIndex] ? `slash-command-${paletteMatches[paletteIndex]!.name}` : undefined}
-            aria-autocomplete="list"
-            aria-expanded={paletteOpen}
-            value={input}
-            onChange={(event) => {
-              const value = event.target.value;
-              setInput(value);
-              const shouldSuggest = shouldShowCommandPalette(value);
-              setPaletteOpen(shouldSuggest);
-              if (shouldSuggest) setPaletteIndex(0);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault();
-                void sendMessage();
-              }
-            }}
-            placeholder="Type a message, slash command, or @file reference..."
-          />
-          <button className="primary" disabled={!input.trim()} onClick={() => void sendMessage()}>Send</button>
+          <div className="composerInputStage">
+            <textarea
+              ref={composerRef}
+              aria-controls={paletteOpen ? 'slash-command-list' : undefined}
+              aria-activedescendant={paletteOpen && paletteMatches[paletteIndex] ? `slash-command-${paletteMatches[paletteIndex]!.name}` : undefined}
+              aria-autocomplete="list"
+              aria-expanded={paletteOpen}
+              value={input}
+              disabled={Boolean(state && !state.storage.available)}
+              onChange={(event) => {
+                const value = event.target.value;
+                setInput(value);
+                const shouldSuggest = shouldShowCommandPalette(value);
+                setPaletteOpen(shouldSuggest);
+                if (shouldSuggest) setPaletteIndex(0);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault();
+                  void sendMessage();
+                }
+              }}
+              placeholder="Type a message, slash command, or @file reference..."
+            />
+            {launchingMessage && <div
+              key={launchingMessage.id}
+              className="composerLaunchingText"
+              aria-hidden="true"
+              onAnimationEnd={() => setLaunchingMessage((current) => current?.id === launchingMessage.id ? null : current)}
+            >{launchingMessage.text}</div>}
+          </div>
+          <button className="primary" disabled={!input.trim() || Boolean(state && !state.storage.available)} onClick={() => void sendMessage()}>Send</button>
         </footer>
         </>
         )}
       </section>
 
-      {approval && <ApprovalModal request={approval} onRespond={approve} />}
+      {agentTerminal && <AgentTerminalModal session={agentTerminal} onReady={handleTerminalReady} onReturn={() => void returnAgentHeadless()} />}
       {state && uiState && state.config.userProfile?.onboardingComplete && !state.taskActivity.calendar.connected && !googlePromptDismissed && <GoogleSignInModal
         clientConfigured={state.taskActivity.calendar.clientConfigured}
         onSignIn={launchGoogleSignIn}
@@ -1935,21 +2394,6 @@ function App() {
         activity={state.taskActivity.calendar}
         onSave={saveCalendarSelection}
         onLater={() => setCalendarSelectionDismissed(true)}
-      />}
-      {agentInteractions[0] && <AgentInteractionModal
-        key={`${agentInteractions[0].participantId}:${agentInteractions[0].request.id}`}
-        participantId={agentInteractions[0].participantId}
-        request={agentInteractions[0].request}
-        onRespond={async (response) => {
-          const current = agentInteractions[0];
-          if (!current) return;
-          try {
-            await api('/api/agents/interactions/respond', { method: 'POST', body: JSON.stringify({ participantId: current.participantId, id: current.request.id, ...response }) });
-            setAgentInteractions((items) => items.slice(1));
-          } catch (error) {
-            pushToast(error instanceof Error ? error.message : String(error));
-          }
-        }}
       />}
       {toast && <div className="toast">{toast}</div>}
     </main>

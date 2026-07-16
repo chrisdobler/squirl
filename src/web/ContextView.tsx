@@ -1,8 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
+import type { Participant } from '../agents/types.js';
 import type { DiscKind } from '../context/context-discs.js';
-import type { ContextFileSummary, ContextSnapshot, ContextSnapshotDisc, ContextSnapshotSection } from './types.js';
+import type { ContextFileSummary, ContextSnapshot, ContextSnapshotDisc, ContextSnapshotSection, ParticipantContextPreview } from './types.js';
 import type { UiStateV1 } from './ui-state.js';
 import { ContextLegend, ContextMatrix } from './ContextMatrix.js';
+import { ParticipantIdentity } from './ParticipantIdentity.js';
 
 export interface ContextViewProps {
   breakdown: { system: number; files: number; messages: number };
@@ -22,6 +24,75 @@ function fmt(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, '')}k`;
   return String(n);
+}
+
+function previewFidelity(preview: ParticipantContextPreview): string {
+  if (preview.fidelity === 'inspected-estimate') return 'inspected estimate';
+  if (preview.fidelity === 'exact') return 'exact request';
+  return preview.fidelity;
+}
+
+export function AgentContextSummary({ participant, onLoadPreview, onClose }: {
+  participant: Participant;
+  onLoadPreview: () => Promise<ParticipantContextPreview>;
+  onClose: () => void;
+}) {
+  const [preview, setPreview] = useState<ParticipantContextPreview | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    void onLoadPreview().then((value) => {
+      if (!cancelled) setPreview(value);
+    }).catch((reason) => {
+      if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));
+    }).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [participant.id]);
+
+  const available = preview?.contextWindow != null && preview.usedTokens != null
+    ? Math.max(0, preview.contextWindow - preview.usedTokens)
+    : undefined;
+  return <div className="contextView agentContextView">
+    <header className="contextViewHeader">
+      <div className="agentContextTitle">
+        <ParticipantIdentity participant={participant} />
+        <strong>{participant.label} context</strong>
+        <span>@{participant.id}</span>
+      </div>
+      <button className="chip" onClick={onClose}>Return</button>
+    </header>
+    <div className="contextViewBody agentContextSummary">
+      {loading && !preview ? <p className="muted">Inspecting local agent context…</p> : error ? (
+        <div className="contextEmpty"><h3>Context unavailable</h3><p>{error}</p></div>
+      ) : preview?.fidelity === 'unavailable' ? (
+        <div className="contextEmpty"><h3>Context unavailable</h3><p>{preview.unavailableReason}</p></div>
+      ) : preview ? <>
+        <div className="agentContextMeta agentContextSummaryMeta">
+          <span>view</span><strong>last turn input</strong>
+          <span>model</span><strong>{preview.modelId ?? 'unknown'}</strong>
+          <span>context</span><strong>{preview.usedTokens == null ? '?' : fmt(preview.usedTokens)} / {preview.contextWindow == null ? '?' : fmt(preview.contextWindow)} tokens</strong>
+          <span>source</span><strong>{previewFidelity(preview)} · {preview.source}</strong>
+          <span>updated</span><strong>{preview.capturedAt ? new Date(preview.capturedAt).toLocaleString() : 'unknown'}</strong>
+        </div>
+        <ContextMatrix
+          tone={preview.matrixMode === 'usage' ? 'neutral' : 'categorized'}
+          label={`${participant.label} context matrix`}
+          cells={preview.discs.map((kind, index) => ({ index, kind }))}
+        />
+        {preview.matrixMode === 'usage' ? <div className="contextUsageLegend" aria-label="Context usage legend">
+          <span><i className="used" />used {preview.usedTokens == null ? '?' : fmt(preview.usedTokens)}</span>
+          <span><i className="available" />available {available == null ? '?' : fmt(available)}</span>
+          <small>Usage only · this agent does not expose category-level context.</small>
+        </div> : <ContextLegend amounts={{ ...preview.buckets, available }} formatAmount={fmt} />}
+        <p className="muted agentContextNotice">This summary contains sanitized usage metadata only. Raw agent transcripts and artifact paths are not exposed.</p>
+      </> : <div className="contextEmpty"><h3>Context unavailable</h3></div>}
+    </div>
+  </div>;
 }
 
 /** Full takeover of the chat pane: a faithful recreation of the TUI /context disc grid. */
@@ -51,6 +122,24 @@ export function ContextSectionHeader({ section }: { section: ContextSnapshotSect
     </strong>
     <span className="contextSectionMeta">{section.role} · ~{fmt(section.approximateTokens)} tokens</span>
   </header>;
+}
+
+export function DroppedEvidenceNotice({ snapshot }: { snapshot: ContextSnapshot }) {
+  if (!snapshot.droppedEvidence.length) return null;
+  return <aside className="contextDroppedEvidence" aria-label="Dropped before request">
+    <strong>Dropped before request</strong>
+    <p>These items were available to Squirl but did not fit in the prompt budget sent to the model.</p>
+    <ul>
+      {snapshot.droppedEvidence.map((item, index) => <li key={`${item.category}-${index}`} data-trace-stage={item.traceStage}>
+        <span>{item.label}</span>
+        <small>~{fmt(item.approximateTokens)} tokens · exceeded prompt budget · trace: {item.traceStage}</small>
+      </li>)}
+    </ul>
+  </aside>;
+}
+
+export function ContextAllocationHeadline({ snapshot }: { snapshot: ContextSnapshot }) {
+  return <>Prompt {fmt(snapshot.approximateTokens)} / {fmt(snapshot.promptBudgetTokens)} · response reserve {fmt(snapshot.completionReserveTokens)} · window {fmt(snapshot.contextWindow)}</>;
 }
 
 export function ContextView({ breakdown, window, files, onAdd, onRemove, onClear, onSearch, onLoadSnapshot, onClose, initialState, onStateChange }: ContextViewProps) {
@@ -99,6 +188,7 @@ export function ContextView({ breakdown, window, files, onAdd, onRemove, onClear
     files: breakdown.files,
     messages: breakdown.messages,
     available: breakdownAvailable,
+    'response-reserve': 0,
   };
   const navigatorAmounts: Record<DiscKind, number> = snapshot ? {
     system: snapshot.sections.filter((section) => section.category === 'system').reduce((sum, section) => sum + section.approximateTokens, 0),
@@ -106,11 +196,12 @@ export function ContextView({ breakdown, window, files, onAdd, onRemove, onClear
     files: snapshot.sections.filter((section) => section.category === 'files').reduce((sum, section) => sum + section.approximateTokens, 0),
     messages: snapshot.sections.filter((section) => section.category === 'messages').reduce((sum, section) => sum + section.approximateTokens, 0),
     available: 0,
+    'response-reserve': Math.max(0, snapshot.completionReserveTokens - snapshot.promptOverageTokens),
   } : amounts;
   const used = snapshot
     ? navigatorAmounts.system + navigatorAmounts.memory + navigatorAmounts.files + navigatorAmounts.messages
     : breakdownUsed;
-  if (snapshot) navigatorAmounts.available = Math.max(0, snapshot.contextWindow - used);
+  if (snapshot) navigatorAmounts.available = snapshot.promptAvailableTokens;
   const contextWindow = snapshot?.contextWindow ?? window;
 
   const attached = new Set(files.map((f) => f.path));
@@ -140,7 +231,9 @@ export function ContextView({ breakdown, window, files, onAdd, onRemove, onClear
     <div className="contextView">
       <header className="contextViewHeader">
         <div>
-          <strong>Context {fmt(used)} / {contextWindow == null ? '?' : fmt(contextWindow)} tokens</strong>
+          <strong>{snapshot
+            ? <ContextAllocationHeadline snapshot={snapshot} />
+            : `Context ${fmt(used)} / ${contextWindow == null ? '?' : fmt(contextWindow)} tokens`}</strong>
           <nav className="contextTabs" aria-label="Context view">
             <button className={mode === 'explorer' ? 'active' : ''} onClick={() => setMode('explorer')}>Explorer</button>
             <button className={mode === 'files' ? 'active' : ''} onClick={() => setMode('files')}>Files</button>
@@ -155,7 +248,8 @@ export function ContextView({ breakdown, window, files, onAdd, onRemove, onClear
             <div className="contextSnapshotMeta">
               <strong>{snapshot.origin === 'exact' ? 'Exact request' : 'Preview'}</strong>
               <span>{snapshot.modelId}</span>
-              <span>{fmt(snapshot.approximateTokens)} approximate tokens</span>
+              <span>{fmt(snapshot.approximateTokens)} prompt tokens</span>
+              <span>{snapshot.promptOverageTokens > 0 ? `${fmt(snapshot.promptOverageTokens)} over prompt budget` : `${fmt(snapshot.promptAvailableTokens)} prompt tokens available`}</span>
               <time dateTime={snapshot.capturedAt}>{new Date(snapshot.capturedAt).toLocaleString()}</time>
             </div>
             <ContextMatrix
@@ -165,8 +259,12 @@ export function ContextView({ breakdown, window, files, onAdd, onRemove, onClear
                 index: disc.index,
                 kind: disc.kind,
                 disabled: disc.start == null,
-                title: disc.start == null ? 'Unused context capacity' : `${disc.kind} · tokens ~${disc.tokenStart}–${disc.tokenEnd} · ${snapshot.sections.find((s) => s.id === disc.sectionId)?.label ?? ''}`,
-                ariaLabel: disc.start == null ? `Context position ${disc.index + 1}, unused` : `Context position ${disc.index + 1}, ${disc.kind}, approximate tokens ${disc.tokenStart} to ${disc.tokenEnd}`,
+                title: disc.kind === 'response-reserve'
+                  ? 'Reserved for the model response'
+                  : disc.start == null ? 'Available prompt capacity' : `${disc.kind} · tokens ~${disc.tokenStart}–${disc.tokenEnd} · ${snapshot.sections.find((s) => s.id === disc.sectionId)?.label ?? ''}`,
+                ariaLabel: disc.kind === 'response-reserve'
+                  ? `Context position ${disc.index + 1}, reserved for model response`
+                  : disc.start == null ? `Context position ${disc.index + 1}, available for prompt` : `Context position ${disc.index + 1}, ${disc.kind}, approximate tokens ${disc.tokenStart} to ${disc.tokenEnd}`,
               }))}
               onSelect={(cell) => {
                 const disc = snapshot.discs.find((candidate) => candidate.index === cell.index);
@@ -174,6 +272,8 @@ export function ContextView({ breakdown, window, files, onAdd, onRemove, onClear
               }}
             />
             <ContextLegend amounts={navigatorAmounts} formatAmount={fmt} />
+            {snapshot.promptOverageTokens > 0 && <p className="contextBudgetWarning">Prompt exceeds its allocation by ~{fmt(snapshot.promptOverageTokens)} tokens.</p>}
+            <DroppedEvidenceNotice snapshot={snapshot} />
             {activeDisc?.start != null && <p className="contextActiveRange">Selected: {activeDisc.kind} · approximate tokens {activeDisc.tokenStart}–{activeDisc.tokenEnd}</p>}
           </div>
         )}

@@ -1,8 +1,10 @@
-import React from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import type { PipelineTraceStage, TurnPipelineTrace } from '../pipeline-trace.js';
 
 export interface PresentationOverviewProps {
   onStart: () => void;
   mode?: 'landing' | 'surface';
+  trace?: TurnPipelineTrace | null;
 }
 
 const AgentNode = ({ className, eyebrow, title, description }: {
@@ -18,7 +20,54 @@ const AgentNode = ({ className, eyebrow, title, description }: {
   </article>
 );
 
-export function PresentationOverview({ onStart, mode = 'landing' }: PresentationOverviewProps) {
+function TraceInspector({ stage }: { stage: PipelineTraceStage }) {
+  const copy = () => void navigator.clipboard.writeText(JSON.stringify({ input: stage.input ?? null, output: stage.output ?? null }, null, 2));
+  return <aside className="traceInspector" aria-live="polite">
+    <header><div><span>{stage.executionType}</span><strong>{stage.label}</strong></div><button type="button" onClick={copy}>Copy JSON</button></header>
+    <div className="traceJsonGrid">
+      <section><h3>Input</h3><pre>{JSON.stringify(stage.input ?? null, null, 2)}</pre></section>
+      <section><h3>Output</h3><pre>{JSON.stringify(stage.output ?? (stage.state === 'running' ? { state: 'running' } : null), null, 2)}</pre></section>
+    </div>
+  </aside>;
+}
+
+function LiveTurnPipeline({ trace }: { trace: TurnPipelineTrace | null }) {
+  const [hovered, setHovered] = useState<string | null>(null);
+  const [pinned, setPinned] = useState<string | null>(null);
+  const activeId = useMemo(() => trace?.stages.find((stage) => stage.state === 'running')?.id ?? [...(trace?.stages ?? [])].reverse().find((stage) => stage.state === 'succeeded')?.id ?? null, [trace]);
+  const selectedId = pinned ?? hovered ?? activeId;
+  const selected = trace?.stages.find((stage) => stage.id === selectedId) ?? null;
+  useEffect(() => {
+    const key = (event: KeyboardEvent) => { if (event.key === 'Escape') setPinned(null); };
+    window.addEventListener('keydown', key); return () => window.removeEventListener('keydown', key);
+  }, []);
+  const stages = trace?.stages ?? [];
+  const live = trace?.state === 'running';
+  return <section className="livePipeline" aria-labelledby="live-pipeline-title">
+    <header className="livePipelineHeader">
+      <div><span>{live ? 'Real-time execution' : 'Saved execution'}</span><h2 id="live-pipeline-title">Inside this Squirl turn</h2></div>
+      <strong className={`traceOverall traceOverall--${trace?.state ?? 'idle'}`}>{trace?.state ?? 'waiting for a request'}</strong>
+    </header>
+    {trace ? <>
+      <p className="traceRequest">{trace.request}</p>
+      <p className="traceTiming"><span>Started <time dateTime={trace.startedAt}>{new Date(trace.startedAt).toLocaleString()}</time></span>{trace.finishedAt && <span>Finished <time dateTime={trace.finishedAt}>{new Date(trace.finishedAt).toLocaleString()}</time></span>}</p>
+      <div className="traceStages" role="list" aria-label="Squirl execution stages">
+        {stages.map((stage, index) => <React.Fragment key={stage.id}>
+          {index > 0 && <i className={`traceConnector traceConnector--${stage.state}`} aria-hidden="true" />}
+          <button type="button" role="listitem" className={`traceStage traceStage--${stage.state}${selectedId === stage.id ? ' is-selected' : ''}`}
+            onMouseEnter={() => setHovered(stage.id)} onMouseLeave={() => setHovered(null)} onFocus={() => setHovered(stage.id)} onBlur={() => setHovered(null)}
+            onClick={() => setPinned((current) => current === stage.id ? null : stage.id)} aria-pressed={pinned === stage.id}>
+            <span>{index + 1} · {stage.executionType}</span><strong>{stage.label}</strong>
+            <small>{stage.service ?? stage.detail ?? stage.state}{stage.durationMs !== undefined ? ` · ${stage.durationMs}ms` : ''}</small>
+          </button>
+        </React.Fragment>)}
+      </div>
+      {selected && <TraceInspector stage={selected} />}
+    </> : <p className="traceEmpty">Make a request, then use Inspect beside the bouncing acorn to watch classification, memory, research, answering, and confidence assessment as they happen.</p>}
+  </section>;
+}
+
+export function PresentationOverview({ onStart, mode = 'landing', trace = null }: PresentationOverviewProps) {
   return (
     <section className={`presentationOverview presentationOverview--${mode}`} aria-labelledby="overview-title">
       <div className="overviewAtmosphere" aria-hidden="true" />
@@ -28,7 +77,9 @@ export function PresentationOverview({ onStart, mode = 'landing' }: Presentation
         <p>Squirl carries the shape of what you mean to the agents best equipped to make it real.</p>
       </header>
 
-      <div className="overviewGraph" role="img" aria-label="Your mind and local AI infrastructure connect to Squirl as separate services. Inside Squirl, the orchestrator coordinates a chat model, embedder, and vector database before routing work to agents and connected services including Claude Code, Codex, PI Agent, and Google Calendar.">
+      {mode === 'surface' && <LiveTurnPipeline trace={trace} />}
+
+      {(mode === 'landing' || !trace) && <div className="overviewGraph" role="img" aria-label="Your mind and local AI infrastructure connect to Squirl as separate services. Inside Squirl, the orchestrator coordinates a chat model, embedder, and vector database before routing work to agents and connected services including Claude Code, Codex, PI Agent, and Google Calendar.">
         <svg className="overviewConnections" viewBox="0 0 1200 620" preserveAspectRatio="none" aria-hidden="true">
           <defs>
             <linearGradient id="overviewIntentLine" x1="0" x2="1">
@@ -150,7 +201,7 @@ export function PresentationOverview({ onStart, mode = 'landing' }: Presentation
           <AgentNode className="is-future" eyebrow="Extensible" title="Research" description="Find and synthesize" />
           <AgentNode className="is-future" eyebrow="Extensible" title="Custom agent" description="Bring your own specialist" />
         </div>
-      </div>
+      </div>}
 
       <footer className="overviewFooter">
         <button type="button" className="overviewStart" onClick={onStart}>

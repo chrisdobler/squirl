@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { Participant } from '../agents/types.js';
 import { ContextMatrix } from './ContextMatrix.js';
-import { ContextPreviewCard, CurrentTasks, RoomSidebarRoster, sidebarDestination, TaskSummaryCard } from './RoomSidebarRoster.js';
+import { contextParticipantDestination, ContextPreviewCard, CurrentTasks, RoomSidebarRoster, sidebarDestination, TaskSummaryCard } from './RoomSidebarRoster.js';
 import type { ParticipantContextPreview } from './types.js';
 
 const healthEntries = [
@@ -31,7 +31,7 @@ const currentTasksResizeProps = {
 describe('RoomSidebarRoster', () => {
   it('renders a non-interactive current-task list with stale state and participant context', () => {
     const html = renderToStaticMarkup(React.createElement(CurrentTasks, { ...currentTasksResizeProps, activity: {
-      status: 'stale', generatedAt: '2026-07-13T18:00:00.000Z',
+      status: 'stale', generatedAt: '2026-07-13T18:00:00.000Z', error: 'Task classification timed out; retrying automatically.',
       tasks: [{ id: 'task-1', title: 'Build inferred task feed', summary: 'The team is combining recent agent activity into a durable sidebar view.', lastActiveAt: new Date(Date.now() - 120_000).toISOString(), participantIds: ['codex'], evidenceIds: ['u1'] }],
       calendar: { status: 'disconnected', connected: false, canWrite: false, clientConfigured: false, selectionRequired: false, profile: null, calendars: [], refreshedAt: null },
     } }));
@@ -39,6 +39,8 @@ describe('RoomSidebarRoster', () => {
     expect(html).toContain('Build inferred task feed');
     expect(html).toContain('@codex');
     expect(html).toContain('stale');
+    expect(html).toContain('Task classification timed out; retrying automatically.');
+    expect(html).toContain('currentTaskError');
     expect(html).toContain('tabindex="0"');
     expect(html).toContain('role="separator"');
     expect(html).toContain('aria-orientation="horizontal"');
@@ -61,7 +63,7 @@ describe('RoomSidebarRoster', () => {
 
   it('renders a construction-striped no-current-task state for a reliable empty snapshot', () => {
     const html = renderToStaticMarkup(React.createElement(CurrentTasks, { ...currentTasksResizeProps, activity: {
-      status: 'ready', generatedAt: '2026-07-13T18:00:00.000Z', tasks: [],
+      status: 'ready', generatedAt: '2026-07-13T18:00:00.000Z', error: null, tasks: [],
       calendar: { status: 'ready', connected: true, canWrite: false, clientConfigured: true, selectionRequired: false, profile: null, calendars: [], refreshedAt: '2026-07-13T18:00:00.000Z' },
     } }));
 
@@ -73,7 +75,7 @@ describe('RoomSidebarRoster', () => {
 
   it.each(['unavailable', 'stale', 'refreshing'] as const)('renders no current task while task activity is %s', (status) => {
     const html = renderToStaticMarkup(React.createElement(CurrentTasks, { ...currentTasksResizeProps, activity: {
-      status, generatedAt: status === 'unavailable' ? null : '2026-07-13T18:00:00.000Z', tasks: [],
+      status, generatedAt: status === 'unavailable' ? null : '2026-07-13T18:00:00.000Z', error: null, tasks: [],
       calendar: { status: 'disconnected', connected: false, canWrite: false, clientConfigured: false, selectionRequired: false, profile: null, calendars: [], refreshedAt: null },
     } }));
 
@@ -91,7 +93,7 @@ describe('RoomSidebarRoster', () => {
     const pastStart = new Date(now - 60 * 60_000).toISOString();
     const pastEnd = new Date(now - 30 * 60_000).toISOString();
     const html = renderToStaticMarkup(React.createElement(CurrentTasks, { ...currentTasksResizeProps, activity: {
-      status: 'stale', generatedAt: new Date(now).toISOString(),
+      status: 'stale', generatedAt: new Date(now).toISOString(), error: null,
       tasks: [
         { id: 'future', title: 'Future meeting', lastActiveAt: futureStart, participantIds: [], evidenceIds: [], source: 'calendar', calendar: { calendarId: 'p', eventId: 'future', startAt: futureStart, endAt: futureEnd, allDay: false } },
         { id: 'past', title: 'Ended discussion', lastActiveAt: pastStart, participantIds: [], evidenceIds: [], source: 'calendar', calendar: { calendarId: 'p', eventId: 'past', startAt: pastStart, endAt: pastEnd, allDay: false } },
@@ -106,6 +108,7 @@ describe('RoomSidebarRoster', () => {
   it('renders every room agent, excludes the user, and exposes compact-width classes', () => {
     const html = renderToStaticMarkup(React.createElement(RoomSidebarRoster, {
       participants,
+      activeParticipantIds: new Set(['squirl', 'codex']),
       healthEntries,
       squirlDependenciesExpanded: true,
       onSquirlDependenciesExpandedChange: () => undefined,
@@ -125,7 +128,11 @@ describe('RoomSidebarRoster', () => {
     expect(html).toContain('data-agent-icon="pi"');
     expect(html).not.toMatch(/class="roomRailIdentity"[^>]*>\s*[A-Z]/);
     expect(html).toContain('roomRailText');
-    expect(html).toContain('aria-label="squirl @squirl · ready local"');
+    expect(html).toContain('aria-label="squirl @squirl · busy local"');
+    expect(html).toMatch(/aria-label="squirl @squirl · busy local"[^>]*>\s*<span class="roomRailIdentity" data-status="busy"/);
+    expect(html).toMatch(/aria-label="writer @claude · ready Claude"[^>]*>\s*<span class="roomRailIdentity" data-status="ready"/);
+    expect(html).toContain('background:#60a5fa');
+    expect(html).toContain('background:#4ade80');
     expect(html).toContain('data-destination="model"');
     expect(html).toContain('data-destination="agent"');
     expect(html).toContain('aria-label="Collapse Squirl dependencies"');
@@ -144,6 +151,7 @@ describe('RoomSidebarRoster', () => {
   it('collapses only Squirl dependencies while retaining the disclosure control', () => {
     const html = renderToStaticMarkup(React.createElement(RoomSidebarRoster, {
       participants,
+      activeParticipantIds: new Set<string>(),
       healthEntries,
       squirlDependenciesExpanded: false,
       onSquirlDependenciesExpandedChange: () => undefined,
@@ -152,6 +160,8 @@ describe('RoomSidebarRoster', () => {
     }));
     expect(html).toContain('aria-label="Expand Squirl dependencies"');
     expect(html).toContain('aria-expanded="false"');
+    expect(html).toMatch(/aria-label="squirl @squirl · ready local"[^>]*>\s*<span class="roomRailIdentity" data-status="ready"/);
+    expect(html).toMatch(/aria-label="writer @claude · ready Claude"[^>]*>\s*<span class="roomRailIdentity" data-status="ready"/);
     expect(html).not.toContain('squirlDependencyTree');
     expect(html).not.toContain('aria-label="model: ok"');
   });
@@ -159,6 +169,11 @@ describe('RoomSidebarRoster', () => {
   it('routes Squirl to Model and CLI participants to Agents', () => {
     expect(sidebarDestination(participants[1]!)).toBe('model');
     expect(sidebarDestination(participants[2]!)).toBe('agent');
+  });
+
+  it('routes Squirl to the full context explorer and remote agents to scoped summaries', () => {
+    expect(contextParticipantDestination(participants[1]!)).toBeNull();
+    expect(contextParticipantDestination(participants[2]!)).toBe('codex');
   });
 
   it('renders sanitized context metadata and an accessible matrix card', () => {
@@ -170,12 +185,13 @@ describe('RoomSidebarRoster', () => {
     };
     const html = renderToStaticMarkup(React.createElement(ContextPreviewCard, {
       participant: participants[2]!, preview, loading: false, position: { left: 10, top: 20 },
+      onOpenContext: () => undefined,
     }));
     expect(html).toContain('gpt-test');
     expect(html).toContain('50 / 100 tokens');
     expect(html).toContain('last turn input');
-    expect(html).toContain('reviewer context matrix preview');
-    expect(html).toContain('contextDiscGrid compact neutral');
+    expect(html).toContain('aria-label="Open reviewer context"');
+    expect(html).toContain('contextDiscGrid activatable compact neutral');
     expect(html).toContain('Usage only · Codex does not expose category-level context.');
     expect(html).toContain('available 50');
   });
@@ -200,6 +216,18 @@ describe('RoomSidebarRoster', () => {
 });
 
 describe('ContextMatrix', () => {
+  it('renders a compact matrix as one keyboard-accessible activation target', () => {
+    const html = renderToStaticMarkup(React.createElement(ContextMatrix, {
+      compact: true,
+      label: 'Open agent context',
+      cells: [{ index: 0, kind: 'messages' }, { index: 1, kind: 'available' }],
+      onActivate: () => undefined,
+    }));
+    expect(html).toContain('<button type="button"');
+    expect(html).toContain('aria-label="Open agent context"');
+    expect(html).not.toContain('button class="disc');
+  });
+
   it('shares accessible interactive cells with the full context explorer', () => {
     const html = renderToStaticMarkup(React.createElement(ContextMatrix, {
       label: 'Navigate test context',

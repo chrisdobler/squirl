@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { SquirlRuntime } from './runtime.js';
 import type { ChatEvent, EvalEvent, EvalRunRequest } from './types.js';
 import type { AgentInteractionResponse, AgentKind, ClaudePermissionMode, CodexApprovalPolicy, CodexSandbox, PiApprovalMode, PiToolMode } from '../agents/types.js';
-import type { EffortLevel } from '../types.js';
+import type { AgentActivityAction, EffortLevel } from '../types.js';
 import type { UiStatePatch } from './ui-state.js';
 import { UiStateStore } from './ui-state-store.js';
 import { discoverCodexModels } from '../agents/codex-models.js';
@@ -128,9 +128,28 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
     const url = parseUrl(req);
 
     try {
+      const origin = req.headers.origin;
+      if (origin) {
+        let allowed = false;
+        try {
+          const parsed = new URL(origin);
+          const loopback = parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost' || parsed.hostname === '[::1]';
+          const configuredDevOrigin = process.env.SQUIRL_WEB_DEV_ORIGIN;
+          allowed = loopback && (
+            parsed.host === req.headers.host
+            || parsed.origin === configuredDevOrigin
+            || parsed.port === '5173'
+          );
+        } catch { allowed = false; }
+        if (!allowed) {
+          sendJson(res, 403, { error: 'Origin is not allowed.' });
+          return;
+        }
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Vary', 'Origin');
+      }
       if (req.method === 'OPTIONS') {
         res.writeHead(204, {
-          'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Headers': 'Content-Type',
           'Access-Control-Allow-Methods': 'GET,POST,PATCH,OPTIONS',
         });
@@ -316,16 +335,42 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
         return;
       }
 
+      const activityActionMatch = url.pathname.match(/^\/api\/activities\/([^/]+)\/actions$/);
+      if (activityActionMatch && req.method === 'POST') {
+        const body = await readBody(req) as { action?: AgentActivityAction; value?: string };
+        if (!body.action) { sendJson(res, 400, { error: 'Missing activity action.' }); return; }
+        try {
+          sendJson(res, 200, { message: await runtime.performActivityAction(decodeURIComponent(activityActionMatch[1]!), body.action, body.value) });
+        } catch (error) {
+          sendJson(res, 409, { error: error instanceof Error ? error.message : String(error) });
+        }
+        return;
+      }
+
       if (url.pathname === '/api/cancel' && req.method === 'POST') {
         const body = await readBody(req) as { participantId?: string };
-        sendJson(res, 200, { ok: runtime.cancel(body.participantId) });
+        sendJson(res, 200, { ok: await runtime.cancel(body.participantId) });
         return;
       }
 
       if (url.pathname === '/api/queue/remove' && req.method === 'POST') {
         const body = await readBody(req) as { turnId?: string };
         if (!body.turnId) throw new Error('Missing queued turn id');
-        sendJson(res, 200, { ok: runtime.removeQueuedTurn(body.turnId) });
+        sendJson(res, 200, { ok: await runtime.removeQueuedTurn(body.turnId) });
+        return;
+      }
+
+      if (url.pathname === '/api/turns/retry' && req.method === 'POST') {
+        const body = await readBody(req) as { turnId?: string };
+        if (!body.turnId) throw new Error('Missing turn id');
+        sendJson(res, 200, { ok: await runtime.retryTurn(body.turnId) });
+        return;
+      }
+
+      if (url.pathname === '/api/turns/cancel' && req.method === 'POST') {
+        const body = await readBody(req) as { turnId?: string };
+        if (!body.turnId) throw new Error('Missing turn id');
+        sendJson(res, 200, { ok: await runtime.removeQueuedTurn(body.turnId) });
         return;
       }
 
@@ -387,6 +432,44 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
         return;
       }
 
+      if (url.pathname === '/api/agents/terminal/start' && req.method === 'POST') {
+        const body = await readBody(req) as { id?: string; cols?: number; rows?: number };
+        if (!body.id) throw new Error('Missing agent id');
+        sendJson(res, 200, await runtime.startAgentTerminal(body.id, body.cols ?? 100, body.rows ?? 30));
+        return;
+      }
+
+      if (url.pathname === '/api/agents/terminal/input' && req.method === 'POST') {
+        const body = await readBody(req) as { id?: string; capability?: string; data?: string };
+        if (!body.id || !body.capability || body.data === undefined) throw new Error('Missing terminal input fields');
+        runtime.writeAgentTerminal(body.id, body.capability, body.data);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
+      if (url.pathname === '/api/agents/terminal/resize' && req.method === 'POST') {
+        const body = await readBody(req) as { id?: string; capability?: string; cols?: number; rows?: number };
+        if (!body.id || !body.capability || !body.cols || !body.rows) throw new Error('Missing terminal resize fields');
+        runtime.resizeAgentTerminal(body.id, body.capability, body.cols, body.rows);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
+      if (url.pathname === '/api/agents/terminal/stop' && req.method === 'POST') {
+        const body = await readBody(req) as { id?: string; capability?: string };
+        if (!body.id || !body.capability) throw new Error('Missing terminal stop fields');
+        await runtime.stopAgentTerminal(body.id, body.capability);
+        sendJson(res, 200, { state: runtime.getState() });
+        return;
+      }
+
+      if (url.pathname === '/api/agents/compact' && req.method === 'POST') {
+        const body = await readBody(req) as { id?: string };
+        if (!body.id) throw new Error('Missing agent id');
+        sendJson(res, 202, runtime.requestAgentCompaction(body.id));
+        return;
+      }
+
       if (url.pathname === '/api/events' && req.method === 'GET') {
         const write = createEventWriter(res);
         const unsubscribe = runtime.subscribeEvents(write, url.searchParams.get('clientId') ?? undefined);
@@ -398,14 +481,31 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
       }
 
       if (url.pathname === '/api/chat' && req.method === 'POST') {
-        const body = await readBody(req) as { message?: string; recipientId?: string; clientId?: string };
-        const result = runtime.submitChat(body.message ?? '', body.recipientId ?? 'squirl', body.clientId);
+        const body = await readBody(req) as { message?: string; recipientId?: string; clientId?: string; requestId?: string };
+        if (!body.requestId) { sendJson(res, 400, { error: 'requestId is required.' }); return; }
+        if ((body.recipientId ?? 'squirl') === 'squirl' && await runtime.respondToTypedSystemInteraction(body.message ?? '')) {
+          sendJson(res, 200, { systemInteraction: true });
+          return;
+        }
+        const storage = runtime.getState().storage;
+        if (!storage.available) { sendJson(res, 503, { error: storage.error ?? 'Postgres storage is unavailable.' }); return; }
+        const result = await runtime.submitChat(body.message ?? '', body.recipientId ?? 'squirl', body.requestId, body.clientId);
         sendJson(res, 202, {
           turnId: result.turn.id,
           participantId: result.turn.participantId,
           started: result.started,
           queuePosition: result.queuePosition,
+          created: result.created,
         });
+        return;
+      }
+
+      const systemInteractionMatch = url.pathname.match(/^\/api\/system-interactions\/([^/]+)\/respond$/);
+      if (systemInteractionMatch && req.method === 'POST') {
+        const body = await readBody(req) as { approved?: unknown };
+        if (typeof body.approved !== 'boolean') { sendJson(res, 400, { error: 'approved must be boolean.' }); return; }
+        const state = await runtime.respondToSystemInteraction(decodeURIComponent(systemInteractionMatch[1]!), body.approved);
+        sendJson(res, 200, { state });
         return;
       }
 
@@ -444,11 +544,15 @@ export function createSquirlServer(options: SquirlServerOptions = {}) {
 export async function startSquirlServer(options: SquirlServerOptions = {}): Promise<{ url: string; close: () => Promise<void> }> {
   const host = options.host ?? '127.0.0.1';
   const port = options.port ?? 4174;
-  const { server } = createSquirlServer(options);
+  const { server, runtime } = createSquirlServer(options);
+  await runtime.ready();
   await new Promise<void>((resolveListen) => server.listen(port, host, resolveListen));
   return {
     url: `http://${host}:${port}`,
-    close: () => new Promise((resolveClose, reject) => server.close((err) => err ? reject(err) : resolveClose())),
+    close: async () => {
+      await runtime.shutdown();
+      await new Promise<void>((resolveClose, reject) => server.close((err) => err ? reject(err) : resolveClose()));
+    },
   };
 }
 
