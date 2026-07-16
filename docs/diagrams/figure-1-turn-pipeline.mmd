@@ -1,0 +1,37 @@
+%%{init: {"theme": "base", "themeVariables": {"background": "#ffffff", "primaryColor": "#ffffff", "primaryTextColor": "#111111", "primaryBorderColor": "#111111", "lineColor": "#555555", "fontFamily": "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"}, "flowchart": {"htmlLabels": true, "curve": "basis", "nodeSpacing": 20, "rankSpacing": 34}}}%%
+flowchart LR
+    request["Durable Request<br/>Intake"]
+    routing["Request<br/>Routing"]
+    capability["Capability +<br/>Turn Intent"]
+    context["Context<br/>Assembly"]
+    answer["Answer Model<br/>(LLM)"]
+    response["Stream + Persist<br/>Response"]
+    confidence["Confidence<br/>Assessment (LLM)"]
+    specialist["Specialist<br/>Agent"]
+
+    memoryEmbed["Memory<br/>Embedding"]
+    memoryVector["Vector<br/>Retrieval"]
+    researchConsent["Research<br/>Consent"]
+    researchSearch["Search +<br/>Page Fetch"]
+    tools["Native<br/>Tool Loop"]
+    memoryIndex["Async Memory<br/>Indexing"]
+
+    request --> routing --> capability --> context --> answer --> response
+    response -.-> confidence
+    routing -. "explicit delegation" .-> specialist
+    capability -.-> memoryEmbed --> memoryVector --> context
+    capability -.-> researchConsent --> researchSearch --> context
+    answer -. "when selected" .-> tools -.-> answer
+    confidence -. "verification below threshold" .-> specialist
+    response -.-> memoryIndex
+
+    class request,routing,capability,context,response runtime
+    class memoryEmbed,memoryVector,researchConsent,researchSearch,tools,memoryIndex data
+    class answer,confidence llm
+    class specialist agent
+
+    classDef runtime fill:#ffffff,stroke:#111111,stroke-width:1.2px,color:#111111;
+    classDef data fill:#ffffff,stroke:#111111,stroke-width:1.2px,color:#111111;
+    classDef llm fill:#eeeeee,stroke:#111111,stroke-width:1.4px,stroke-dasharray: 5 3,color:#111111;
+    classDef agent fill:#f7f7f7,stroke:#111111,stroke-width:1.4px,color:#111111;
+    linkStyle default stroke:#555555,stroke-width:1.2px;

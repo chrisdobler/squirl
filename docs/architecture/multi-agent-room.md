@@ -93,7 +93,7 @@ flowchart TB
 ## Known Gaps
 
 - Event reconnects reconcile from authoritative application state; the event feed does not durably replay every transient token.
-- Queued outbox work is runtime-local and is intentionally discarded rather than replayed after restart.
+- Postgres persists queued outbox work. Queued turns resume after restart; turns whose running lease expired are paused as interrupted until the user retries or cancels them.
 - SSH-backed agents are represented by a transport stub, not a working remote path.
 - PI is an external prerequisite. Squirl neither installs PI nor stores its provider credentials.
 - PI still has no native sandbox. Squirl's bundled extension gates side-effecting tools before execution; `read-only` restricts built-ins to `read`, `grep`, `find`, and `ls`.

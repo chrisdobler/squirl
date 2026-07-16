@@ -34,7 +34,7 @@ keeps work oriented, and prepares handoffs for your approval.
 ## Features
 
 ### 🧠 Continuity and Memory
-- **Semantic recall** from durable local conversation history
+- **Semantic recall** from the durable server-owned conversation history
 - **Cross-conversation continuity** for decisions, preferences, and unfinished work
 - **Memory evaluation** for measuring retrieval and answer quality
 
@@ -47,7 +47,7 @@ keeps work oriented, and prepares handoffs for your approval.
 - **Streaming responses** with live tokens/sec + latency feedback
 - **Interrupt anytime** (`esc`) — no more waiting on slow generations
 - **Context window tracking** — know exactly what you're burning
-- **Shared chat history** — the web UI and TUI use the same durable local transcript
+- **Shared chat history** — Postgres owns the transcript and restart-safe participant queue used by web, Electron, and TUI
 - **Prompt inspection** — see the identity, room state, project context, files, and recalled memory sent to the model
 
 ### 🔌 Multi-Provider by Design
@@ -95,7 +95,36 @@ Squirl combines:
 - a **shared agent room** for specialized models and coding agents
 - an **inspectable runtime** for prompts, retrieval, health, and evaluations
 
-The web UI and TUI are two views onto the same conversations and runtime—not separate clients with separate memory.
+The web UI and TUI are two API clients onto the same conversations and runtime—not separate clients with separate memory.
+
+## Turn Pipeline
+
+[![A Squirl turn from durable request intake through context assembly, response generation, and optional specialist verification.](docs/diagrams/figure-1-turn-pipeline.svg)](docs/diagrams/figure-1-turn-pipeline.svg)
+
+Each turn follows the same inspectable path, while optional memory, research, native-tool, and specialist-verification stages are skipped when they are not needed.
+
+## Durable local development
+
+Squirl requires Postgres for transcript and turn acceptance. It does not fall back to an in-memory queue when storage is unavailable.
+
+```bash
+make start
+```
+
+The committed default uses the `ubuntu-desktop` Docker context at `192.168.16.150`, starts the complete Compose stack, and runs the web runtime locally. Override it with `make start DOCKER_CONTEXT=desktop-linux DATABASE_HOST=127.0.0.1`, or put those assignments in a git-ignored `Makefile.local`. The Compose credentials are development-only; use secret-managed credentials outside local development. Existing `~/.squirl/history` JSONL files are imported once and archived under `~/.squirl/history/migrated/` after a successful transaction.
+
+`make start` and `make up` include both database browsers:
+
+- **Postgres:** open `http://<docker-host>:8080`. Adminer signs into the local `squirl` database automatically; set `ADMINER_AUTOLOGIN=0` to use its normal login screen or `ADMINER_HOST_PORT` to change the host port.
+- **ChromaDB:** open `http://<docker-host>:3001`. The Chroma viewer connects to the Compose `chroma` service and lets you inspect collections, documents, and metadata; set `CHROMA_ADMIN_HOST_PORT` to change the host port.
+
+To start either browser separately, run `docker compose up -d adminer` or `docker compose up -d chroma-admin`.
+
+Database integration tests use the separate `squirl_test` database created when the Compose volume is initialized:
+
+```bash
+TEST_DATABASE_URL='postgresql://squirl:squirl-dev-only@127.0.0.1:5432/squirl_test' pnpm test:db
+```
 
 ---
 
@@ -157,6 +186,20 @@ pnpm dev:web
 ```
 
 Open [http://127.0.0.1:5173](http://127.0.0.1:5173). The API runs on port `4174` and automatically restarts when backend code changes; Vite hot-reloads the web interface.
+
+### Electron UI
+
+```bash
+pnpm dev:electron
+```
+
+This builds once and launches the Electron app. For live development, use:
+
+```bash
+make start-electron
+```
+
+This starts the required Postgres and Chroma services, supplies the development `DATABASE_URL`, and launches Electron. If the web development stack is already running on ports `5173` and `4174`, Electron reuses it so the browser and desktop app share one runtime. Otherwise, the command starts that stack itself. Vite hot-reloads renderer changes, the API automatically restarts for backend changes, and changes to Electron main/preload code rebuild and relaunch the desktop app. If the services and environment are already configured, `pnpm dev:electron:hot` provides the same reuse behavior but requires `DATABASE_URL` in the shell.
 
 ### Terminal UI
 

@@ -24,7 +24,7 @@ This is Squirl's consolidated architecture decision record. It records decisions
 |---|---|---|---|
 | [ADR-001](#adr-001--local-first-multi-provider-client) | Local-first, multi-provider client | Accepted | 2026-04-06 |
 | [ADR-002](#adr-002--native-esm-react-and-ink-for-the-terminal-ui) | Native ESM, React, and Ink for the terminal UI | Accepted | 2026-04-06 |
-| [ADR-003](#adr-003--local-jsonl-history-is-the-shared-conversation-record) | Local JSONL history is the shared conversation record | Accepted | 2026-04-06 |
+| [ADR-003](#adr-003--local-jsonl-history-is-the-shared-conversation-record) | Local JSONL history is the shared conversation record | Superseded by ADR-017 | 2026-04-06 |
 | [ADR-004](#adr-004--memory-is-an-optional-asynchronous-retrieval-pipeline) | Memory is an optional asynchronous retrieval pipeline | Accepted | 2026-04-11 |
 | [ADR-005](#adr-005--route-local-ai-through-an-openai-compatible-gateway) | Route local AI through an OpenAI-compatible gateway | Accepted | 2026-04-14 |
 | [ADR-006](#adr-006--multiple-frontends-share-one-application-runtime-and-data-model) | Multiple frontends share one runtime and data model | Accepted | 2026-06-17 |
@@ -45,7 +45,7 @@ This is Squirl's consolidated architecture decision record. It records decisions
 
 ## ADR-001 — Local-first, multi-provider client
 
-**Status:** Accepted  
+**Status:** Superseded by ADR-017
 **Date:** 2026-04-06
 
 ### Context
@@ -427,18 +427,19 @@ The request-bound stream in ADR-014 made one agent's turn a room-wide lock. It a
 
 ### Decision
 
-Each participant owns an in-memory FIFO with at most one active turn, while different participants may execute concurrently. Web chat submission returns an acknowledgement and live room events are delivered independently through `GET /api/events`. Web/Electron and TUI presentation use participant activity state; only Squirl activity may display Squirl memory or model-pipeline labels.
+Postgres is the authoritative room transcript and durable participant-turn queue. Each participant has at most one leased `running` turn while different participants may execute concurrently. Chat submission supplies an idempotency key and transactionally creates the visible user message plus queued turn. A delegated handoff message and its target turn are likewise committed together. The API server is the sole dispatcher; web, Electron, and TUI consume its state and event stream.
 
 ### Consequences
 
-- A busy participant accepts follow-ups into a visible outbox instead of blocking the composer.
-- Queued turns are intentionally not replayed after restart and enter durable history only when execution starts.
-- Cancellation targets the selected participant, preserves its queue, and is offered only when the adapter can interrupt safely.
+- A busy participant accepts durable follow-ups into a visible FIFO instead of blocking the composer.
+- Queued turns resume after restart. Expired running leases become `interrupted` and require explicit Retry or Cancel so external side effects are never replayed silently.
+- Postgres unavailability fails closed: new sends return `503` and no in-memory or JSONL fallback accepts work.
+- Existing JSONL history is imported once and archived; Chroma remains a derived index.
 - Concurrent UI updates must identify messages by id instead of assuming the newest message owns the active stream.
 
 ### Evidence
 
-`src/agents/turn-scheduler.ts`, `src/web/runtime.ts`, `src/web/server.ts`, `src/web/renderer.tsx`, and `src/app.tsx`.
+`src/persistence/`, `src/agents/durable-turn-scheduler.ts`, `src/web/runtime.ts`, `src/web/server.ts`, and `src/tui/ApiApp.tsx`.
 
 ## ADR-018 — Agent permissions use one session-scoped approval broker
 
