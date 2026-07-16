@@ -1,6 +1,8 @@
 import type { VectorStore } from '../types.js';
 import { NullStore } from './null-store.js';
 import { ChromaStore, withVectorStoreTimeout, DEFAULT_VECTOR_STORE_TIMEOUT_MS, isVectorStoreError } from './chroma.js';
+import { ChromaMemoryIndex } from './chroma-memory.js';
+import type { MemoryVectorIndex } from '../memory-chunks.js';
 
 export interface StoreConfig {
   type: 'local-chroma' | 'remote-chroma' | 'null';
@@ -59,4 +61,23 @@ export async function createVectorStore(config: StoreConfig): Promise<VectorStor
     }
     default: throw new Error(`Unknown store type: ${(config as any).type}`);
   }
+}
+
+/** Production semantic-memory collection. Its documents are debug previews, never canonical evidence. */
+export async function createMemoryVectorIndex(config: StoreConfig): Promise<MemoryVectorIndex> {
+  if (config.type === 'null') {
+    const records = new Set<string>();
+    return {
+      async upsert(items) { items.forEach((item) => records.add(item.chunk.id)); },
+      async query() { return []; }, async has(ids) { return new Set(ids.filter((id) => records.has(id))); },
+      async delete(ids) { ids.forEach((id) => records.delete(id)); }, async close() {},
+    };
+  }
+  const { ChromaClient } = await import('chromadb');
+  const url = new URL(configuredChromaUrl(config));
+  const client = new ChromaClient({ host: url.hostname, port: parseInt(url.port || (url.protocol === 'https:' ? '443' : '8000'), 10), ssl: url.protocol === 'https:' });
+  const collection = await withVectorStoreTimeout(client.getOrCreateCollection({
+    name: config.collection ?? 'squirl-memory-v2', embeddingFunction: null,
+  }), DEFAULT_VECTOR_STORE_TIMEOUT_MS);
+  return new ChromaMemoryIndex(collection as never);
 }

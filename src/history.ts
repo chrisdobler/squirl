@@ -8,6 +8,18 @@ export interface LogEntry {
   message: Message;
 }
 
+/** JSONL updates append a newer record with the same message id; present only the latest value at its original turn position. */
+function coalesceMessageUpdates(entries: LogEntry[]): LogEntry[] {
+  const order: string[] = [];
+  const latest = new Map<string, LogEntry>();
+  for (const entry of entries) {
+    if (!latest.has(entry.message.id)) order.push(entry.message.id);
+    const first = latest.get(entry.message.id);
+    latest.set(entry.message.id, first ? { ...entry, timestamp: first.timestamp } : entry);
+  }
+  return order.map((id) => latest.get(id)!);
+}
+
 export interface RewindHistoryResult {
   targetFound: boolean;
   removed: Message[];
@@ -120,7 +132,7 @@ export function loadPromptHistory(): Message[] {
   }
 
   all.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-  return all.map((e) => e.message);
+  return coalesceMessageUpdates(all).map((e) => e.message);
 }
 
 /**
@@ -136,7 +148,7 @@ export function loadAllHistoryEntries(): LogEntry[] {
   ensureDir();
   const all = getAllHistoryFiles().flatMap((filePath) => readEntries(filePath));
   all.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-  return all;
+  return coalesceMessageUpdates(all);
 }
 
 /** Load the complete Squirl-owned transcript for deterministic activity/accountability views. */

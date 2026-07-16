@@ -8,6 +8,8 @@ export interface TurnPair {
   toolSummary?: string;
   /** Participants addressed or authoring this turn, retained for agent-aware recall. */
   participantIds?: string[];
+  /** Canonical Postgres source for hydrated semantic chunks. */
+  sourceMessageId?: string;
 }
 
 export interface EmbeddedChunk {
