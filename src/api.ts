@@ -77,7 +77,7 @@ async function streamOpenAI(options: StreamOptions): Promise<void> {
       client = new OpenAI({ baseURL: model.baseUrl, apiKey: 'not-needed', timeout: LOCAL_MODEL_REQUEST_TIMEOUT_MS, maxRetries: 0 });
     }
 
-    let doneCalled = false;
+    let finalUsage: { promptTokens: number; completionTokens: number; totalTokens: number } | null = null;
     const baseParams = {
       model: model.id,
       messages,
@@ -128,12 +128,11 @@ async function streamOpenAI(options: StreamOptions): Promise<void> {
       }
 
       if (chunk.usage) {
-        doneCalled = true;
-        onDone({
+        finalUsage = {
           promptTokens: chunk.usage.prompt_tokens ?? 0,
           completionTokens: chunk.usage.completion_tokens ?? 0,
           totalTokens: chunk.usage.total_tokens ?? (chunk.usage.prompt_tokens ?? 0) + (chunk.usage.completion_tokens ?? 0),
-        });
+        };
       }
     }
 
@@ -146,7 +145,9 @@ async function streamOpenAI(options: StreamOptions): Promise<void> {
       onToolCalls([...pendingToolCalls.values()]);
     }
 
-    if (!doneCalled) {
+    if (finalUsage) {
+      onDone(finalUsage);
+    } else {
       // Estimate tokens if provider doesn't support stream usage reporting
       const estimatedPrompt = messages.reduce((sum, m) => {
         const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);

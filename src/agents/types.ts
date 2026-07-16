@@ -81,6 +81,8 @@ export interface Participant {
   mode?: string;
   /** Working directory used when launching a remote CLI agent. */
   cwd?: string;
+  /** Which surface currently owns the provider session. */
+  controlMode?: 'headless' | 'terminal' | 'compacting';
 }
 
 export interface AgentUsage {
@@ -115,7 +117,11 @@ export type AgentEvent =
   | { type: 'interaction-request'; participantId: string; request: AgentInteractionRequest }
   | { type: 'interaction-notify'; participantId: string; message: string; level: 'info' | 'warning' | 'error' }
   | { type: 'interaction-status'; participantId: string; key: string; text?: string }
-  | { type: 'interaction-editor-prefill'; participantId: string; text: string };
+  | { type: 'interaction-editor-prefill'; participantId: string; text: string }
+  | {
+      type: 'background-job'; participantId: string; state: 'started' | 'completed' | 'failed' | 'cancelled';
+      taskId: string; runId?: string; workflowName?: string; summary?: string; transcriptDir?: string; workflowArgs?: string; error?: string;
+    };
 
 export type AgentInteractionRequest =
   | {
@@ -150,8 +156,12 @@ export interface AgentSession {
   send(text: string): Promise<void>;
   /** Cancel the in-flight turn, if any. */
   interrupt(): Promise<void>;
+  /** Run provider-native context compaction when the headless protocol exposes it. */
+  compact?(): Promise<void>;
   /** Reply to an agent-owned extension/UI request when the harness supports it. */
   respondToInteraction?(id: string, response: AgentInteractionResponse): Promise<void>;
+  /** Consume one exact user-authorized tool call without opening a second permission prompt. */
+  preapproveToolOnce?(toolName: string, input: Record<string, unknown>): boolean;
   /** Tear down the process/transport. */
   stop(): Promise<void>;
   /** Subscribe to the session's event stream. Returns an unsubscribe function. */

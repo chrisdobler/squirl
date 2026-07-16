@@ -5,8 +5,44 @@ import { BaseAgentSession } from './base.js';
 type RpcId = string | number;
 type JsonObject = Record<string, unknown>;
 
+interface PersistentApprovalChoice {
+  decision: unknown;
+  label: string;
+}
+
 function object(value: unknown): JsonObject {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : {};
+}
+
+function persistentApprovalChoice(available: unknown[] | undefined, isFile: boolean): PersistentApprovalChoice | undefined {
+  if (!available) {
+    return {
+      decision: 'acceptForSession',
+      label: isFile ? 'Always allow changes to these files for this session' : 'Always allow this command for this session',
+    };
+  }
+
+  for (const decision of available) {
+    if (decision === 'acceptForSession') {
+      return {
+        decision,
+        label: isFile ? 'Always allow changes to these files for this session' : 'Always allow this command for this session',
+      };
+    }
+
+    const value = object(decision);
+    if (value.acceptWithExecpolicyAmendment) {
+      return { decision, label: 'Always allow matching commands' };
+    }
+
+    const network = object(value.applyNetworkPolicyAmendment);
+    const amendment = object(network.network_policy_amendment);
+    if (amendment.action === 'allow' && typeof amendment.host === 'string') {
+      return { decision, label: `Always allow network access to ${amendment.host}` };
+    }
+  }
+
+  return undefined;
 }
 
 async function withTimeout<T>(promise: Promise<T>, message: string, ms = 15_000): Promise<T> {
@@ -88,7 +124,7 @@ export class CodexAdapter extends BaseAgentSession {
     const isFile = method === 'item/fileChange/requestApproval';
     const itemId = typeof params.itemId === 'string' ? params.itemId : String(id);
     const available = Array.isArray(params.availableDecisions) ? params.availableDecisions : undefined;
-    const supportsSession = !available || available.includes('acceptForSession');
+    const persistentChoice = persistentApprovalChoice(available, isFile);
     const resource = command || (typeof params.grantRoot === 'string' ? params.grantRoot : undefined);
     const requestId = `codex:${String(id)}`;
     this.approvalRequests.set(requestId, { rpcId: id, method, available });
@@ -99,10 +135,10 @@ export class CodexAdapter extends BaseAgentSession {
       toolName: isFile ? 'Edit' : 'Bash',
       input: boundedInput(command || params),
       resource,
-      ...(supportsSession ? { sessionScope: { key: itemId, label: isFile ? 'Always allow changes to these files for this session' : 'Always allow this command for this session' } } : {}),
+      ...(persistentChoice ? { sessionScope: { key: itemId, label: persistentChoice.label } } : {}),
     });
     this.approvalRequests.delete(requestId);
-    const result = decision === 'allow-session' && supportsSession ? 'acceptForSession' : decision === 'allow-once' ? 'accept' : 'decline';
+    const result = decision === 'allow-session' && persistentChoice ? persistentChoice.decision : decision === 'allow-once' ? 'accept' : 'decline';
     this.write({ id, result: { decision: result } });
   }
 

@@ -24,6 +24,8 @@ export interface AgentProfile {
   approvalPolicy?: CodexApprovalPolicy;
   piToolMode?: PiToolMode;
   piApprovalMode?: PiApprovalMode;
+  /** Provider-native session/thread id used to preserve resumable work across Squirl restarts. */
+  sessionId?: string;
   /** Auto-connect this profile when Squirl starts. Defaults to true for compatibility. */
   reconnect?: boolean;
 }
@@ -102,6 +104,18 @@ export interface SquirlConfig {
     taskWriteCalendarId?: string;
     /** Background refresh cadence. Defaults to five minutes. */
     refreshMinutes?: number;
+  };
+  research?: {
+    /** Whether Squirl may use outbound web research tools. */
+    enabled?: boolean;
+    /** Durable first-use consent. Unknown prompts before the first outbound query. */
+    consent?: 'unknown' | 'allowed' | 'denied';
+    /** Automatic researches freshness-sensitive questions; explicit-only waits for a direct request. */
+    mode?: 'automatic' | 'explicit-only';
+    /** Base URL of a SearXNG instance with JSON output enabled. */
+    searxngUrl?: string;
+    /** Maximum search results returned to the model. */
+    maxResults?: number;
   };
   agents?: AgentsConfig;
 }

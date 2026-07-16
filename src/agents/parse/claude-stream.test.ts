@@ -73,6 +73,30 @@ describe('createClaudeParser', () => {
     expect(events).toContainEqual({ type: 'error', participantId: 'cc', message: 'Not logged in · Please run /login' });
   });
 
+  it('emits structured background workflow lifecycle events', () => {
+    const parser = makeParser();
+    const launched = parser.push(JSON.stringify({
+      type: 'user', message: { role: 'user', content: [] },
+      tool_use_result: { status: 'async_launched', taskId: 'job-1', taskType: 'local_workflow', workflowName: 'deep-research', runId: 'wf-1', transcriptDir: '/tmp/wf-1', summary: 'Research voice stacks' },
+    }));
+    expect(launched).toContainEqual({
+      type: 'background-job', participantId: 'cc', state: 'started', taskId: 'job-1',
+      workflowName: 'deep-research', runId: 'wf-1', transcriptDir: '/tmp/wf-1', summary: 'Research voice stacks',
+    });
+    expect(parser.push(JSON.stringify({ type: 'system', task: { task_id: 'job-1', status: 'completed' } })))
+      .toContainEqual({ type: 'background-job', participantId: 'cc', state: 'completed', taskId: 'job-1' });
+    expect(parser.push(JSON.stringify({
+      type: 'queue-operation', operation: 'enqueue',
+      content: '<task-notification><task-id>job-2</task-id><status>completed</status></task-notification>',
+    }))).toContainEqual({ type: 'background-job', participantId: 'cc', state: 'completed', taskId: 'job-2' });
+    expect(parser.push(JSON.stringify({
+      type: 'user', message: {
+        role: 'user',
+        content: '<task-notification><task-id>job-3</task-id><status>completed</status></task-notification>',
+      },
+    }))).toContainEqual({ type: 'background-job', participantId: 'cc', state: 'completed', taskId: 'job-3' });
+  });
+
   it('ignores blank and non-JSON lines without throwing', () => {
     const parser = makeParser();
     expect(parser.push('')).toEqual([]);

@@ -33,6 +33,36 @@ function stringifyToolResult(content: unknown): string {
   return content == null ? '' : JSON.stringify(content);
 }
 
+function backgroundJobEvent(obj: Record<string, unknown>, participantId: string): AgentEvent | null {
+  let raw = (obj.tool_use_result ?? obj.toolUseResult ?? obj.task ?? {}) as Record<string, unknown>;
+  const messageContent = obj.message && typeof obj.message === 'object'
+    ? (obj.message as { content?: unknown }).content : undefined;
+  const notificationContent = typeof obj.content === 'string' ? obj.content
+    : typeof messageContent === 'string' ? messageContent : undefined;
+  if (!Object.keys(raw).length && notificationContent?.includes('<task-notification>')) {
+    raw = {
+      taskId: notificationContent.match(/<task-id>([^<]+)<\/task-id>/)?.[1],
+      status: notificationContent.match(/<status>([^<]+)<\/status>/)?.[1],
+    };
+  }
+  const taskId = typeof raw.taskId === 'string' ? raw.taskId : typeof raw.task_id === 'string' ? raw.task_id : undefined;
+  const status = typeof raw.status === 'string' ? raw.status : undefined;
+  if (!taskId || !status) return null;
+  const state = status === 'async_launched' || status === 'running' ? 'started'
+    : status === 'completed' || status === 'succeeded' ? 'completed'
+      : status === 'failed' || status === 'error' ? 'failed'
+        : status === 'cancelled' ? 'cancelled' : null;
+  if (!state) return null;
+  return {
+    type: 'background-job', participantId, state, taskId,
+    ...(typeof (raw.runId ?? raw.run_id) === 'string' ? { runId: (raw.runId ?? raw.run_id) as string } : {}),
+    ...(typeof (raw.workflowName ?? raw.workflow_name) === 'string' ? { workflowName: (raw.workflowName ?? raw.workflow_name) as string } : {}),
+    ...(typeof raw.summary === 'string' ? { summary: raw.summary } : {}),
+    ...(typeof (raw.transcriptDir ?? raw.transcript_dir) === 'string' ? { transcriptDir: (raw.transcriptDir ?? raw.transcript_dir) as string } : {}),
+    ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
+  };
+}
+
 export function createClaudeParser(opts: ParserOptions): StreamParser {
   const { participantId, newMessageId } = opts;
 
@@ -126,6 +156,8 @@ export function createClaudeParser(opts: ParserOptions): StreamParser {
         });
       }
     }
+    const job = backgroundJobEvent(obj, participantId);
+    if (job) out.push(job);
   }
 
   function handleResult(obj: Record<string, unknown>, out: AgentEvent[]): void {
@@ -178,6 +210,10 @@ export function createClaudeParser(opts: ParserOptions): StreamParser {
       const out: AgentEvent[] = [];
       switch (obj.type) {
         case 'system':
+          {
+            const job = backgroundJobEvent(obj, participantId);
+            if (job) out.push(job);
+          }
           if (obj.subtype === 'init') {
             currentModel = typeof obj.model === 'string' ? obj.model : currentModel;
             out.push({
@@ -198,6 +234,12 @@ export function createClaudeParser(opts: ParserOptions): StreamParser {
           break;
         case 'user':
           handleUser(obj, out);
+          break;
+        case 'queue-operation':
+          {
+            const job = backgroundJobEvent(obj, participantId);
+            if (job) out.push(job);
+          }
           break;
         case 'result':
           handleResult(obj, out);

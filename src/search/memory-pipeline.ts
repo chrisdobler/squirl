@@ -1,6 +1,7 @@
 import type { Message } from '../types.js';
 import type { Embedder, VectorStore, SearchResult } from './types.js';
-import { extractSearchQueries } from './meta-extract.js';
+import { classifyTurnIntent } from './meta-extract.js';
+import type { TurnIntentClassification, TurnIntentObservation } from './meta-extract.js';
 import type { MetaLLM } from './meta-extract.js';
 import { formatMemorySystemMessage, formatMemoryInline } from './memory-format.js';
 import { rankResults } from './ranker.js';
@@ -13,6 +14,8 @@ export interface MemoryPipelineConfig {
   perQueryK?: number;
   /** Drop results already present in the current conversation. Defaults to true. */
   filterConversation?: boolean;
+  /** Only recent direct messages can duplicate the live prompt in a rolling room. */
+  filterRecentMessages?: number;
 }
 
 export interface MemoryResult {
@@ -36,11 +39,16 @@ export class MemoryPipeline {
     conversation: Message[],
     userMessage: string,
     onStatus?: (stage: QueryPipelineStage) => void,
+    intent?: TurnIntentClassification,
+    observeIntent?: (observation: TurnIntentObservation) => void,
+    explicitQueries?: string[],
   ): Promise<MemoryResult> {
     const empty: MemoryResult = { results: [], systemMessage: '', inlineDisplay: '', queries: [] };
 
     onStatus?.('memory-query');
-    const queries = await extractSearchQueries(conversation, userMessage, this.llm);
+    const queries = explicitQueries?.length
+      ? explicitQueries
+      : (intent ?? await classifyTurnIntent(conversation, userMessage, this.llm, observeIntent)).memoryQueries;
     searchLog('MEMORY QUERIES', queries);
     if (queries.length === 0) return empty;
 
@@ -55,9 +63,13 @@ export class MemoryPipeline {
       allResults.push(...results);
     }
 
-    const topK = rankResults(allResults, conversation, {
+    const filterConversation = this.config.filterConversation ?? true;
+    const filterMessages = filterConversation && this.config.filterRecentMessages
+      ? conversation.slice(-this.config.filterRecentMessages)
+      : conversation;
+    const topK = rankResults(allResults, filterMessages, {
       recallK: this.config.recallK,
-      filterConversation: this.config.filterConversation ?? true,
+      filterConversation,
     });
     searchLog('MEMORY RESULTS', { total: allResults.length, topK: topK.length });
 
@@ -69,5 +81,9 @@ export class MemoryPipeline {
       inlineDisplay: formatMemoryInline(topK),
       queries,
     };
+  }
+
+  classify(conversation: Message[], userMessage: string, observe?: (observation: TurnIntentObservation) => void): Promise<TurnIntentClassification> {
+    return classifyTurnIntent(conversation, userMessage, this.llm, observe);
   }
 }

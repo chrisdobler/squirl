@@ -112,10 +112,74 @@ export class GroupChatCoordinator {
     };
   }
 
+  getSession(id: string): AgentSession | undefined {
+    return this.sessions.get(id);
+  }
+
+  setControlMode(id: string, mode: NonNullable<Participant['controlMode']>): void {
+    const participant = this.agentParticipants.get(id);
+    if (!participant) throw new Error(`No agent "@${id}".`);
+    participant.controlMode = mode;
+    this.emit({ type: 'session-status', participantId: id, status: participant.status ?? 'ready' });
+  }
+
+  /** Stop headless ownership without removing the room participant or its durable profile. */
+  async suspendAgent(id: string, controlMode: 'terminal' | 'compacting'): Promise<AgentDescriptor> {
+    const session = this.sessions.get(id);
+    const participant = this.agentParticipants.get(id);
+    if (!session || !participant) throw new Error(`No agent "@${id}".`);
+    if (session.status === 'busy') throw new Error(`Cannot switch @${id} while it is busy.`);
+    const descriptor = session.descriptor;
+    this.sessions.delete(id);
+    await session.stop();
+    participant.status = 'ready';
+    participant.controlMode = controlMode;
+    this.emit({ type: 'session-status', participantId: id, status: 'ready' });
+    return descriptor;
+  }
+
+  /** Restore headless ownership after terminal/compaction work. */
+  async resumeAgent(descriptor: AgentDescriptor): Promise<Participant> {
+    const participant = this.agentParticipants.get(descriptor.id);
+    if (!participant) throw new Error(`No suspended agent "@${descriptor.id}".`);
+    if (this.sessions.has(descriptor.id)) throw new Error(`Agent "@${descriptor.id}" is already headless.`);
+    const session = this.createSession(descriptor, this.options.transport);
+    session.onEvent((event) => {
+      if (this.sessions.get(descriptor.id) !== session) return;
+      this.applyStatus(descriptor.id, event);
+      this.emit(event);
+    });
+    this.sessions.set(descriptor.id, session);
+    try {
+      await session.start();
+    } catch (error) {
+      this.sessions.delete(descriptor.id);
+      participant.status = 'error';
+      participant.controlMode = 'headless';
+      throw error;
+    }
+    participant.status = session.status;
+    participant.controlMode = 'headless';
+    this.emit({ type: 'session-status', participantId: descriptor.id, status: session.status });
+    return participant;
+  }
+
   async respondToInteraction(participantId: string, id: string, response: AgentInteractionResponse): Promise<void> {
     const session = this.sessions.get(participantId);
     if (!session?.respondToInteraction) throw new Error(`Agent "@${participantId}" does not accept interactive responses.`);
     await session.respondToInteraction(id, response);
+  }
+
+  preapproveToolOnce(participantId: string, toolName: string, input: Record<string, unknown>): boolean {
+    return this.sessions.get(participantId)?.preapproveToolOnce?.(toolName, input) ?? false;
+  }
+
+  async restartAgentSession(id: string, freshSession = false): Promise<Participant> {
+    const descriptor = this.getDescriptor(id);
+    if (!descriptor) throw new Error(`No agent "@${id}".`);
+    const participant = this.agentParticipants.get(id);
+    if (participant?.status === 'busy') throw new Error(`Cannot restart @${id} while it is busy.`);
+    return this.replaceAgent(id, { ...descriptor, ...(freshSession ? { sessionId: undefined } : {}) });
   }
 
   async addAgent(descriptor: AgentDescriptor): Promise<Participant> {
@@ -129,6 +193,7 @@ export class GroupChatCoordinator {
       ? preferredColor
       : pickAgentColor(colorsInUse);
     const participant = participantFromDescriptor(descriptor, color);
+    participant.controlMode = 'headless';
     const session = this.createSession(descriptor, this.options.transport);
     // Permanent forwarder: surface lifecycle/status events and keep participant status in sync.
     session.onEvent((event) => {
@@ -213,6 +278,13 @@ export class GroupChatCoordinator {
 
   /** Route a user submission to exactly one explicitly selected participant. */
   async dispatchTo(recipientId: string, input: string, signal: AbortSignal): Promise<void> {
+    const participant = this.agentParticipants.get(recipientId);
+    if (participant?.controlMode === 'terminal') {
+      throw new Error(`@${recipientId} is in terminal mode. Return it to headless mode before sending from Squirl.`);
+    }
+    if (participant?.controlMode === 'compacting') {
+      throw new Error(`@${recipientId} is compacting its context. Try again when compaction finishes.`);
+    }
     if (recipientId !== this.localId && !this.sessions.has(recipientId)) {
       throw new Error(`No such agent: ${recipientId}`);
     }
@@ -268,18 +340,21 @@ export class GroupChatCoordinator {
       return Promise.resolve('');
     }
 
-    return new Promise<string>((resolve) => {
+    return new Promise<string>((resolve, reject) => {
       let text = '';
       // Completion listener only: the permanent forwarder (addAgent) already emits these events.
       const off = session.onEvent((event) => {
         if (event.participantId !== participantId) return;
         if (event.type === 'token') text += event.token;
-        if (event.type === 'turn-end' || event.type === 'exit' || event.type === 'error') {
+        if (event.type === 'error') {
+          off();
+          reject(new Error(event.message));
+        } else if (event.type === 'turn-end' || event.type === 'exit') {
           off();
           resolve(text);
         }
       });
-      void session.send(input);
+      void session.send(input).catch((error) => { off(); reject(error); });
     });
   }
 }

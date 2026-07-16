@@ -1,10 +1,37 @@
-export type MessageRole = 'user' | 'assistant' | 'tool';
+export type MessageRole = 'user' | 'assistant' | 'tool' | 'activity';
 
 export type EffortLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+export interface ResearchSource {
+  title: string;
+  url: string;
+  domain: string;
+  fetched?: boolean;
+  publishedAt?: string;
+}
+
+export interface ResearchProvenance {
+  queries: string[];
+  sources: ResearchSource[];
+  /** Number of retained source URLs actually cited in the rendered answer. */
+  citedSourceCount?: number;
+}
 
 export interface ResponseMeta {
   model: string;
   effort?: EffortLevel;
+  /** Post-answer confidence estimate. Null means assessment was attempted but unavailable. */
+  confidence?: number | null;
+  /** Lifecycle for asynchronous post-answer confidence enrichment. */
+  confidenceState?: 'pending' | 'complete' | 'unavailable' | 'canceled';
+  /** Bounded source provenance for web research used during this response. */
+  research?: ResearchProvenance;
+}
+
+export interface HandoffDelivery {
+  targetId: string;
+  requestId: string;
+  state: 'proposed' | 'dispatched';
 }
 
 export interface ToolCall {
@@ -26,6 +53,8 @@ export interface AssistantMessage {
   role: 'assistant';
   content: string;
   isStreaming?: boolean;
+  /** Durable delivery state. Undefined means a legacy completed response. */
+  responseState?: 'complete' | 'interrupted';
   toolCalls?: ToolCall[];
   /** Authoring participant. Undefined = squirl's local LLM; otherwise a remote agent id. */
   participantId?: string;
@@ -35,6 +64,10 @@ export interface AssistantMessage {
   proactiveKind?: 'task-clarification' | 'delegation-confirmation';
   /** Structured state for a pending semantic delegation confirmation. */
   delegationConfirmation?: import('./agents/delegation.js').PendingDelegationConfirmation;
+  /** Provider-neutral action proposed by Squirl. Authorization remains runtime-owned. */
+  squirlAction?: import('./agents/actions.js').SquirlAction;
+  /** Runtime-authored delivery truth. Model prose alone never sets dispatched. */
+  handoff?: HandoffDelivery;
   /** Stable timestamp for cooldowns across runtime restarts. */
   createdAt?: string;
 }
@@ -49,15 +82,100 @@ export interface ToolMessage {
   toolInput?: unknown;
   /** Completion state. Undefined means a legacy completed tool result. */
   toolStatus?: 'running' | 'success' | 'error';
+  /** Policy or argument-validation failure. Rejected tools were never executed. */
+  toolRejection?: {
+    reason: 'not-allowed' | 'malformed-arguments' | 'invalid-arguments' | 'invalid-cwd';
+    summary: string;
+  };
   /** True when the persisted output was shortened to the activity output limit. */
   outputTruncated?: boolean;
   /** Query text embedded for an automatic semantic-memory lookup. */
   memoryLookup?: { queries: string[] };
+  /** Structured web evidence retained separately from the display-oriented tool output. */
+  webResearch?: {
+    kind: 'search' | 'fetch';
+    query?: string;
+    sources: ResearchSource[];
+  };
   /** Owning participant for tool activity surfaced from a remote agent. */
   participantId?: string;
 }
 
-export type Message = UserMessage | AssistantMessage | ToolMessage;
+export type AgentActivityKind = 'assignment' | 'research' | 'input' | 'checkpoint' | 'result' | 'failure';
+export type AgentActivityState = 'queued' | 'running' | 'waiting' | 'blocked' | 'succeeded' | 'failed' | 'cancelled' | 'stalled';
+export type AgentActivityAction = 'cancel' | 'retry' | 'resume' | 'approve' | 'reject' | 'respond' | 'dismiss' | 'check-status';
+
+export interface AgentActivityProgress {
+  completed?: number;
+  active?: number;
+  unfinished?: number;
+  total?: number;
+  phase?: string;
+}
+
+export interface AgentActivityArtifact {
+  label: string;
+  path: string;
+  kind?: 'file' | 'report' | 'directory';
+}
+
+export interface AgentActivityWorker {
+  id: string;
+  label: string;
+  detail?: string;
+  state: 'running' | 'completed' | 'failed' | 'stalled';
+}
+
+/** Durable, provider-neutral state rendered as an operational transcript card. */
+export interface AgentActivityCard {
+  version: 1;
+  kind: AgentActivityKind;
+  state: AgentActivityState;
+  title: string;
+  summary?: string;
+  participantId: string;
+  turnId?: string;
+  parentActivityId?: string;
+  phase?: string;
+  detail?: string;
+  startedAt?: string;
+  updatedAt: string;
+  /** Last explicit provider refresh requested by the user; distinct from provider activity time. */
+  checkedAt?: string;
+  finishedAt?: string;
+  progress?: AgentActivityProgress;
+  workers?: AgentActivityWorker[];
+  artifacts?: AgentActivityArtifact[];
+  error?: string;
+  actions: AgentActivityAction[];
+  collapsed?: boolean;
+  provider?: {
+    kind: 'claude-code' | 'codex' | 'pi' | 'squirl';
+    taskId?: string;
+    runId?: string;
+    workflowName?: string;
+    transcriptDir?: string;
+    /** Provider-native workflow script used to continue an interrupted run. */
+    scriptPath?: string;
+    /** Exact provider arguments used to generate stable workflow cache keys. */
+    workflowArgs?: string;
+    /** Most recent user-authorized continuation request, used for liveness grace. */
+    resumeRequestedAt?: string;
+    interactionId?: string;
+    interactionMethod?: string;
+  };
+}
+
+export interface ActivityMessage {
+  id: string;
+  role: 'activity';
+  /** Plain-text fallback used by exports and older clients. */
+  content: string;
+  participantId: string;
+  activity: AgentActivityCard;
+}
+
+export type Message = UserMessage | AssistantMessage | ToolMessage | ActivityMessage;
 
 export interface ModelConfig {
   id: string;

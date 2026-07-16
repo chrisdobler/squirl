@@ -1,10 +1,10 @@
 import type { AgentDescriptor, AgentEvent, AgentSession, AgentStatus, AgentTransport } from '../types.js';
+import { randomUUID } from 'node:crypto';
 
 /** Shared listener/status plumbing for the concrete adapters. */
 export abstract class BaseAgentSession implements AgentSession {
   status: AgentStatus = 'starting';
   protected listeners = new Set<(event: AgentEvent) => void>();
-  protected msgCounter = 0;
 
   constructor(readonly descriptor: AgentDescriptor, protected readonly transport: AgentTransport) {}
 
@@ -27,7 +27,9 @@ export abstract class BaseAgentSession implements AgentSession {
   }
 
   protected nextMessageId(): string {
-    return `${this.descriptor.id}-${++this.msgCounter}`;
+    // Adapter instances are recreated on process restarts. A local counter would reuse
+    // durable transcript ids and update an older message's payload at its old sequence.
+    return `${this.descriptor.id}-${randomUUID()}`;
   }
 
   /** Apply status side-effects from parsed events shared by both adapters. */

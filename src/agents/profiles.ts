@@ -37,6 +37,7 @@ export function profileFromDescriptor(descriptor: AgentDescriptor, profileId?: s
     approvalPolicy: descriptor.approvalPolicy,
     piToolMode: descriptor.piToolMode,
     piApprovalMode: descriptor.piApprovalMode,
+    sessionId: descriptor.sessionId,
     reconnect: true,
   };
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { OpenAIMetaLLM, AnthropicMetaLLM, createConfiguredMetaLLM, createMetaLLM } from './meta-llm.js';
+import { OpenAIMetaLLM, AnthropicMetaLLM, META_LLM_TIMEOUT_MS, TASK_META_LLM_TIMEOUT_MS, createConfiguredMetaLLM, createConfiguredTaskMetaLLM, createMetaLLM } from './meta-llm.js';
 
 describe('OpenAIMetaLLM', () => {
   it('calls OpenAI chat completions and returns content', async () => {
@@ -64,6 +64,13 @@ describe('createConfiguredMetaLLM', () => {
   it('works independently of semantic index enablement', () => {
     expect(createConfiguredMetaLLM({ defaultProvider: 'anthropic' })).toBeInstanceOf(AnthropicMetaLLM);
     expect(createConfiguredMetaLLM({ defaultProvider: 'local', defaultModel: 'local-model', localBaseUrl: 'http://gpu1:8000/v1' }))
+      .toBeInstanceOf(OpenAIMetaLLM);
+  });
+
+  it('keeps fast routing and slower task-classification timeout budgets separate', () => {
+    expect(META_LLM_TIMEOUT_MS).toBe(5_000);
+    expect(TASK_META_LLM_TIMEOUT_MS).toBe(60_000);
+    expect(createConfiguredTaskMetaLLM({ defaultProvider: 'local', defaultModel: 'local-model', localBaseUrl: 'http://gpu1:8000/v1' }))
       .toBeInstanceOf(OpenAIMetaLLM);
   });
 });

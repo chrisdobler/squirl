@@ -7,6 +7,10 @@ export interface ParticipantTurn {
   enqueuedAt: string;
   /** Optional caller-owned data used while executing the turn. */
   metadata?: unknown;
+  /** Durable delivery state when backed by the server-owned queue. */
+  status?: 'queued' | 'running' | 'interrupted' | 'succeeded' | 'failed' | 'cancelled';
+  attempt?: number;
+  lastError?: string;
 }
 
 export interface ParticipantActivity {
@@ -21,6 +25,8 @@ export interface ParticipantActivity {
 export interface ParticipantWorkState {
   active: ParticipantActivity[];
   queued: ParticipantTurn[];
+  interrupted?: ParticipantTurn[];
+  failed?: ParticipantTurn[];
 }
 
 export interface TurnExecutionContext {

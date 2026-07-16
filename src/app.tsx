@@ -19,6 +19,7 @@ import { matchCommand, filterCommands } from './commands/registry.js';
 import { buildRewindCandidates, rewindRequestFromCandidate } from './rewind.js';
 import type { RewindRequest } from './rewind.js';
 import { estimateTokens } from './context/token-estimator.js';
+import { OutputThroughputMeter } from './output-throughput.js';
 import { buildSystemPrompt } from './context/system-prompt.js';
 import { useMouseWheel } from './hooks/useMouseWheel.js';
 import { enableMouseTracking, disableMouseTracking } from './mouse-filter.js';
@@ -45,7 +46,10 @@ import { LocalSpawnTransport } from './agents/transport/local-spawn.js';
 import { buildAgentDescriptor } from './agents/factory.js';
 import { SQUIRL_PARTICIPANT, USER_PARTICIPANT } from './agents/participants.js';
 import { materializeProfile, nextAvailableAgentId, profileFromDescriptor, removeAgentProfile, upsertAgentProfile, validateAgentHandle } from './agents/profiles.js';
-import { delegationConfirmationResponse, delegationConfirmationText, recoverPendingDelegation, resolveDelegationIntent, type DelegationAgent, type DelegationIntent } from './agents/delegation.js';
+import { pendingConfirmation, resolveDelegationIntent, type DelegationAgent, type DelegationIntent, type PendingDelegationConfirmation } from './agents/delegation.js';
+import { assessSquirlAnswer, HANDOFF_CONFIDENCE_THRESHOLD } from './agents/answer-assessment.js';
+import type { HandoffAction } from './agents/actions.js';
+import { interactionFromPending, loadSystemInteractions, saveSystemInteractions, type SystemInteraction } from './agents/system-interactions.js';
 import type { AgentEvent, AgentInteractionRequest, AgentInteractionResponse, AgentKind, Participant } from './agents/types.js';
 import { boundedToolOutput } from './tool-activity.js';
 import { discoverCodexModels, resolveCodexBinary } from './agents/codex-models.js';
@@ -53,6 +57,8 @@ import { resolvePiBinary } from './agents/pi-models.js';
 import { TASK_ACTIVITY_WINDOW_MS } from './tasks/evidence.js';
 import { loadTaskActivitySnapshot } from './tasks/store.js';
 import { formatScrumReport, generateScrumReport } from './tasks/scrum.js';
+import { formatSemanticProgress, type SemanticProgressUpdate } from './semantic-progress.js';
+import { collectResearchProvenance } from './research-provenance.js';
 
 function defaultModelFromConfig(config?: SquirlConfig): SelectedModel {
   const provider = config?.defaultProvider ?? 'anthropic';
@@ -86,7 +92,7 @@ const ImportPrompt: React.FC<{ onSubmit: (path: string) => void; onClose: () => 
   );
 };
 
-const ApprovalPrompt: React.FC<{ command: string; onRespond: (approved: boolean) => void }> = ({ command, onRespond }) => {
+const ApprovalPrompt: React.FC<{ command: string; research?: boolean; onRespond: (approved: boolean) => void }> = ({ command, research, onRespond }) => {
   useInput((input, key) => {
     if (input === 'y' || input === 'Y') onRespond(true);
     else if (input === 'n' || input === 'N' || key.escape) onRespond(false);
@@ -94,9 +100,20 @@ const ApprovalPrompt: React.FC<{ command: string; onRespond: (approved: boolean)
   return (
     <Box borderStyle="single" borderTop={true} borderBottom={true} borderLeft={false} borderRight={false} paddingX={1} gap={1}>
       <Text color="red" bold>{'⚠ '}</Text>
-      <Text>Network command: <Text color="yellow">{command}</Text>  <Text dimColor>Allow? (y/n)</Text></Text>
+      <Text>{research ? 'Enable automatic web research for: ' : 'Network command: '}<Text color="yellow">{command}</Text>  <Text dimColor>Allow? (y/n)</Text></Text>
     </Box>
   );
+};
+
+const HandoffConfirmationPrompt: React.FC<{ interaction: SystemInteraction; onRespond: (approved: boolean) => void }> = ({ interaction, onRespond }) => {
+  useInput((input, key) => {
+    if (input === 'y' || input === 'Y') onRespond(true);
+    else if (input === 'n' || input === 'N' || key.escape) onRespond(false);
+  });
+  return <Box borderStyle="single" borderTop borderBottom borderLeft={false} borderRight={false} paddingX={1} gap={1}>
+    <Text color="yellow" bold>handoff ❯</Text>
+    <Text>Send to {interaction.pending.targetIds.map((id) => `@${id}`).join(', ')}? {interaction.pending.task} <Text dimColor>(y/n)</Text></Text>
+  </Box>;
 };
 
 const AgentInteractionPrompt: React.FC<{
@@ -190,6 +207,7 @@ export const App: React.FC<AppProps> = ({
   const { stdout } = useStdout();
   const terminalRows = stdout.rows ?? 24;
   const [messages, setMessages] = useState<Message[]>(() => loadHistory());
+  const [systemInteractions, setSystemInteractions] = useState<SystemInteraction[]>(() => loadSystemInteractions(workingDir));
   const [inputValue, setInputValue] = useState('');
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const [isContextMenuOpen, setIsContextMenuOpen] = useState(false);
@@ -200,20 +218,22 @@ export const App: React.FC<AppProps> = ({
   const [selectedRecipientId, setSelectedRecipientId] = useState(SQUIRL_PARTICIPANT.id);
   const [isRewindPickerOpen, setIsRewindPickerOpen] = useState(false);
   const [rewindPickerIndex, setRewindPickerIndex] = useState(0);
-  const [pendingApproval, setPendingApproval] = useState<{ command: string; resolve: (approved: boolean) => void } | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<{ command: string; toolName: string; resolve: (approved: boolean) => void } | null>(null);
   const [agentInteractions, setAgentInteractions] = useState<Array<{ participantId: string; request: AgentInteractionRequest }>>([]);
   const [pendingRewind, setPendingRewind] = useState<RewindRequest | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [toolStatus, setToolStatus] = useState('');
   const [pipelineStatus, setPipelineStatus] = useState<QueryPipelineStatus | null>(null);
+  const [semanticProgress, setSemanticProgress] = useState<SemanticProgressUpdate | null>(null);
   const [showThinking, setShowThinking] = useState(false);
   const [isToolMode, setIsToolMode] = useState(false);
   const [selectedToolIndex, setSelectedToolIndex] = useState(0);
   const [expandedToolIds, setExpandedToolIds] = useState<Set<string>>(() => new Set());
   const [tokensPerSecond, setTokensPerSecond] = useState(0);
-  const streamStartRef = useRef(0);
-  const streamTokensRef = useRef(0);
+  const throughputMeterRef = useRef(new OutputThroughputMeter());
   const latestAssistantRef = useRef<AssistantMessage | null>(null);
+  const confidenceAssessmentRef = useRef<{ messageId: string; generation: number; controller: AbortController } | null>(null);
+  const confidenceGenerationRef = useRef(0);
   const orchestratorRef = useRef(new Orchestrator(workingDir));
   const statusEmitterRef = useRef(new StatusEmitter());
   const ingestQueueRef = useRef<IngestQueue | null>(null);
@@ -247,6 +267,32 @@ export const App: React.FC<AppProps> = ({
   const [participants, setParticipants] = useState<Participant[]>([USER_PARTICIPANT, SQUIRL_PARTICIPANT]);
   const messagesRef = useRef<Message[]>(messages);
   messagesRef.current = messages;
+  useEffect(() => {
+    const existing = new Set(systemInteractions.map((item) => item.id));
+    const migrated: SystemInteraction[] = [];
+    const visible = messagesRef.current.filter((message) => {
+      if (message.role !== 'assistant' || message.proactiveKind !== 'delegation-confirmation' || !message.delegationConfirmation) return true;
+      if (Date.parse(message.delegationConfirmation.expiresAt) > Date.now() && !existing.has(message.delegationConfirmation.id)) {
+        migrated.push(interactionFromPending(message.delegationConfirmation));
+        existing.add(message.delegationConfirmation.id);
+      }
+      return false;
+    });
+    if (visible.length !== messagesRef.current.length) setMessages(visible);
+    if (migrated.length) {
+      const next = [...systemInteractions, ...migrated].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+      setSystemInteractions(next);
+      saveSystemInteractions(workingDir, next);
+    }
+  }, []);
+  useEffect(() => {
+    const timer = setInterval(() => setSystemInteractions((current) => {
+      const active = current.filter((item) => Date.parse(item.expiresAt) > Date.now());
+      if (active.length !== current.length) saveSystemInteractions(workingDir, active);
+      return active.length === current.length ? current : active;
+    }), 30_000);
+    return () => clearInterval(timer);
+  }, [workingDir]);
   const participantsRef = useRef<Participant[]>(participants);
   participantsRef.current = participants;
   const agentContentRef = useRef<Map<string, string>>(new Map());
@@ -258,9 +304,11 @@ export const App: React.FC<AppProps> = ({
   const scheduledTurnRunnerRef = useRef<(turn: ParticipantTurn, context: TurnExecutionContext) => Promise<void>>(async () => {});
   const coordinatorRef = useRef<GroupChatCoordinator | null>(null);
   const configRef = useRef<SquirlConfig>(config ?? {});
+  orchestratorRef.current.setResearchConfig(configRef.current.research);
   const routingMetaLLMRef = useRef<MetaLLM | null>(null);
   const taskMetaLLMRef = useRef<MetaLLM | null>(null);
   if (!routingMetaLLMRef.current) routingMetaLLMRef.current = createConfiguredMetaLLM(configRef.current);
+  orchestratorRef.current.setTurnIntentLLM(routingMetaLLMRef.current);
   const bypassSemanticDelegationRef = useRef<string | null>(null);
   if (!coordinatorRef.current) {
     coordinatorRef.current = new GroupChatCoordinator({
@@ -392,6 +440,10 @@ export const App: React.FC<AppProps> = ({
       {
         workingDir, date: new Date().toISOString().slice(0, 10), modelId: selectedModel.id,
         platform: platform(), shell: process.env.SHELL ?? 'unknown', supportsTools: cfg.supportsTools,
+        research: {
+          available: (configRef.current.research?.consent ?? 'unknown') !== 'denied' && (configRef.current.research?.enabled === true || (configRef.current.research?.consent ?? 'unknown') === 'unknown'),
+          mode: configRef.current.research?.mode ?? 'automatic',
+        },
         displayName: configRef.current.userProfile?.displayName,
         participants: participantsRef.current.map(({ id, label, status, specialty }) => ({ id, label, status, specialty })),
       },
@@ -832,7 +884,7 @@ export const App: React.FC<AppProps> = ({
       onToken: (token, assistant) => { assistantId = assistant.id; lastContent = assistant.content; emit({ type: 'token', participantId: SQUIRL_PARTICIPANT.id, messageId: assistant.id, token }); },
       onDone: () => { if (assistantId) emit({ type: 'message-end', participantId: SQUIRL_PARTICIPANT.id, messageId: assistantId, content: lastContent }); emit({ type: 'turn-end', participantId: SQUIRL_PARTICIPANT.id }); },
       onError: (err) => { emit({ type: 'error', participantId: SQUIRL_PARTICIPANT.id, message: err.message }); emit({ type: 'turn-end', participantId: SQUIRL_PARTICIPANT.id }); },
-      onToolApproval: (_name, args) => new Promise<boolean>((resolve) => setPendingApproval({ command: String(args.command ?? ''), resolve })),
+      onToolApproval: (toolName, args) => new Promise<boolean>((resolve) => setPendingApproval({ command: String(args.command ?? args.query ?? args.url ?? toolName), toolName, resolve })),
       onToolStart: (name) => emit({ type: 'tool-start', participantId: SQUIRL_PARTICIPANT.id, toolId: '', toolName: name, input: {} }),
     }, signal).then(() => undefined);
   }, [selectedModel]);
@@ -911,11 +963,13 @@ export const App: React.FC<AppProps> = ({
     savedInputRef.current = '';
   }, [selectedRecipientId]);
 
-  const executeDelegatedDispatch = useCallback(async (value: string, delegation: DelegationIntent, context: TurnExecutionContext) => {
+  const executeDelegatedDispatch = useCallback(async (value: string, delegation: DelegationIntent, context: TurnExecutionContext, skipUserMessage = false) => {
     const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: value, participantId: SQUIRL_PARTICIPANT.id };
-    const handoffHistory = [...messagesRef.current, userMsg];
-    setMessages((prev) => [...prev, userMsg]);
-    appendMessage(userMsg);
+    const handoffHistory = skipUserMessage ? messagesRef.current : [...messagesRef.current, userMsg];
+    if (!skipUserMessage) {
+      setMessages((prev) => [...prev, userMsg]);
+      appendMessage(userMsg);
+    }
     streamAutoscrollRef.current = true;
     setScrollOffset(0);
     for (const id of delegation.unavailableTargetIds) addToast(`Agent @${id} is not connected. Open Agents and connect it before delegating work.`);
@@ -926,7 +980,11 @@ export const App: React.FC<AppProps> = ({
         const handoff = await orchestratorRef.current.prepareHandoff(
           { id: participant.id, label: participant.label, specialty: participant.specialty },
           delegation.originalRequest,
-          delegation.task,
+          [
+            delegation.task,
+            delegation.action?.context ? `Relevant context: ${delegation.action.context}` : '',
+            delegation.action?.successCriteria ? `Success criteria: ${delegation.action.successCriteria}` : '',
+          ].filter(Boolean).join('\n\n'),
           handoffHistory,
           selectedModelRef.current,
           context.signal,
@@ -947,6 +1005,15 @@ export const App: React.FC<AppProps> = ({
     historyIndexRef.current = -1;
     savedInputRef.current = '';
   }, []);
+
+  const queueHandoffConfirmation = useCallback((pending: PendingDelegationConfirmation) => {
+    setSystemInteractions((current) => {
+      if (current.some((item) => item.id === pending.id)) return current;
+      const next = [...current, interactionFromPending(pending)].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+      saveSystemInteractions(workingDir, next);
+      return next;
+    });
+  }, [workingDir]);
 
   // Auto-start agents configured to launch on startup.
   useEffect(() => {
@@ -1008,10 +1075,10 @@ export const App: React.FC<AppProps> = ({
     streamAutoscrollRef.current = true;
     setScrollOffset(0);
     setTokensPerSecond(0);
-    streamStartRef.current = Date.now();
-    streamTokensRef.current = 0;
+    throughputMeterRef.current.reset();
     latestAssistantRef.current = null;
     let assistantId = '';
+    const completedAnswerRef: { current: AssistantMessage | null } = { current: null };
     const priorMessages = messagesRef.current.filter((message) =>
       !(message.role === 'assistant' && message.isStreaming)
       && !(message.role === 'tool' && message.toolStatus === 'running'));
@@ -1025,28 +1092,35 @@ export const App: React.FC<AppProps> = ({
           onNewMessage: (message) => {
             if (message.role === 'user') message = { ...message, participantId: SQUIRL_PARTICIPANT.id };
             if (message.role === 'assistant') {
+              setSemanticProgress(null);
               message = { ...message, responseMeta: { model: selectedModelRef.current.id } };
               assistantId = message.id;
               latestAssistantRef.current = message;
+              throughputMeterRef.current.reset();
+              setTokensPerSecond(0);
             }
             setMessages((previous) => [...previous, message]);
             if (message.role !== 'assistant') appendMessage(message);
           },
-          onToken: (token, assistant) => {
+          onToken: (_token, assistant) => {
             latestAssistantRef.current = assistant;
-            if (token) streamTokensRef.current++;
-            const elapsed = (Date.now() - streamStartRef.current) / 1000;
-            if (elapsed > 0.5) setTokensPerSecond(Math.round(streamTokensRef.current / elapsed));
+            const liveRate = throughputMeterRef.current.observe(assistant.content);
+            if (liveRate > 0) setTokensPerSecond(liveRate);
             setMessages((previous) => previous.map((message) => message.id === assistant.id && message.role === 'assistant'
               ? { ...message, ...assistant, responseMeta: message.responseMeta }
               : message));
           },
-          onDone: () => {
-            const latest = latestAssistantRef.current;
+          onDone: (usage, assistant) => {
+            setTokensPerSecond(throughputMeterRef.current.complete(usage.completionTokens));
+            latestAssistantRef.current = assistant;
             setMessages((previous) => previous.map((message) => {
               if (message.id !== assistantId || message.role !== 'assistant') return message;
-              const finalized = { ...message, ...(latest?.id === assistantId ? latest : {}), isStreaming: false } as AssistantMessage;
-              appendMessage(finalized);
+              const finalized = {
+                ...message, ...assistant, isStreaming: false, responseState: 'complete' as const,
+                responseMeta: { ...(message.responseMeta ?? { model: selectedModelRef.current.id }), confidenceState: 'pending' as const },
+              } as AssistantMessage;
+              completedAnswerRef.current = finalized;
+              appendMessage({ ...finalized, responseMeta: { ...(finalized.responseMeta ?? { model: selectedModelRef.current.id }), confidenceState: undefined } });
               return finalized;
             }));
           },
@@ -1055,28 +1129,73 @@ export const App: React.FC<AppProps> = ({
               ? { ...message, content: `Error: ${error.message}`, isStreaming: false }
               : message));
           },
-          onToolApproval: (_toolName, args) => new Promise<boolean>((resolve) => {
-            setPendingApproval({ command: args.command as string, resolve });
+          onToolApproval: (toolName, args) => new Promise<boolean>((resolve) => {
+            setPendingApproval({ command: String(args.command ?? args.query ?? args.url ?? toolName), toolName, resolve });
           }),
           onToolStart: (name) => { setToolStatus(`Running ${name}...`); context.setPhase('tool', name); },
           onToolEnd: () => { setToolStatus(''); context.setPhase('working'); },
           onMemoryStart: () => setToolStatus('Recalling...'),
-          onMemoryEnd: (inlineDisplay, queries) => {
+          onMemoryEnd: () => {
             setToolStatus('');
-            if (inlineDisplay) setMessages((previous) => [...previous, {
-              id: crypto.randomUUID(), role: 'tool', toolCallId: 'memory', toolName: '/memory', content: inlineDisplay,
-              memoryLookup: { queries: queries ?? [] },
-            }]);
           },
           onStatus: (stage, detail) => {
             setPipelineStatus({ stage, detail });
-            context.setPhase(stage === 'tool' ? 'tool' : stage === 'context' || stage.startsWith('memory') ? 'preparing' : 'working', detail ?? stage);
+            const preparing = stage === 'context' || stage === 'capability' || stage === 'turn-intent' || stage === 'confidence' || stage.startsWith('memory') || stage.startsWith('research');
+            context.setPhase(stage === 'tool' ? 'tool' : preparing ? 'preparing' : 'working', detail ?? stage);
           },
+          onSemanticProgress: setSemanticProgress,
         },
         context.signal,
       );
+      if (completedAnswerRef.current) {
+        const research = collectResearchProvenance(newMessages, completedAnswerRef.current.content);
+        const answer: AssistantMessage = research
+          ? { ...completedAnswerRef.current, responseMeta: { ...(completedAnswerRef.current.responseMeta ?? { model: selectedModelRef.current.id }), research } }
+          : completedAnswerRef.current;
+        if (research) {
+          setMessages((current) => current.map((message) => message.id === answer.id ? answer : message));
+          appendMessage({ ...answer, responseMeta: { ...(answer.responseMeta ?? { model: selectedModelRef.current.id }), confidenceState: undefined } });
+        }
+        const delegationAgents = new Map<string, DelegationAgent>();
+        for (const profile of configRef.current.agents?.defaults ?? []) {
+          if (profile.id) delegationAgents.set(profile.id, { id: profile.id, label: profile.label, kind: profile.kind, connected: coordinatorRef.current!.hasAgent(profile.id) });
+        }
+        for (const participant of coordinatorRef.current!.listParticipants()) {
+          if (participant.kind === 'claude-code' || participant.kind === 'codex' || participant.kind === 'pi') {
+            delegationAgents.set(participant.id, { id: participant.id, label: participant.label, kind: participant.kind, connected: coordinatorRef.current!.hasAgent(participant.id) });
+          }
+        }
+        const agents = [...delegationAgents.values()];
+        const controller = new AbortController();
+        const generation = ++confidenceGenerationRef.current;
+        confidenceAssessmentRef.current = { messageId: answer.id, generation, controller };
+        void assessSquirlAnswer(value, answer.content, agents, routingMetaLLMRef.current!, research, controller.signal).then((assessment) => {
+          const active = confidenceAssessmentRef.current;
+          if (!active || active.generation !== generation || active.messageId !== answer.id || controller.signal.aborted) return;
+          const assessed: AssistantMessage = {
+            ...answer,
+            responseMeta: {
+              ...(answer.responseMeta ?? { model: selectedModelRef.current.id }),
+              confidence: assessment.confidence,
+              confidenceState: assessment.confidence === null ? 'unavailable' : 'complete',
+            },
+          };
+          setMessages((current) => current.map((message) => message.id === answer.id ? assessed : message));
+          appendMessage(assessed);
+          if (assessment.confidence !== null && assessment.confidence < HANDOFF_CONFIDENCE_THRESHOLD && assessment.action) {
+            const action: HandoffAction = {
+              ...assessment.action,
+              context: [assessment.action.context, `Squirl's preliminary answer (${assessment.confidence}% confidence): ${answer.content}`].filter(Boolean).join('\n\n'),
+            };
+            queueHandoffConfirmation(pendingConfirmation([action.targetId], value, action.task, new Date(), action));
+          }
+        }).finally(() => {
+          if (confidenceAssessmentRef.current?.generation === generation) confidenceAssessmentRef.current = null;
+        });
+      }
       if (ingestQueueRef.current && configRef.current.index?.enabled) {
-        for (const pair of messagesToTurnPairs(newMessages, 'current', 'squirl')) ingestQueueRef.current.enqueue(pair);
+        const indexableMessages = newMessages.filter((message) => message.role !== 'tool' || !message.toolCallId.startsWith('preflight-'));
+        for (const pair of messagesToTurnPairs(indexableMessages, 'current', 'squirl')) ingestQueueRef.current.enqueue(pair);
       }
     } finally {
       streamAutoscrollRef.current = false;
@@ -1086,9 +1205,9 @@ export const App: React.FC<AppProps> = ({
   }, []);
 
   scheduledTurnRunnerRef.current = async (turn, context) => {
-    const metadata = turn.metadata as { kind?: string; delegation?: DelegationIntent } | undefined;
+    const metadata = turn.metadata as { kind?: string; delegation?: DelegationIntent; skipUserMessage?: boolean } | undefined;
     if (metadata?.kind === 'delegation' && metadata.delegation) {
-      await executeDelegatedDispatch(turn.input, metadata.delegation, context);
+      await executeDelegatedDispatch(turn.input, metadata.delegation, context, metadata.skipUserMessage);
     } else if (turn.participantId === SQUIRL_PARTICIPANT.id) {
       await executeSquirlTurn(turn.input, context);
     } else {
@@ -1098,6 +1217,14 @@ export const App: React.FC<AppProps> = ({
 
   const handleSubmit = (value: string) => {
     if (!value.trim()) return;
+    if (selectedRecipientId === SQUIRL_PARTICIPANT.id && confidenceAssessmentRef.current) {
+      const active = confidenceAssessmentRef.current;
+      active.controller.abort();
+      confidenceAssessmentRef.current = null;
+      setMessages((current) => current.map((message) => message.id === active.messageId && message.role === 'assistant'
+        ? { ...message, responseMeta: { ...(message.responseMeta ?? { model: selectedModelRef.current.id }), confidenceState: 'canceled' } }
+        : message));
+    }
 
     // If in slash command mode, use the selected command from the list
     let cmd = matchCommand(value);
@@ -1149,50 +1276,36 @@ export const App: React.FC<AppProps> = ({
         delegationAgents.set(participant.id, { id: participant.id, label: participant.label, kind: participant.kind, connected: coordinatorRef.current!.hasAgent(participant.id) });
       }
       const knownAgents = [...delegationAgents.values()];
-      const pending = recoverPendingDelegation(messagesRef.current);
-      const response = pending ? delegationConfirmationResponse(value) : 'unrelated';
-      if (pending && response === 'confirm') {
-        const targets = pending.targetIds.map((id) => knownAgents.find((agent) => agent.id === id)!).filter(Boolean);
-        runDelegatedDispatch(value.trim(), {
-          targetIds: targets.filter((agent) => agent.connected).map((agent) => agent.id),
-          unavailableTargetIds: targets.filter((agent) => !agent.connected).map((agent) => agent.id),
-          originalRequest: pending.originalRequest,
-          task: pending.task,
-          trigger: 'natural-language',
-        });
-        return;
-      }
-      if (pending && response === 'cancel') {
-        const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: value.trim(), participantId: SQUIRL_PARTICIPANT.id };
-        const assistant: AssistantMessage = { id: crypto.randomUUID(), role: 'assistant', content: 'Okay, I won’t dispatch that work.', createdAt: new Date().toISOString() };
-        setMessages((current) => [...current, userMsg, assistant]);
-        appendMessage(userMsg);
-        appendMessage(assistant);
-        setInputValue('');
-        return;
-      }
-
-      void resolveDelegationIntent(value.trim(), knownAgents, routingMetaLLMRef.current).then((resolution) => {
+      void resolveDelegationIntent(value.trim(), knownAgents, routingMetaLLMRef.current).then(async (resolution) => {
         if (resolution.kind === 'dispatch') {
+          setSemanticProgress(null);
           runDelegatedDispatch(value.trim(), resolution.delegation);
           return;
         }
         if (resolution.kind === 'confirm') {
+          setSemanticProgress(null);
           const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: value.trim(), participantId: SQUIRL_PARTICIPANT.id };
-          const assistant: AssistantMessage = {
-            id: crypto.randomUUID(), role: 'assistant', content: delegationConfirmationText(resolution.pending),
-            proactiveKind: 'delegation-confirmation', delegationConfirmation: resolution.pending,
-            createdAt: new Date().toISOString(),
-          };
-          setMessages((current) => [...current, userMsg, assistant]);
+          setMessages((current) => [...current, userMsg]);
           appendMessage(userMsg);
-          appendMessage(assistant);
+          queueHandoffConfirmation(resolution.pending);
           setInputValue('');
           return;
         }
+        if (resolution.kind === 'none') {
+          setSemanticProgress({
+            stage: 'action-plan', label: 'Request routing', state: 'complete',
+            summary: 'Squirl will answer before considering specialist verification.', output: resolution,
+          });
+        } else {
+          setSemanticProgress({
+            stage: 'action-plan', label: 'Request routing', state: 'complete',
+            summary: 'Squirl will handle this request.', output: resolution,
+          });
+        }
         bypassSemanticDelegationRef.current = value.trim();
         handleSubmit(value.trim());
-      }).catch((error) => addToast(error instanceof Error ? error.message : String(error)));
+      }).catch((error) => { setSemanticProgress(null); addToast(error instanceof Error ? error.message : String(error)); });
+      setSemanticProgress({ stage: 'action-plan', label: 'Checking for explicit delegation…', state: 'running' });
       return;
     }
 
@@ -1211,6 +1324,33 @@ export const App: React.FC<AppProps> = ({
 
   };
 
+  const respondToHandoffConfirmation = (approved: boolean) => {
+    const interaction = systemInteractions[0];
+    if (!interaction) return;
+    const remaining = systemInteractions.slice(1);
+    setSystemInteractions(remaining);
+    saveSystemInteractions(workingDir, remaining);
+    if (!approved) {
+      addToast('Not sent.', 'info');
+      return;
+    }
+    const known = new Map(coordinatorRef.current!.listParticipants().map((participant) => [participant.id, participant]));
+    const targetIds = interaction.pending.targetIds.filter((id) => coordinatorRef.current!.hasAgent(id) && known.has(id));
+    const unavailableTargetIds = interaction.pending.targetIds.filter((id) => !targetIds.includes(id));
+    if (!targetIds.length) {
+      addToast(`Agent ${interaction.pending.targetIds.map((id) => `@${id}`).join(', ')} is not connected.`);
+      return;
+    }
+    schedulerRef.current!.enqueue(SQUIRL_PARTICIPANT.id, interaction.originalRequest, {
+      kind: 'delegation', skipUserMessage: true,
+      delegation: {
+        targetIds, unavailableTargetIds, originalRequest: interaction.originalRequest,
+        task: interaction.pending.task, trigger: 'natural-language',
+        ...(interaction.pending.action?.type === 'handoff' ? { action: interaction.pending.action } : {}),
+      } satisfies DelegationIntent,
+    });
+  };
+
   const commandQuery = inputValue.startsWith('/') ? inputValue.slice(1).toLowerCase() : null;
 
   const modelDisplay = selectedModel.provider === 'local'
@@ -1222,6 +1362,10 @@ export const App: React.FC<AppProps> = ({
   const selectedRewindCandidate = rewindCandidates[Math.min(rewindPickerIndex, Math.max(0, rewindCandidates.length - 1))];
   const rewindCandidateIds = new Set(rewindCandidates.map((candidate) => candidate.message.id));
   const messageListHeight = Math.max(1, terminalRows - FIXED_CHROME_ROWS);
+  const displayedMessages: Message[] = semanticProgress ? [...messages, {
+    id: 'semantic-progress', role: 'assistant', content: formatSemanticProgress(semanticProgress),
+    isStreaming: semanticProgress.state === 'running', responseMeta: { model: selectedModel.id },
+  }] : messages;
 
   return (
     <Box flexDirection="column" height={terminalRows}>
@@ -1255,7 +1399,7 @@ export const App: React.FC<AppProps> = ({
       ) : (
         <>
           <MessageList
-            messages={messages}
+            messages={displayedMessages}
             participants={participants}
             height={messageListHeight}
             showThinking={showThinking}
@@ -1279,7 +1423,20 @@ export const App: React.FC<AppProps> = ({
         </>
       )}
       {pendingApproval ? (
-        <ApprovalPrompt command={pendingApproval.command} onRespond={(approved) => { pendingApproval.resolve(approved); setPendingApproval(null); }} />
+        <ApprovalPrompt command={pendingApproval.command} research={pendingApproval.toolName.startsWith('web_')} onRespond={(approved) => {
+          if (pendingApproval.toolName.startsWith('web_')) {
+            configRef.current = { ...configRef.current, research: {
+              ...configRef.current.research, enabled: approved, consent: approved ? 'allowed' : 'denied',
+              mode: configRef.current.research?.mode ?? 'automatic', searxngUrl: configRef.current.research?.searxngUrl ?? 'http://127.0.0.1:8081',
+              maxResults: configRef.current.research?.maxResults ?? 5,
+            } };
+            saveConfig(configRef.current);
+            orchestratorRef.current.setResearchConfig(configRef.current.research);
+          }
+          pendingApproval.resolve(approved); setPendingApproval(null);
+        }} />
+      ) : systemInteractions[0] ? (
+        <HandoffConfirmationPrompt interaction={systemInteractions[0]} onRespond={respondToHandoffConfirmation} />
       ) : agentInteractions[0] ? (
         <AgentInteractionPrompt participantId={agentInteractions[0].participantId} request={agentInteractions[0].request} onRespond={(response) => {
           const current = agentInteractions[0];

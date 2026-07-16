@@ -26,10 +26,13 @@ export function rankResults(
 
   let values = [...deduped.values()];
   if (opts.filterConversation) {
+    const conversationIds = new Set(conversation.map((message) => message.id));
     const conversationTexts = new Set(
       conversation.filter((m) => m.role === 'user').map((m) => m.content),
     );
-    values = values.filter((r) => !conversationTexts.has(r.turnPair.userText));
+    values = values.filter((r) => r.turnPair.sourceMessageId
+      ? !conversationIds.has(r.turnPair.sourceMessageId)
+      : !conversationTexts.has(r.turnPair.userText));
   }
 
   values.sort((a, b) => a.score - b.score);

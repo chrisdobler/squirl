@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { render } from 'ink';
-import { App } from './app.js';
+import { ApiApp } from './tui/ApiApp.js';
 import { Onboarding } from './components/Onboarding.js';
 import { configExists, loadConfig, saveConfig, applyConfigToEnv } from './config.js';
 import { mouseFilter } from './mouse-filter.js';
@@ -34,7 +34,7 @@ const Root: React.FC = () => {
     );
   }
 
-  return <App config={config} onSetup={() => setShowSetup(true)} />;
+  return <ApiApp />;
 };
 
 export async function launchApp(): Promise<void> {

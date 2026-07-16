@@ -1,11 +1,17 @@
 import { parseMentions } from './mentions.js';
 import type { MetaLLM } from '../search/meta-extract.js';
+import type { Message } from '../types.js';
+import type { HandoffAction, SquirlAction } from './actions.js';
 
 export interface DelegationAgent {
   id: string;
   label?: string;
   kind?: 'claude-code' | 'codex' | 'pi';
   connected: boolean;
+  cwd?: string;
+  specialty?: string;
+  status?: string;
+  currentAssignment?: string;
 }
 
 export interface DelegationIntent {
@@ -14,6 +20,8 @@ export interface DelegationIntent {
   originalRequest: string;
   task: string;
   trigger: 'mention' | 'natural-language';
+  /** Validated proactive action, present only after the user confirmed it. */
+  action?: HandoffAction;
 }
 
 export interface PendingDelegationConfirmation {
@@ -23,17 +31,22 @@ export interface PendingDelegationConfirmation {
   originalRequest: string;
   createdAt: string;
   expiresAt: string;
+  /** Structured proposal that produced this confirmation, when available. */
+  action?: SquirlAction;
 }
 
 export type DelegationResolution =
   | { kind: 'dispatch'; delegation: DelegationIntent }
   | { kind: 'confirm'; pending: PendingDelegationConfirmation }
+  | { kind: 'clarify'; task: string; candidateTargetIds: string[] }
   | { kind: 'none' };
 
 export const DELEGATION_CONFIRMATION_TTL_MS = 10 * 60 * 1000;
 
 const CLASSIFIER_PROMPT = `/no_think
 You are a JSON-only delegation intent classifier. Decide whether the user is explicitly asking Squirl to send work to one or more known agents. Discussion about an agent, questions about prior work, and hypothetical suggestions are not delegation. Requests to resume, continue, reassign, put an agent back on work, or otherwise direct an agent to act are delegation.
+
+The request may be a short contextual approval such as "yeah, let's do it". In that case, use recentContext to recover the actionable task and choose the best connected agent using cwd, specialty, status, and currentAssignment. Only choose delegate/high when both the authorization, task, and target are unambiguous. Otherwise choose uncertain or not_delegate.
 
 Respond with exactly this JSON shape and no markdown:
 {"decision":"delegate|not_delegate|uncertain","confidence":"high|low","targetIds":["known-agent-id"],"task":"the work to send"}
@@ -96,7 +109,7 @@ function intentFor(targetIds: string[], originalRequest: string, task: string, a
   };
 }
 
-function pendingConfirmation(targetIds: string[], originalRequest: string, task: string, now: Date): PendingDelegationConfirmation {
+export function pendingConfirmation(targetIds: string[], originalRequest: string, task: string, now: Date, action?: SquirlAction): PendingDelegationConfirmation {
   return {
     id: crypto.randomUUID(),
     targetIds,
@@ -104,6 +117,7 @@ function pendingConfirmation(targetIds: string[], originalRequest: string, task:
     originalRequest,
     createdAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + DELEGATION_CONFIRMATION_TTL_MS).toISOString(),
+    ...(action ? { action } : {}),
   };
 }
 
@@ -123,16 +137,19 @@ export async function resolveDelegationIntent(
   agents: DelegationAgent[],
   llm: MetaLLM | null,
   now = new Date(),
+  recentContext: Message[] = [],
 ): Promise<DelegationResolution> {
   const deterministic = parseDelegationIntent(input, agents);
   if (deterministic) return { kind: 'dispatch', delegation: deterministic };
 
   const originalRequest = input.trim();
   const referenced = mentionedAgents(originalRequest, agents);
-  if (!originalRequest || referenced.length === 0) return { kind: 'none' };
+  const contextualApproval = /^(?:y|yes|yeah|yep|sure|ok(?:ay)?|go ahead|do it|let'?s do it|yeah,? let'?s do it|please do|implement it|make it happen)[.!]?$/i.test(originalRequest);
+  if (!originalRequest || (referenced.length === 0 && (!contextualApproval || recentContext.length === 0))) return { kind: 'none' };
   const fallbackTargetIds = referenced.map((agent) => agent.id);
 
   if (!llm) {
+    if (fallbackTargetIds.length === 0) return { kind: 'clarify', task: originalRequest, candidateTargetIds: agents.filter((agent) => agent.connected).map((agent) => agent.id) };
     return { kind: 'confirm', pending: pendingConfirmation(fallbackTargetIds, originalRequest, originalRequest, now) };
   }
 
@@ -143,7 +160,12 @@ export async function resolveDelegationIntent(
         role: 'user',
         content: JSON.stringify({
           request: originalRequest,
-          knownAgents: agents.map(({ id, label, kind, connected }) => ({ id, label, kind, connected })),
+          recentContext: recentContext.slice(-12).filter((message) => message.role !== 'tool' && message.role !== 'activity').map((message) => ({
+            role: message.role,
+            participantId: message.participantId,
+            content: message.content.slice(0, 4_000),
+          })),
+          knownAgents: agents.map(({ id, label, kind, connected, cwd, specialty, status, currentAssignment }) => ({ id, label, kind, connected, cwd, specialty, status, currentAssignment })),
           referencedAgentIds: fallbackTargetIds,
         }),
       }],
@@ -159,12 +181,44 @@ export async function resolveDelegationIntent(
 
     if (parsed?.decision === 'not_delegate' && parsed.confidence === 'high') return { kind: 'none' };
     if (parsed?.decision === 'delegate' && parsed.confidence === 'high' && targetsValid && task) {
+      if (contextualApproval && referenced.length === 0 && targetIds.length !== 1) {
+        return { kind: 'clarify', task, candidateTargetIds: targetIds };
+      }
       return { kind: 'dispatch', delegation: intentFor(targetIds, originalRequest, task, agents) };
     }
+    if (contextualApproval && referenced.length === 0 && targetIds.length !== 1) {
+      return { kind: 'clarify', task, candidateTargetIds: targetIds.length ? targetIds : agents.filter((agent) => agent.connected).map((agent) => agent.id) };
+    }
+    if (targetIds.length === 0) return { kind: 'none' };
     return { kind: 'confirm', pending: pendingConfirmation(targetIds, originalRequest, task, now) };
   } catch {
+    if (fallbackTargetIds.length === 0) return { kind: 'clarify', task: originalRequest, candidateTargetIds: agents.filter((agent) => agent.connected).map((agent) => agent.id) };
     return { kind: 'confirm', pending: pendingConfirmation(fallbackTargetIds, originalRequest, originalRequest, now) };
   }
+}
+
+export interface LegacyHandoffProposal {
+  targetId: string;
+  task: string;
+  originalRequest: string;
+}
+
+/** Parse only Squirl's bounded handoff format; never treat arbitrary mentions as delivery. */
+export function parseLegacyHandoffProposal(content: string, agents: DelegationAgent[]): LegacyHandoffProposal | null {
+  const header = content.match(/^Handoff to @([a-zA-Z0-9_-]+)\s*(?:\n|$)/i);
+  if (!header || !agents.some((agent) => agent.id.toLowerCase() === header[1]!.toLowerCase())) return null;
+  const target = agents.find((agent) => agent.id.toLowerCase() === header[1]!.toLowerCase())!;
+  const goal = content.match(/(?:^|\n)Goal:\s*([^\n]+(?:\n(?!\n|[A-Z][\w ]+:)[^\n]+)*)/i)?.[1]?.trim();
+  const original = content.match(/(?:^|\n)Original request:\s*([\s\S]+)$/i)?.[1]?.trim();
+  return { targetId: target.id, task: goal || original || content.trim(), originalRequest: original || goal || content.trim() };
+}
+
+export function pendingFromLegacyHandoff(proposal: LegacyHandoffProposal, now = new Date()): PendingDelegationConfirmation {
+  return pendingConfirmation([proposal.targetId], proposal.originalRequest, proposal.task, now);
+}
+
+export function isRetryLastHandoff(input: string): boolean {
+  return /^(?:please\s+)?retry\s+(?:that|the)\s+(?:last\s+)?handoff[.!?]?$/i.test(input.trim());
 }
 
 export function delegationConfirmationText(pending: PendingDelegationConfirmation): string {

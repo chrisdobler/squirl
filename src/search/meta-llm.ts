@@ -4,13 +4,14 @@ import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { searchLog } from './debug.js';
 
-const META_LLM_TIMEOUT_MS = 5_000;
+export const META_LLM_TIMEOUT_MS = 5_000;
+export const TASK_META_LLM_TIMEOUT_MS = 60_000;
 
 type OpenAICreateFn = (params: {
   model: string;
   messages: Array<{ role: string; content: string }>;
   max_tokens?: number;
-}) => Promise<{ choices: Array<{ message: { content: string | null } }> }>;
+}, options?: { signal?: AbortSignal }) => Promise<{ choices: Array<{ message: { content: string | null } }> }>;
 
 interface OpenAIMetaLLMOptions {
   model: string;
@@ -33,18 +34,22 @@ export class OpenAIMetaLLM implements MetaLLM {
       this.create = opts.createFn;
     } else {
       const client = new OpenAI({
-        apiKey: opts.apiKey ?? process.env.OPENAI_API_KEY ?? '',
+        // Newer SDK releases reject an empty key during construction. Local
+        // OpenAI-compatible servers do not require one, and hosted requests
+        // should fail at request time with their normal authentication error.
+        apiKey: opts.apiKey ?? process.env.OPENAI_API_KEY ?? 'not-configured',
         ...(opts.baseUrl ? { baseURL: opts.baseUrl } : {}),
         timeout: opts.timeoutMs ?? META_LLM_TIMEOUT_MS,
         maxRetries: 0,
       });
-      this.create = (params) => client.chat.completions.create(params as any) as any;
+      this.create = (params, options) => client.chat.completions.create(params as any, options) as any;
     }
   }
 
   async complete(params: {
     systemPrompt: string;
     messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+    signal?: AbortSignal;
   }): Promise<string> {
     const request = {
       model: this.model,
@@ -57,7 +62,7 @@ export class OpenAIMetaLLM implements MetaLLM {
       ...(this.isLocal ? { chat_template_kwargs: { enable_thinking: false } } : {}),
     };
     searchLog('META-LLM RAW REQUEST', { model: this.model, messageCount: request.messages.length });
-    const response = await this.create(request);
+    const response = params.signal ? await this.create(request, { signal: params.signal }) : await this.create(request);
     searchLog('META-LLM RAW RESPONSE', { content: response.choices[0]?.message?.content, finishReason: (response.choices[0] as any)?.finish_reason });
     return response.choices[0]?.message?.content ?? '';
   }
@@ -69,7 +74,7 @@ type AnthropicCreateFn = (params: {
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   max_tokens: number;
   temperature?: number;
-}) => Promise<{ content: Array<{ type: string; text: string }> }>;
+}, options?: { signal?: AbortSignal }) => Promise<{ content: Array<{ type: string; text: string }> }>;
 
 interface AnthropicMetaLLMOptions {
   model: string;
@@ -92,21 +97,23 @@ export class AnthropicMetaLLM implements MetaLLM {
         timeout: opts.timeoutMs ?? META_LLM_TIMEOUT_MS,
         maxRetries: 0,
       });
-      this.create = (params) => client.messages.create(params as any) as any;
+      this.create = (params, options) => client.messages.create(params as any, options) as any;
     }
   }
 
   async complete(params: {
     systemPrompt: string;
     messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+    signal?: AbortSignal;
   }): Promise<string> {
-    const response = await this.create({
+    const request = {
       model: this.model,
       system: params.systemPrompt,
       messages: params.messages,
       max_tokens: 1024,
       temperature: 0,
-    });
+    };
+    const response = params.signal ? await this.create(request, { signal: params.signal }) : await this.create(request);
     const textBlock = response.content.find((b) => b.type === 'text');
     return textBlock?.text ?? '';
   }
@@ -153,4 +160,9 @@ export function createConfiguredMetaLLM(config: SquirlConfig, timeoutMs?: number
     ...(provider === 'local' && config.localBaseUrl ? { baseUrl: config.localBaseUrl } : {}),
     ...(timeoutMs ? { timeoutMs } : {}),
   });
+}
+
+/** Build the slower JSON model used by current-task and Scrum classification. */
+export function createConfiguredTaskMetaLLM(config: SquirlConfig): MetaLLM {
+  return createConfiguredMetaLLM(config, TASK_META_LLM_TIMEOUT_MS);
 }

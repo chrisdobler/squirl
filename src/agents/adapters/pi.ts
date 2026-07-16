@@ -13,6 +13,7 @@ export class PiAdapter extends BaseAgentSession {
   private startupResolve: (() => void) | null = null;
   private startupReject: ((error: Error) => void) | null = null;
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
+  private compactPending: { id: string; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
 
   constructor(descriptor: AgentDescriptor, transport: AgentTransport) {
     super(descriptor, transport);
@@ -29,7 +30,9 @@ export class PiAdapter extends BaseAgentSession {
     const args = ['--mode', 'rpc'];
     if (d.model) args.push('--model', d.model);
     if (d.effort) args.push('--thinking', d.effort);
-    if (d.sessionId) args.push('--session', d.sessionId);
+    // `--session-id` resumes an existing project session but also recreates the
+    // same empty session after a handoff that happened before PI wrote JSONL.
+    if (d.sessionId) args.push('--session-id', d.sessionId);
     if (d.piToolMode === 'read-only') args.push('--tools', 'read,grep,find,ls');
     if (d.piToolMode !== 'read-only') {
       const compiled = fileURLToPath(new URL('../pi-permission-gate.js', import.meta.url));
@@ -59,6 +62,18 @@ export class PiAdapter extends BaseAgentSession {
     let stderr = '';
     handle.onStderr((line) => { stderr = `${stderr}\n${line}`.trim().slice(-4000); });
     handle.onStdout((line) => {
+      if (this.compactPending) {
+        try {
+          const value = JSON.parse(line) as { id?: string; success?: boolean; error?: string };
+          if (value.id === this.compactPending.id) {
+            const pending = this.compactPending;
+            this.compactPending = null;
+            clearTimeout(pending.timer);
+            if (value.success === false) pending.reject(new Error(value.error || 'PI compaction failed.'));
+            else pending.resolve();
+          }
+        } catch { /* The normal parser owns non-response lines. */ }
+      }
       for (const event of this.parser.push(line)) {
         if (event.type === 'interaction-request') this.pendingInteractions.set(event.request.id, event.request);
         if (event.type === 'session-status' && event.sessionId) this.descriptor.sessionId = event.sessionId;
@@ -114,6 +129,23 @@ export class PiAdapter extends BaseAgentSession {
     this.write({ type: 'abort', id: `abort-${Date.now()}` });
   }
 
+  async compact(): Promise<void> {
+    if (!this.handle) throw new Error(`Agent ${this.descriptor.id} is not started`);
+    if (this.status === 'busy') throw new Error(`Agent ${this.descriptor.id} is busy`);
+    if (this.compactPending) throw new Error(`Agent ${this.descriptor.id} is already compacting`);
+    const id = `squirl-compact-${Date.now()}`;
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.compactPending?.id !== id) return;
+        this.compactPending = null;
+        reject(new Error('PI compaction timed out.'));
+      }, 120_000);
+      this.compactPending = { id, resolve, reject, timer };
+      this.write({ type: 'compact', id });
+    });
+    this.write({ type: 'get_session_stats', id: `stats-${Date.now()}` });
+  }
+
   async respondToInteraction(id: string, response: AgentInteractionResponse): Promise<void> {
     const request = this.pendingInteractions.get(id);
     if (!request) return;
@@ -129,6 +161,11 @@ export class PiAdapter extends BaseAgentSession {
   }
 
   async stop(): Promise<void> {
+    if (this.compactPending) {
+      clearTimeout(this.compactPending.timer);
+      this.compactPending.reject(new Error('PI stopped before compaction finished.'));
+      this.compactPending = null;
+    }
     for (const id of this.pendingInteractions.keys()) this.write({ type: 'extension_ui_response', id, cancelled: true });
     this.pendingInteractions.clear();
     if (this.startupTimer) clearTimeout(this.startupTimer);

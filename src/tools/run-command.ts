@@ -1,5 +1,6 @@
 import { execSync } from 'child_process';
 import { resolve } from 'path';
+import { statSync } from 'fs';
 import type { ToolDefinition } from './registry.js';
 
 const MAX_OUTPUT = 10_000;
@@ -42,7 +43,14 @@ export const runCommandTool: ToolDefinition = {
     },
   },
   execute: async (args, defaultCwd) => {
-    const cwd = args.cwd ? resolve(defaultCwd, args.cwd as string) : defaultCwd;
+    if (typeof args.command !== 'string' || !args.command.trim()) return 'Error: command must be a non-empty string.';
+    if (args.cwd !== undefined && (typeof args.cwd !== 'string' || !args.cwd.trim())) return 'Error: working directory must be a non-empty string.';
+    const cwd = typeof args.cwd === 'string' ? resolve(defaultCwd, args.cwd) : defaultCwd;
+    try {
+      if (!statSync(cwd).isDirectory()) return 'Error: working directory does not exist or is not a directory.';
+    } catch {
+      return 'Error: working directory does not exist or is not a directory.';
+    }
     try {
       const output = execSync(args.command as string, {
         cwd,
@@ -57,13 +65,17 @@ export const runCommandTool: ToolDefinition = {
       }
       return trimmed || '(no output)';
     } catch (err: unknown) {
-      if (err && typeof err === 'object' && 'stdout' in err && 'stderr' in err) {
-        const e = err as { stdout: string; stderr: string; status: number };
-        const output = `${e.stdout}\n${e.stderr}`.trim();
+      if (err && typeof err === 'object') {
+        const e = err as { stdout?: string | Buffer; stderr?: string | Buffer; status?: number | null; signal?: string };
+        const stdout = typeof e.stdout === 'string' ? e.stdout : e.stdout?.toString() ?? '';
+        const stderr = typeof e.stderr === 'string' ? e.stderr : e.stderr?.toString() ?? '';
+        const output = `${stdout}\n${stderr}`.trim() || (err instanceof Error ? err.message : '');
         const truncated = output.length > MAX_OUTPUT
           ? output.slice(0, MAX_OUTPUT) + `\n... [truncated]`
           : output;
-        return `Command exited with code ${e.status}:\n${truncated}`;
+        const outcome = typeof e.status === 'number' ? `exited with code ${e.status}`
+          : e.signal ? `stopped by signal ${e.signal}` : 'failed to start';
+        return `Command ${outcome}${truncated ? `:\n${truncated}` : '.'}`;
       }
       return `Error: ${err instanceof Error ? err.message : String(err)}`;
     }

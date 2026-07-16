@@ -55,6 +55,13 @@ describe('rankResults', () => {
     expect(out.map((r) => r.id)).toEqual(['r1', 'r2']);
   });
 
+  it('filters hydrated chunks by canonical source message id instead of repeated text', () => {
+    const result = sr('r1', 'same words', 0.1);
+    result.turnPair.sourceMessageId = 'source-1';
+    expect(rankResults([result], [userMsg('same words')], { recallK: 10, filterConversation: true })).toHaveLength(1);
+    expect(rankResults([result], [{ id: 'source-1', role: 'assistant', content: 'different rendering' }], { recallK: 10, filterConversation: true })).toHaveLength(0);
+  });
+
   it('matches the original inline ranking (parity)', () => {
     const allResults = [
       sr('r1', 'docker setup', 0.5), sr('r2', 'chroma config', 0.3),

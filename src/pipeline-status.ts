@@ -1,10 +1,16 @@
 export type QueryPipelineStage =
   | 'context'
+  | 'capability'
+  | 'turn-intent'
   | 'memory-query'
   | 'memory-embed'
   | 'vectordb'
+  | 'research-consent'
+  | 'research-search'
+  | 'research-fetch'
   | 'model-connect'
   | 'model-stream'
+  | 'confidence'
   | 'tool';
 
 export interface QueryPipelineStatus {
@@ -14,20 +20,32 @@ export interface QueryPipelineStatus {
 
 export const QUERY_PIPELINE_STAGES: QueryPipelineStage[] = [
   'context',
+  'capability',
+  'turn-intent',
   'memory-query',
   'memory-embed',
   'vectordb',
+  'research-consent',
+  'research-search',
+  'research-fetch',
   'model-connect',
   'model-stream',
+  'confidence',
 ];
 
 export const QUERY_PIPELINE_LABELS: Record<QueryPipelineStage, string> = {
   context: 'ctx',
+  capability: 'tools',
+  'turn-intent': 'classify',
   'memory-query': 'mem query',
   'memory-embed': 'embed',
   vectordb: 'VectorDB',
+  'research-consent': 'research consent',
+  'research-search': 'web search',
+  'research-fetch': 'web fetch',
   'model-connect': 'model',
   'model-stream': 'stream',
+  confidence: 'confidence',
   tool: 'tool',
 };
 

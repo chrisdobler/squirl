@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { delegationConfirmationResponse, parseDelegationIntent, recoverPendingDelegation, resolveDelegationIntent, type DelegationAgent } from './delegation.js';
+import { delegationConfirmationResponse, isRetryLastHandoff, parseDelegationIntent, parseLegacyHandoffProposal, recoverPendingDelegation, resolveDelegationIntent, type DelegationAgent } from './delegation.js';
 import type { MetaLLM } from '../search/meta-extract.js';
 
 const agents: DelegationAgent[] = [
@@ -105,6 +105,36 @@ describe('resolveDelegationIntent', () => {
     await expect(resolveDelegationIntent('@codex do this', agents, llm)).resolves.toMatchObject({ kind: 'dispatch' });
     await expect(resolveDelegationIntent('How are you?', agents, llm)).resolves.toEqual({ kind: 'none' });
     expect(calls).toBe(0);
+  });
+
+  it('uses recent context to resolve a clear approval with an inferred target', async () => {
+    const result = await resolveDelegationIntent(
+      "yeah let's do it", agents,
+      llmReturning('{"decision":"delegate","confidence":"high","targetIds":["codex"],"task":"Implement the recommended timeout fix."}'),
+      new Date(),
+      [{ id: 'a1', role: 'assistant', participantId: 'cc', content: 'Recommended fix: increase the Scrum timeout.' }],
+    );
+    expect(result).toMatchObject({ kind: 'dispatch', delegation: { targetIds: ['codex'], task: 'Implement the recommended timeout fix.' } });
+  });
+
+  it('does not guess when a contextual approval has no confident target', async () => {
+    const result = await resolveDelegationIntent(
+      'do it', agents,
+      llmReturning('{"decision":"uncertain","confidence":"low","targetIds":[],"task":"Implement the fix."}'),
+      new Date(),
+      [{ id: 'a1', role: 'assistant', content: 'There are several possible ways to proceed.' }],
+    );
+    expect(result).toEqual({ kind: 'clarify', task: 'Implement the fix.', candidateTargetIds: ['cc', 'codex', 'pi'] });
+  });
+});
+
+describe('legacy handoff recovery', () => {
+  it('parses only the bounded handoff format for a known target', () => {
+    expect(parseLegacyHandoffProposal('Handoff to @codex\n\nGoal: Implement the fix.\n\nOriginal request: Please fix it.', agents)).toEqual({
+      targetId: 'codex', task: 'Implement the fix.', originalRequest: 'Please fix it.',
+    });
+    expect(parseLegacyHandoffProposal('Maybe ask @codex about this', agents)).toBeNull();
+    expect(isRetryLastHandoff('retry that last handoff?')).toBe(true);
   });
 });
 

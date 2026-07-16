@@ -88,6 +88,17 @@ describe('MemoryPipeline', () => {
     expect(result.results).toHaveLength(0);
   });
 
+  it('does not suppress old same-room history outside the recent direct window', async () => {
+    const store = mockStore([[sr('r1', 'old request', 0.1)], []]);
+    const pipeline = new MemoryPipeline(mockLLM(), mockEmbedder(), store, { recallK: 10, filterRecentMessages: 2 });
+    const conversation: Message[] = [
+      { id: 'old', role: 'user', content: 'old request' },
+      { id: 'a', role: 'assistant', content: 'old answer' },
+      { id: 'new', role: 'user', content: 'remember the old request' },
+    ];
+    expect((await pipeline.retrieve(conversation, 'test')).results).toHaveLength(1);
+  });
+
   it('returns empty result if meta-extraction fails', async () => {
     const llm: MetaLLM = { complete: vi.fn().mockRejectedValue(new Error('fail')) };
     const pipeline = new MemoryPipeline(llm, mockEmbedder(), mockStore([]), { recallK: 10 });
@@ -96,5 +107,18 @@ describe('MemoryPipeline', () => {
     expect(result.systemMessage).toBe('');
     expect(result.inlineDisplay).toBe('');
     expect(result.queries).toEqual([]);
+  });
+
+  it('uses explicit fallback queries without awaiting semantic extraction', async () => {
+    const llm: MetaLLM = { complete: vi.fn(() => new Promise<string>(() => {})) };
+    const embedder = mockEmbedder();
+    const pipeline = new MemoryPipeline(llm, embedder, mockStore([[sr('r1', 'current request', 0.1)]]), { recallK: 10 });
+
+    const result = await pipeline.retrieve([], 'current request', undefined, undefined, undefined, ['current request']);
+
+    expect(llm.complete).not.toHaveBeenCalled();
+    expect(embedder.embed).toHaveBeenCalledWith(['current request']);
+    expect(result.queries).toEqual(['current request']);
+    expect(result.results).toHaveLength(1);
   });
 });

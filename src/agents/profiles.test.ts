@@ -27,8 +27,8 @@ describe('agent profiles', () => {
   });
 
   it('preserves optional model effort on persisted profiles', () => {
-    const profile = materializeProfile({ kind: 'claude-code', id: 'writer', model: 'fable', effort: 'medium' }, '/repo');
-    expect(profile).toMatchObject({ model: 'fable', effort: 'medium' });
+    const profile = materializeProfile({ kind: 'claude-code', id: 'writer', model: 'fable', effort: 'medium', sessionId: 'session-1' }, '/repo');
+    expect(profile).toMatchObject({ model: 'fable', effort: 'medium', sessionId: 'session-1' });
   });
 
   it('preserves PI thinking and tool posture', () => {

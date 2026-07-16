@@ -29,7 +29,7 @@ describe('PiAdapter', () => {
 
   it('uses the explicit read-only tool allowlist', async () => {
     const { transport } = await startedAgent({ piToolMode: 'read-only', sessionId: 'resume-me' });
-    expect(transport.lastSpawn.spec.args).toContain('--session');
+    expect(transport.lastSpawn.spec.args).toEqual(expect.arrayContaining(['--session-id', 'resume-me']));
     expect(transport.lastSpawn.spec.args.join(' ')).toContain('--tools read,grep,find,ls');
   });
 
@@ -55,6 +55,16 @@ describe('PiAdapter', () => {
     transport.lastSpawn.handle.emitStdout(JSON.stringify({ type: 'response', command: 'get_session_stats', success: true, data: { tokens: { input: 12, output: 3 }, contextUsage: { tokens: 15, contextWindow: 1000 } } }));
     expect(events.map((event) => event.type).slice(-2)).toEqual(['usage', 'turn-end']);
     expect(agent.status).toBe('ready');
+  });
+
+  it('runs native compaction over RPC and refreshes session stats', async () => {
+    const { agent, transport } = await startedAgent();
+    const compacting = agent.compact();
+    const command = transport.lastSpawn.handle.writes.map((line) => JSON.parse(line)).find((value) => value.type === 'compact');
+    expect(command).toMatchObject({ type: 'compact' });
+    transport.lastSpawn.handle.emitStdout(JSON.stringify({ type: 'response', id: command.id, command: 'compact', success: true, data: {} }));
+    await compacting;
+    expect(transport.lastSpawn.handle.writes.map((line) => JSON.parse(line))).toContainEqual(expect.objectContaining({ type: 'get_session_stats' }));
   });
 
   it('reports a missing PI binary without installing or changing the system', async () => {

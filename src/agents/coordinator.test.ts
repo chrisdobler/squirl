@@ -125,6 +125,20 @@ describe('GroupChatCoordinator', () => {
     expect(h.coordinator.getContextTelemetry('cc')).toBeUndefined();
   });
 
+  it('hands exclusive control to a terminal and resumes headless with identity intact', async () => {
+    const h = makeHarness();
+    await h.coordinator.addAgent({ ...descriptor('cc'), sessionId: 'session-1' });
+    const before = h.coordinator.listParticipants().find((participant) => participant.id === 'cc')!;
+    const suspended = await h.coordinator.suspendAgent('cc', 'terminal');
+    expect(suspended.sessionId).toBe('session-1');
+    expect(h.coordinator.hasAgent('cc')).toBe(false);
+    expect(h.coordinator.listParticipants().find((participant) => participant.id === 'cc')).toMatchObject({ color: before.color, controlMode: 'terminal' });
+    await expect(h.coordinator.dispatchTo('cc', 'work', new AbortController().signal)).rejects.toThrow('terminal mode');
+    await h.coordinator.resumeAgent(suspended);
+    expect(h.coordinator.hasAgent('cc')).toBe(true);
+    expect(h.coordinator.listParticipants().find((participant) => participant.id === 'cc')).toMatchObject({ color: before.color, controlMode: 'headless' });
+  });
+
   it('does NOT hand off when autoHandoff is disabled', async () => {
     const h = makeHarness({ autoHandoff: false, replies: { cc: () => 'done, @codex please run tests' } });
     await h.coordinator.addAgent(descriptor('cc'));
