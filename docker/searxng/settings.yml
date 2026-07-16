@@ -1,0 +1,14 @@
+use_default_settings: true
+
+server:
+  bind_address: "0.0.0.0"
+  port: 8080
+  # Development-only session-signing value. Override this file for a remotely exposed instance.
+  secret_key: "squirl-development-only-change-me"
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json

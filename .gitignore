@@ -5,6 +5,7 @@ dist-web/
 .DS_Store
 *.log
 .env
+Makefile.local
 
 # eval harness run outputs (fixtures under src/search/eval/fixtures are committed)
 results/

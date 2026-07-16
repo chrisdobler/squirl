@@ -1,4 +1,16 @@
 services:
+  searxng:
+    image: squirl-searxng:local
+    build: ./docker/searxng
+    container_name: squirl-searxng
+    restart: unless-stopped
+    ports:
+      - "${SEARXNG_HOST_PORT:-8081}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
   chroma:
     image: chromadb/chroma:latest
     ports:
@@ -10,20 +22,56 @@ services:
   chroma-admin:
     image: squirl-chroma-admin:local
     build: ./chroma-viewer
+    container_name: squirl-chroma-admin
     environment:
       CHROMA_HOST: chroma
       CHROMA_PORT: "8000"
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
     ports:
-      - "3001:8501"
+      - "${CHROMA_ADMIN_HOST_PORT:-3001}:8501"
     depends_on:
       - chroma
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
   postgres:
-    image: postgres:15
-    restart: always
+    image: squirl-postgres:local
+    build: ./docker/postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: vectoradmin
-      POSTGRES_PASSWORD: vectoradmin
-      POSTGRES_DB: vectoradmin
+      POSTGRES_USER: squirl
+      POSTGRES_PASSWORD: squirl-dev-only
+      POSTGRES_DB: squirl
     ports:
       - "5432:5432"
+    volumes:
+      - squirl-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U squirl -d squirl"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  adminer:
+    image: squirl-adminer:local
+    build: ./docker/adminer
+    container_name: squirl-adminer
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+      ADMINER_AUTOLOGIN: "${ADMINER_AUTOLOGIN:-1}"
+      ADMINER_AUTOLOGIN_DRIVER: pgsql
+      ADMINER_AUTOLOGIN_SERVER: postgres
+      ADMINER_AUTOLOGIN_USERNAME: squirl
+      ADMINER_AUTOLOGIN_PASSWORD: squirl-dev-only
+      ADMINER_AUTOLOGIN_DATABASE: squirl
+    ports:
+      - "${ADMINER_HOST_PORT:-8080}:8080"
+
+volumes:
+  squirl-postgres-data:
