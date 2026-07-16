@@ -23,6 +23,7 @@ export interface TaskActivityState {
   tasks: TaskActivityItem[];
   generatedAt: string | null;
   status: TaskActivityStatus;
+  error: string | null;
   calendar: {
     status: 'disconnected' | 'authorization-required' | 'refreshing' | 'ready' | 'stale';
     connected: boolean;

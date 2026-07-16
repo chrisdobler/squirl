@@ -42,6 +42,8 @@ export interface TaskCalendarSyncEntry {
   lastSeenAt: string;
   /** Latest user-evidence timestamp that was classified into this task. */
   lastActiveAt?: string;
+  /** First refresh at which this active task was absent from the inferred snapshot. */
+  missingSince?: string;
   status: 'active' | 'ended';
 }
 

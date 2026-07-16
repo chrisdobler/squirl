@@ -9,6 +9,7 @@ export const calendarSnapshotPath = () => join(homedir(), '.squirl', 'calendar-a
 export const calendarAuthPath = () => join(homedir(), '.squirl', 'google-calendar-auth.json');
 export const calendarClientCredentialsPath = () => join(homedir(), '.squirl', 'google-calendar-client.json');
 export const taskCalendarSyncPath = () => join(homedir(), '.squirl', 'calendar-task-sync.json');
+export const calendarRepairAuditPath = (generatedAt = new Date().toISOString()) => join(homedir(), '.squirl', `calendar-task-repair-${generatedAt.replace(/[:.]/g, '-')}.json`);
 
 function atomicWrite(path: string, value: unknown): void {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -28,6 +29,7 @@ export function saveCalendarSnapshot(value: CalendarSnapshot, path = calendarSna
 export function saveCalendarTokens(value: GoogleCalendarTokens, path = calendarAuthPath()): void { atomicWrite(path, value); }
 export function saveCalendarClientCredentials(value: GoogleCalendarClientCredentials, path = calendarClientCredentialsPath()): void { atomicWrite(path, value); }
 export function saveTaskCalendarSync(value: TaskCalendarSyncSnapshot, path = taskCalendarSyncPath()): void { atomicWrite(path, value); }
+export function saveCalendarRepairAudit(value: unknown, path = calendarRepairAuditPath()): string { atomicWrite(path, value); return path; }
 export function clearCalendarCredentials(path = calendarAuthPath()): void { rmSync(path, { force: true }); }
 export function clearCalendarClientCredentials(path = calendarClientCredentialsPath()): void { rmSync(path, { force: true }); }
 export function clearCalendarSnapshot(path = calendarSnapshotPath()): void { rmSync(path, { force: true }); }
@@ -66,7 +68,8 @@ export function loadTaskCalendarSync(path = taskCalendarSyncPath()): TaskCalenda
     const valid = value.entries.every((entry) => entry && typeof entry.taskId === 'string' && typeof entry.title === 'string'
       && typeof entry.calendarId === 'string' && typeof entry.eventId === 'string' && Number.isFinite(Date.parse(entry.startAt))
       && Number.isFinite(Date.parse(entry.endAt)) && Number.isFinite(Date.parse(entry.lastSeenAt))
-      && (entry.lastActiveAt == null || Number.isFinite(Date.parse(entry.lastActiveAt))) && ['active', 'ended'].includes(entry.status));
+      && (entry.lastActiveAt == null || Number.isFinite(Date.parse(entry.lastActiveAt)))
+      && (entry.missingSince == null || Number.isFinite(Date.parse(entry.missingSince))) && ['active', 'ended'].includes(entry.status));
     return valid ? value : { version: 1, entries: [] };
   } catch { return { version: 1, entries: [] }; }
 }

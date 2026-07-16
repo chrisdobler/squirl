@@ -131,6 +131,20 @@ export class GoogleCalendarClient {
     });
   }
 
+  async deleteTaskEvent(calendarId: string, eventId: string): Promise<void> {
+    const response = await this.request(`${API_URL}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${await this.accessToken()}` },
+    });
+    if (response.ok || response.status === 404 || response.status === 410) return;
+    let message = `Google Calendar delete failed (${response.status}).`;
+    try {
+      const value = await response.json();
+      if (typeof (value as any)?.error?.message === 'string') message = (value as any).error.message;
+    } catch { /* Preserve the status-based error. */ }
+    throw new Error(message);
+  }
+
   async listCalendars(selectedIds: string[]): Promise<CalendarDescriptor[]> {
     const items: any[] = [];
     let pageToken = '';

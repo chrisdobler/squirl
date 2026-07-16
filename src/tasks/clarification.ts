@@ -5,6 +5,10 @@ import type { TaskActivitySnapshot } from './types.js';
 export const TASK_CLARIFICATION_DELAY_MS = 5 * 60 * 1000;
 export const TASK_CLARIFICATION_CHECK_MS = 60 * 1000;
 
+export type TaskClarificationState =
+  | { phase: 'known'; unknownSince: null }
+  | { phase: 'unknown-unasked' | 'unknown-asked'; unknownSince: number };
+
 export function hasCurrentTask(options: {
   snapshot: TaskActivitySnapshot | null;
   calendarEvents: CalendarEventRecord[];
@@ -24,13 +28,13 @@ export function taskUncertaintyStart(options: {
   calendarEvents: CalendarEventRecord[];
   now: number;
   lastAskedAt?: number | null;
+  taskWindowMs?: number;
 }): number | null {
-  const { snapshot, calendarEvents, now, lastAskedAt = null } = options;
+  const { snapshot, calendarEvents, now, lastAskedAt = null, taskWindowMs = 0 } = options;
   const activityBoundaries = [
-    ...(snapshot?.tasks.map((task) => task.lastActiveAt) ?? []),
-    ...calendarEvents.map((event) => event.endAt),
+    ...(snapshot?.tasks.map((task) => Date.parse(task.lastActiveAt) + taskWindowMs) ?? []),
+    ...calendarEvents.map((event) => Date.parse(event.endAt)),
   ]
-    .map((value) => value ? Date.parse(value) : Number.NaN)
     .filter((timestamp) => Number.isFinite(timestamp) && timestamp <= now);
   const latestActivityBoundary = activityBoundaries.length > 0 ? Math.max(...activityBoundaries) : null;
 
@@ -58,13 +62,29 @@ export function lastTaskClarificationAt(messages: Message[]): number | null {
 
 export function shouldAskTaskClarification(options: {
   now: number;
-  unknownSince: number | null;
-  lastAskedAt: number | null;
+  state: TaskClarificationState;
   isBusy: boolean;
 }): boolean {
-  const { now, unknownSince, lastAskedAt, isBusy } = options;
-  if (isBusy || unknownSince == null || now - unknownSince < TASK_CLARIFICATION_DELAY_MS) return false;
-  return lastAskedAt == null || lastAskedAt < unknownSince;
+  const { now, state, isBusy } = options;
+  return !isBusy
+    && state.phase === 'unknown-unasked'
+    && now - state.unknownSince >= TASK_CLARIFICATION_DELAY_MS;
+}
+
+export function recoverTaskClarificationState(options: {
+  known: boolean;
+  unknownSince: number;
+  lastAskedAt: number | null;
+}): TaskClarificationState {
+  const { known, unknownSince, lastAskedAt } = options;
+  if (known) return { phase: 'known', unknownSince: null };
+  return {
+    // Historical task/calendar boundaries do not prove that this runtime
+    // actually observed awareness after asking. On restart, keep the latch
+    // closed unless awareness is positive right now.
+    phase: lastAskedAt != null ? 'unknown-asked' : 'unknown-unasked',
+    unknownSince: lastAskedAt ?? unknownSince,
+  };
 }
 
 export function taskClarificationQuestion(displayName?: string): string {

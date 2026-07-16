@@ -4,6 +4,7 @@ import type { MetaLLM } from '../search/meta-extract.js';
 import { recall } from '../search/recall.js';
 import type { Embedder, SearchResult, VectorStore } from '../search/types.js';
 import type { CalendarEventRecord } from '../calendar/types.js';
+import { normalizeTaskTitle } from './continuity.js';
 import type { TaskActivityEvidence, TaskActivityItem, TaskActivitySnapshot } from './types.js';
 
 const SYSTEM_PROMPT = `/no_think
@@ -57,8 +58,9 @@ export function taskTitleProblem(value: string): string | null {
 }
 
 function classifierInput(evidence: TaskActivityEvidence[], calendarEvents: CalendarEventRecord[], memories: SearchResult[], previous: TaskActivitySnapshot | null): string {
+  const recentEvidence = evidence.slice(-8);
   return JSON.stringify({
-    recentEvidence: evidence.map((item) => ({
+    recentEvidence: recentEvidence.map((item) => ({
       id: item.id,
       timestamp: item.timestamp,
       user: compact(item.userText, 1_000),
@@ -67,7 +69,7 @@ function classifierInput(evidence: TaskActivityEvidence[], calendarEvents: Calen
       participantIds: item.participantIds,
     })),
     calendarEvents: calendarEvents.map((event) => ({ id: `calendar:${event.calendarId}:${event.eventId}`, title: event.title, startAt: event.startAt, endAt: event.endAt })),
-    semanticMemories: memories.map((result) => ({
+    semanticMemories: memories.slice(0, 4).map((result) => ({
       id: result.id,
       timestamp: result.turnPair.timestamp,
       user: compact(result.turnPair.userText, 500),
@@ -85,11 +87,21 @@ function classifierInput(evidence: TaskActivityEvidence[], calendarEvents: Calen
 }
 
 function parseClassification(raw: string): RawClassification {
-  try {
-    return JSON.parse(raw.trim()) as RawClassification;
-  } catch {
-    throw new TaskClassificationError('The task classifier returned invalid JSON.');
+  const withoutThinking = raw.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '').trim();
+  const candidates = [withoutThinking];
+  const fenced = withoutThinking.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
+  if (fenced) candidates.push(fenced);
+  const firstBrace = withoutThinking.indexOf('{');
+  const lastBrace = withoutThinking.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) candidates.push(withoutThinking.slice(firstBrace, lastBrace + 1));
+  for (const candidate of [...new Set(candidates)]) {
+    try {
+      return JSON.parse(candidate) as RawClassification;
+    } catch {
+      // Try the next safe JSON envelope before reporting a classifier failure.
+    }
   }
+  throw new TaskClassificationError('The task classifier returned invalid JSON.');
 }
 
 function rawTitleProblems(parsed: RawClassification): string[] {
@@ -113,7 +125,8 @@ function reconcileTasks(
 
   const evidenceById = new Map(evidence.map((item) => [item.id, item]));
   const previousById = new Map((previous?.tasks ?? []).map((task) => [task.id, task]));
-  const calendarIds = new Set(calendarEvents.map((event) => `calendar:${event.calendarId}:${event.eventId}`));
+  const calendarById = new Map(calendarEvents.map((event) => [`calendar:${event.calendarId}:${event.eventId}`, event]));
+  const calendarIds = new Set(calendarById.keys());
   const claimedPreviousIds = new Set<string>();
   const tasks: TaskActivityItem[] = [];
 
@@ -127,16 +140,37 @@ function reconcileTasks(
       : [];
     if (!summary || evidenceIds.length === 0) throw new TaskClassificationError('The task classifier returned an incomplete task or cited invalid recent evidence.');
 
+    const rawCalendarIds = Array.isArray(value?.calendarEventIds) ? value.calendarEventIds.filter((id): id is string => typeof id === 'string') : [];
+    if (rawCalendarIds.some((id) => !calendarIds.has(id))) throw new TaskClassificationError('The task classifier cited an unknown calendar event.');
+
     const rawPreviousIds = Array.isArray(value?.previousTaskIds) ? value.previousTaskIds.filter((id): id is string => typeof id === 'string') : [];
     if (rawPreviousIds.some((id) => !previousById.has(id))) throw new TaskClassificationError('The task classifier cited an unknown existing task.');
-    const previousTaskIds = [...new Set(rawPreviousIds)];
+    let previousTaskIds = [...new Set(rawPreviousIds)];
+    if (previousTaskIds.length === 0) {
+      const evidenceIdSet = new Set(evidenceIds);
+      const calendarIdSet = new Set(rawCalendarIds);
+      const candidates = (previous?.tasks ?? []).filter((task) => {
+        if (claimedPreviousIds.has(task.id)) return false;
+        const exactTitle = normalizeTaskTitle(task.title) === normalizeTaskTitle(title);
+        const evidenceContinues = task.evidenceIds.some((id) => evidenceIdSet.has(id));
+        const calendarContinues = (task.calendarEventIds ?? []).some((id) => calendarIdSet.has(id))
+          || calendarEvents.some((event) => event.squirlTaskId === task.id && calendarIdSet.has(`calendar:${event.calendarId}:${event.eventId}`));
+        return exactTitle || evidenceContinues || calendarContinues;
+      });
+      if (candidates.length === 1) previousTaskIds = [candidates[0]!.id];
+    }
     if (previousTaskIds.some((id) => claimedPreviousIds.has(id))) throw new TaskClassificationError('The task classifier reused an existing task across multiple results.');
     previousTaskIds.forEach((id) => claimedPreviousIds.add(id));
 
-    const rawCalendarIds = Array.isArray(value?.calendarEventIds) ? value.calendarEventIds.filter((id): id is string => typeof id === 'string') : [];
-    if (rawCalendarIds.some((id) => !calendarIds.has(id))) throw new TaskClassificationError('The task classifier cited an unknown calendar event.');
     const continued = previousTaskIds.map((id) => previousById.get(id)!);
-    const calendarEventIds = [...new Set([...continued.flatMap((task) => task.calendarEventIds ?? []), ...rawCalendarIds])];
+    const continuedIdSet = new Set(previousTaskIds);
+    const calendarEventIds = [...new Set([...continued.flatMap((task) => task.calendarEventIds ?? []), ...rawCalendarIds])]
+      .filter((id) => {
+        const event = calendarById.get(id);
+        if (!event) return false;
+        if (!event.squirlTaskId) return true;
+        return continuedIdSet.has(event.squirlTaskId) || normalizeTaskTitle(event.title) === normalizeTaskTitle(title);
+      });
     const supporting = evidenceIds.map((id) => evidenceById.get(id)!);
     const lastActiveAt = supporting.map((item) => item.timestamp).sort().at(-1)!;
     const participantIds = [...new Set([...continued.flatMap((task) => task.participantIds), ...supporting.flatMap((item) => item.participantIds)])];

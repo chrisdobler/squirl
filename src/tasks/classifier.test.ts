@@ -49,6 +49,27 @@ describe('current task classifier', () => {
     expect(result).toMatchObject({ version: 3, tasks: [{ title: 'Improve durable task visibility' }] });
   });
 
+  it('bounds classifier context and accepts a safe JSON response envelope', async () => {
+    const manyEvidence = Array.from({ length: 10 }, (_, index) => ({
+      id: `u${index}`, timestamp: `2026-07-13T17:${String(40 + index).padStart(2, '0')}:00.000Z`,
+      userText: `task evidence ${index}`, participantIds: ['squirl'],
+    }));
+    const manyMemories = Array.from({ length: 6 }, (_, index) => ({
+      ...memory, id: `memory-${index}`, turnPair: { ...memory.turnPair, id: `memory-${index}` },
+    }));
+    const result = await classifyCurrentTasks({
+      evidence: manyEvidence, embedder, vectorStore: store(manyMemories), previous: null,
+      llm: { complete: async ({ messages }) => {
+        const input = JSON.parse(messages[0]!.content);
+        expect(input.recentEvidence).toHaveLength(8);
+        expect(input.recentEvidence[0].id).toBe('u2');
+        expect(input.semanticMemories).toHaveLength(4);
+        return '<think>internal notes</think>\n```json\n{"confidence":"high","tasks":[{"title":"Research durable voice options","summary":"The bounded classifier input retains the newest task evidence.","evidenceIds":["u9"],"previousTaskIds":[]}]}\n```';
+      } },
+    });
+    expect(result.tasks[0]?.title).toBe('Research durable voice options');
+  });
+
   it('requires high-confidence valid evidence', async () => {
     await expect(classifyCurrentTasks({ evidence, embedder, vectorStore: store([memory]), llm: llm('{"confidence":"low","tasks":[]}'), previous: null }))
       .rejects.toBeInstanceOf(TaskClassificationError);
@@ -69,6 +90,44 @@ describe('current task classifier', () => {
       id: 'task-stable', title: 'Improve durable task visibility',
       evidenceIds: ['older-evidence', 'u2'], participantIds: ['squirl', 'codex'],
     })]);
+  });
+
+  it('retains a unique canonical task id when the model omits continuity metadata', async () => {
+    const previous = {
+      version: 3 as const, generatedAt: evidence[0]!.timestamp, sourceWatermark: 'old',
+      tasks: [{
+        id: 'voice-task', title: 'Research open-source voice options', lastActiveAt: evidence[0]!.timestamp,
+        participantIds: ['squirl'], evidenceIds: ['u1'], calendarEventIds: ['calendar:primary:voice-event'],
+      }],
+    };
+    const calendarEvents = [{ calendarId: 'primary', eventId: 'voice-event', title: 'Voice research', startAt: '2026-07-13T17:00:00Z', endAt: '2026-07-13T18:00:00Z', allDay: false, squirlTaskId: 'voice-task' }];
+    const byTitle = await classifyCurrentTasks({
+      evidence, previous, calendarEvents,
+      llm: llm('{"confidence":"high","tasks":[{"title":"Research open-source voice options","summary":"The same voice research continues with updated sources.","evidenceIds":["u2"],"previousTaskIds":[]}]}'),
+    });
+    expect(byTitle.tasks[0]).toMatchObject({ id: 'voice-task', evidenceIds: ['u1', 'u2'] });
+
+    const byCalendar = await classifyCurrentTasks({
+      evidence, previous, calendarEvents,
+      llm: llm('{"confidence":"high","tasks":[{"title":"Compare self-hosted speech engines","summary":"The voice research is being refined around self-hosted engines.","evidenceIds":["u2"],"calendarEventIds":["calendar:primary:voice-event"],"previousTaskIds":[]}]}'),
+    });
+    expect(byCalendar.tasks[0]?.id).toBe('voice-task');
+  });
+
+  it('does not guess continuity when multiple existing tasks match', async () => {
+    const previous = {
+      version: 3 as const, generatedAt: evidence[0]!.timestamp, sourceWatermark: 'old',
+      tasks: [
+        { id: 'voice-a', title: 'Research open-source voice options', lastActiveAt: evidence[0]!.timestamp, participantIds: ['squirl'], evidenceIds: [] },
+        { id: 'voice-b', title: 'Research open-source voice options', lastActiveAt: evidence[0]!.timestamp, participantIds: ['codex'], evidenceIds: [] },
+      ],
+    };
+    const result = await classifyCurrentTasks({
+      evidence, previous,
+      llm: llm('{"confidence":"high","tasks":[{"title":"Research open-source voice options","summary":"A separately evidenced voice objective is active.","evidenceIds":["u2"],"previousTaskIds":[]}]}'),
+    });
+    expect(result.tasks[0]?.id).not.toBe('voice-a');
+    expect(result.tasks[0]?.id).not.toBe('voice-b');
   });
 
   it('merges duplicate existing tasks and supports distinct concurrent objectives', async () => {
@@ -123,5 +182,21 @@ describe('current task classifier', () => {
       evidence, calendarEvents, embedder, vectorStore: store([memory]), previous: null,
       llm: llm('{"confidence":"high","tasks":[{"title":"Improve Squirl sidebar tasks","summary":"The current Squirl sidebar work is being implemented.","evidenceIds":["u2"],"calendarEventIds":["calendar:primary:unknown"],"previousTaskIds":[]}]}'),
     })).rejects.toThrow('unknown calendar event');
+  });
+
+  it('prunes contradictory Squirl-managed calendar links from continued tasks', async () => {
+    const previous = {
+      version: 3 as const, generatedAt: evidence[0]!.timestamp, sourceWatermark: 'old',
+      tasks: [{ id: 'voice', title: 'Research open-source voice options', lastActiveAt: evidence[0]!.timestamp, participantIds: [], evidenceIds: ['u1'], calendarEventIds: ['calendar:primary:voice', 'calendar:primary:scrum'] }],
+    };
+    const calendarEvents = [
+      { calendarId: 'primary', eventId: 'voice', title: 'Research open-source voice options', startAt: '2026-07-13T18:00:00Z', endAt: '2026-07-13T18:30:00Z', allDay: false, squirlTaskId: 'voice-old' },
+      { calendarId: 'primary', eventId: 'scrum', title: 'Implement Scrum timeout fix', startAt: '2026-07-13T17:00:00Z', endAt: '2026-07-13T17:30:00Z', allDay: false, squirlTaskId: 'scrum' },
+    ];
+    const result = await classifyCurrentTasks({
+      evidence, previous, calendarEvents,
+      llm: llm('{"confidence":"high","tasks":[{"title":"Research open-source voice options","summary":"The existing voice research continues.","evidenceIds":["u2"],"calendarEventIds":["calendar:primary:scrum"],"previousTaskIds":["voice"]}]}'),
+    });
+    expect(result.tasks[0]?.calendarEventIds).toEqual(['calendar:primary:voice']);
   });
 });

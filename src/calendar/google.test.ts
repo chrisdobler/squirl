@@ -65,14 +65,24 @@ describe('GoogleCalendarClient', () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const request = async (input: string | URL | Request, init?: RequestInit) => {
       requests.push({ url: String(input), init });
-      return new Response(JSON.stringify({ id: 'created-event' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      return init?.method === 'DELETE'
+        ? new Response(null, { status: 204 })
+        : new Response(JSON.stringify({ id: 'created-event' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     };
     const tokens = { version: 1 as const, refreshToken: 'r', accessToken: 'a', expiresAt: '2099-01-01T00:00:00Z' };
     const client = new GoogleCalendarClient(() => 'client', () => 'client-secret', () => tokens, () => undefined, request as typeof fetch);
     expect(await client.createTaskEvent('primary', { taskId: 'task-1', title: 'Build Squirl', startAt: '2026-07-13T18:00:00Z', endAt: '2026-07-13T18:05:00Z' })).toBe('created-event');
     await client.updateTaskEvent('primary', 'created-event', { taskId: 'task-1', title: 'Build Squirl', startAt: '2026-07-13T18:00:00Z', endAt: '2026-07-13T18:10:00Z' });
-    expect(requests.map((entry) => entry.init?.method)).toEqual(['POST', 'PATCH']);
+    await client.deleteTaskEvent('primary', 'created-event');
+    expect(requests.map((entry) => entry.init?.method)).toEqual(['POST', 'PATCH', 'DELETE']);
     expect(String(requests[0]!.init?.body)).toContain('"squirlManaged":"true"');
     expect(String(requests[1]!.init?.body)).toContain('"squirlTaskId":"task-1"');
+  });
+
+  it('treats already-missing task events as idempotently deleted', async () => {
+    const request = vi.fn(async () => new Response(JSON.stringify({ error: { message: 'Gone' } }), { status: 404, headers: { 'Content-Type': 'application/json' } }));
+    const tokens = { version: 1 as const, refreshToken: 'r', accessToken: 'a', expiresAt: '2099-01-01T00:00:00Z' };
+    const client = new GoogleCalendarClient(() => 'client', () => 'client-secret', () => tokens, () => undefined, request as typeof fetch);
+    await expect(client.deleteTaskEvent('primary', 'missing')).resolves.toBeUndefined();
   });
 });
